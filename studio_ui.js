@@ -78,12 +78,15 @@ const StudioUI = (() => {
     });
   }
 
-  function renderRegionList(regions, onRemove, onPattern, onConstraint) {
+  function renderRegionList(regions, onRemove, onPattern, onEditConstraint) {
     const c = $('ocrRegionList'); $('ocrCount').textContent = regions.length;
     if (!regions.length) { c.innerHTML = '<div class="mini-empty">未登録（OCR領域モードで描画）</div>'; return; }
     c.innerHTML = '';
     regions.forEach((r, i) => {
       const col = REGION_COLORS[i % REGION_COLORS.length];
+      const rule = r.charRule || r.constraint;   // 旧形式(文字列)も互換表示
+      const active = CharConstraint.isActive(rule);
+      const consLabel = active ? `${CharConstraint.normalize(rule).len}桁: ${CharConstraint.describe(rule)}` : '設定する';
       const block = document.createElement('div'); block.className = 'mini-region';
       block.innerHTML = `
         <div class="mini-item">
@@ -92,13 +95,14 @@ const StudioUI = (() => {
           <span class="mpos">${r.x},${r.y} ${r.w}×${r.h}</span>
           <button class="btn-icon-sm" title="削除"><i class="fas fa-xmark"></i></button>
         </div>
-        <input class="mini-pattern mini-constraint" placeholder="文字制約(任意) 例: [AR]X{5}" title="位置別の文字種。9=数字 A=英大 X=英数 [AR]=指定 {n}=回数 +=以降全部" spellcheck="false">
+        <button class="mini-cons${active ? ' is-set' : ''}" type="button" title="桁数と各桁の文字を設定">
+          <i class="fas fa-keyboard"></i><span class="mini-cons-lbl">文字制約: </span><b class="mini-cons-val"></b>
+        </button>
         <input class="mini-pattern" placeholder="抽出パターン(任意) 例: [A-Z]{2}\\d{4}" spellcheck="false">`;
-      block.querySelector('button').addEventListener('click', () => onRemove(r.id));
-      const consInp = block.querySelector('.mini-constraint');
-      consInp.value = r.constraint || '';
-      consInp.addEventListener('change', () => onConstraint && onConstraint(r.id, consInp.value));
-      const inp = block.querySelector('.mini-pattern:not(.mini-constraint)');
+      block.querySelector('.btn-icon-sm').addEventListener('click', () => onRemove(r.id));
+      block.querySelector('.mini-cons-val').textContent = consLabel;
+      block.querySelector('.mini-cons').addEventListener('click', () => onEditConstraint && onEditConstraint(r.id));
+      const inp = block.querySelector('.mini-pattern');
       inp.value = r.pattern || '';
       inp.addEventListener('change', () => onPattern && onPattern(r.id, inp.value));
       c.appendChild(block);

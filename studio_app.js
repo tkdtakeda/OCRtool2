@@ -77,7 +77,7 @@
     $('regCanvas').style.display = 'none'; $('regCanvasPlaceholder').style.display = 'flex';
     $('editorEmpty').classList.add('hidden'); $('editorForm').classList.remove('hidden');
     UI.renderAnchorList(S.anchors, removeAnchor);
-    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, setRegionConstraint);
+    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
     refreshSteps();
     setTimeout(() => $('formNameInput').focus(), 50);
   }
@@ -95,7 +95,7 @@
     $('editorEmpty').classList.add('hidden'); $('editorForm').classList.remove('hidden');
     setDrawMode('anchor');
     UI.renderAnchorList(S.anchors, removeAnchor);
-    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, setRegionConstraint);
+    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
     await setReference(f.referenceImage.dataURL);
     refreshSteps();
   }
@@ -210,16 +210,22 @@
     } else {
       const p = S.pending;
       S.regions.push({ id: uid(), name, x: p.x, y: p.y, w: p.w, h: p.h });
-      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, setRegionConstraint);
+      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
     }
     S.pending = null; $('rectNameInput').value = ''; $('btnAddRect').disabled = true;
     redrawRegCanvas(); refreshSteps();
     UI.toast(`「${name}」を追加しました`, 'success', 1600);
   }
   function removeAnchor(id) { S.anchors = S.anchors.filter(a => a.id !== id); UI.renderAnchorList(S.anchors, removeAnchor); redrawRegCanvas(); refreshSteps(); }
-  function removeRegion(id) { S.regions = S.regions.filter(r => r.id !== id); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, setRegionConstraint); redrawRegCanvas(); refreshSteps(); }
+  function removeRegion(id) { S.regions = S.regions.filter(r => r.id !== id); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor); redrawRegCanvas(); refreshSteps(); }
   function setRegionPattern(id, val) { const r = S.regions.find(x => x.id === id); if (r) r.pattern = (val || '').trim(); }
-  function setRegionConstraint(id, val) { const r = S.regions.find(x => x.id === id); if (r) r.constraint = (val || '').trim(); }
+  function openRegionConstraintEditor(id) {
+    const r = S.regions.find(x => x.id === id); if (!r) return;
+    CharRuleEditor.open(r.name, r.charRule || r.constraint, rule => {
+      r.charRule = rule; delete r.constraint;   // 旧形式(文字列)は新形式へ移行
+      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
+    });
+  }
 
   /* ── 別画像から識別アンカーを自動配置 ───────────────── */
   async function addAnchorFromImage(dataURL) {
@@ -341,7 +347,7 @@
         S.regions = f.ocrRegions.map(r => ({ ...r, id: uid() }));
         $('formNameInput').value = f.name;
         applyLineRemovalToUI(f.lineRemoval); $('regPsm').value = String(f.ocrSettings.psm);
-        UI.renderAnchorList(S.anchors, removeAnchor); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, setRegionConstraint);
+        UI.renderAnchorList(S.anchors, removeAnchor); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
         await setReference(f.referenceImage.dataURL);
         UI.toast('サンプルレイアウトを読み込みました。確認して保存してください', 'info', 4000);
       });
@@ -473,7 +479,7 @@
     const ocrRegions = (form.ocrRegions || []).map(r => ({
       ...r,
       pattern: (S.patternOverrides[r.id] ?? r.pattern) || '',
-      constraint: (S.constraintOverrides[r.id] ?? r.constraint) || '',
+      charRule: (S.constraintOverrides[r.id] !== undefined ? S.constraintOverrides[r.id] : (r.charRule || r.constraint)) || null,
     }));
     return { ...form, ocrRegions, lineRemoval: collectDbgLineRemoval(), ocrSettings: collectDbgOcr() };
   }
@@ -483,7 +489,7 @@
     applyDbgToUI(form);
     S.patternOverrides = {};
     S.constraintOverrides = {};
-    (form.ocrRegions || []).forEach(r => { S.patternOverrides[r.id] = r.pattern || ''; S.constraintOverrides[r.id] = r.constraint || ''; });
+    (form.ocrRegions || []).forEach(r => { S.patternOverrides[r.id] = r.pattern || ''; S.constraintOverrides[r.id] = (r.charRule || r.constraint) || null; });
     const sel = $('dbgPatRegion'); sel.innerHTML = '';
     (form.ocrRegions || []).forEach(r => { const o = document.createElement('option'); o.value = r.id; o.textContent = r.name; sel.appendChild(o); });
     loadDbgPatternForSelected();
@@ -492,15 +498,23 @@
   function loadDbgPatternForSelected() {
     const id = $('dbgPatRegion').value;
     $('dbgPattern').value = S.patternOverrides[id] || '';
-    $('dbgConstraint').value = S.constraintOverrides[id] || '';
+    updateDbgConsSummary();
+  }
+  function updateDbgConsSummary() {
+    const id = $('dbgPatRegion').value;
+    const rule = S.constraintOverrides[id];
+    const active = CharConstraint.isActive(rule);
+    $('dbgConsSummary').textContent = active ? `${CharConstraint.normalize(rule).len}桁: ${CharConstraint.describe(rule)}` : '制約なし';
+    $('dbgConsSummary').classList.toggle('is-set', active);
+  }
+  function openDbgConstraintEditor() {
+    const id = $('dbgPatRegion').value; if (!id) return UI.toast('対象フィールドがありません', 'warning');
+    const name = $('dbgPatRegion').selectedOptions[0]?.textContent || '';
+    CharRuleEditor.open(name, S.constraintOverrides[id], rule => { S.constraintOverrides[id] = rule; updateDbgConsSummary(); });
   }
   function syncDbgPattern() {
     const id = $('dbgPatRegion').value;
     if (id) S.patternOverrides[id] = $('dbgPattern').value.trim();
-  }
-  function syncDbgConstraint() {
-    const id = $('dbgPatRegion').value;
-    if (id) S.constraintOverrides[id] = $('dbgConstraint').value.trim();
   }
   function collectDbgOcr() {
     return { psm: parseInt($('dbgPsm').value, 10), lang: $('dbgLang').value, whitelist: $('dbgWhitelist').value, normalize: $('dbgNormalize').checked, normalizeKanji: $('dbgNormalizeKanji').checked };
@@ -550,11 +564,12 @@
     const form = S.forms.find(f => f.id === S.recogFormId); if (!form) return UI.toast('対象帳票がありません', 'warning');
     form.lineRemoval = collectDbgLineRemoval();
     form.ocrSettings = collectDbgOcr();
-    form.ocrRegions = (form.ocrRegions || []).map(r => ({
-      ...r,
-      pattern: (S.patternOverrides[r.id] ?? r.pattern) || '',
-      constraint: (S.constraintOverrides[r.id] ?? r.constraint) || '',
-    }));
+    form.ocrRegions = (form.ocrRegions || []).map(r => {
+      const out = { ...r, pattern: (S.patternOverrides[r.id] ?? r.pattern) || '' };
+      out.charRule = (S.constraintOverrides[r.id] !== undefined ? S.constraintOverrides[r.id] : (r.charRule || r.constraint)) || null;
+      delete out.constraint;   // 旧形式は破棄
+      return out;
+    });
     try { await FormDB.putForm(form); await loadForms(); UI.toast(`「${form.name}」に設定を保存しました`, 'success'); }
     catch (e) { UI.toast('保存に失敗しました: ' + e.message, 'error'); }
   }
@@ -575,7 +590,8 @@
     const patterns = {}, constraints = {};
     if (form) (form.ocrRegions || []).forEach(r => {
       const p = (S.patternOverrides[r.id] ?? r.pattern) || ''; if (p) patterns[r.name] = p;
-      const cn = (S.constraintOverrides[r.id] ?? r.constraint) || ''; if (cn) constraints[r.name] = cn;
+      const cn = (S.constraintOverrides[r.id] !== undefined ? S.constraintOverrides[r.id] : (r.charRule || r.constraint));
+      if (CharConstraint.isActive(cn)) constraints[r.name] = CharConstraint.normalize(cn);
     });
     return { ocrSettings: collectDbgOcr(), lineRemoval: collectDbgLineRemoval(), patterns, constraints };
   }
@@ -758,14 +774,8 @@
       if (btn.dataset.tok === 'CLR') inp.value = ''; else inp.value += btn.dataset.tok;
       syncDbgPattern();
     });
-    /* フィールド文字制約編集 */
-    $('dbgConstraint').addEventListener('input', syncDbgConstraint);
-    $('dbgConsQuick').addEventListener('click', e => {
-      const btn = e.target.closest('button[data-tok]'); if (!btn) return;
-      const inp = $('dbgConstraint');
-      if (btn.dataset.tok === 'CLR') inp.value = ''; else inp.value += btn.dataset.tok;
-      syncDbgConstraint();
-    });
+    /* フィールド文字制約編集（ビジュアルエディタを開く） */
+    $('dbgConsEdit').addEventListener('click', openDbgConstraintEditor);
     $('debugToggle').addEventListener('click', () => {
       const collapsed = $('debugBody').classList.toggle('is-collapsed');
       $('debugToggle').classList.toggle('is-collapsed', collapsed);
@@ -801,6 +811,7 @@
   /* ── Init ───────────────────────────────────────────── */
   function init() {
     initAccordions(); initRegSliders(); initRegCanvasEvents(); initDbgControls(); initRrPan();
+    CharRuleEditor.init();
 
     /* モード切替 */
     $('modeRegister').addEventListener('click', () => setMode('register'));

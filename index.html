@@ -223,7 +223,7 @@
           <div class="list-block">
             <div class="list-hdr"><span class="dot dot-ocr"></span> OCR領域 <span id="ocrCount" class="list-count">0</span></div>
             <div id="ocrRegionList" class="mini-list"><div class="mini-empty">未登録</div></div>
-            <p class="hint-text">各領域に <b>文字制約</b>（位置別の字種。例 <code>[AR]X{5}</code> ＝1文字目A/R・2〜6文字目英数字）と <b>抽出パターン</b>（正規表現）を任意指定できます。制約は字種を制限しOCR誤認を補正します。</p>
+            <p class="hint-text">各領域の <b>「文字制約」ボタン</b>から、桁数と各桁に使える文字をビジュアルに指定できます（例：1桁目=A/R、2桁目=英数だがOを除く）。字種を制限しOCR誤認を補正します。<b>抽出パターン</b>（正規表現・任意）も併用可。</p>
           </div>
         </div>
       </div>
@@ -322,18 +322,13 @@
           <div class="debug-sec">
             <div class="debug-sec-ttl"><i class="fas fa-scissors"></i> フィールド抽出（文字数・位置別文字）</div>
             <div class="prow"><label class="plabel">対象フィールド</label><select id="dbgPatRegion" class="pselect"></select></div>
-            <div class="prow"><label class="plabel">文字制約（位置別）</label><input type="text" id="dbgConstraint" class="pinput" placeholder="例 [AR]X{5}" spellcheck="false"></div>
-            <div class="wl-quick" id="dbgConsQuick">
-              <button type="button" class="btn btn-ghost btn-sm" data-tok="9">数字</button>
-              <button type="button" class="btn btn-ghost btn-sm" data-tok="A">英大</button>
-              <button type="button" class="btn btn-ghost btn-sm" data-tok="X">英数</button>
-              <button type="button" class="btn btn-ghost btn-sm" data-tok="[AR]">[AR]</button>
-              <button type="button" class="btn btn-ghost btn-sm" data-tok="*">任意</button>
-              <button type="button" class="btn btn-ghost btn-sm" data-tok="{5}">×5</button>
-              <button type="button" class="btn btn-ghost btn-sm" data-tok="+">以降全部</button>
-              <button type="button" class="btn btn-ghost btn-sm" data-tok="CLR">クリア</button>
+            <div class="prow"><label class="plabel">文字制約（桁別）</label>
+              <div class="cons-field">
+                <span id="dbgConsSummary" class="cons-summary">制約なし</span>
+                <button type="button" id="dbgConsEdit" class="btn btn-outline btn-sm"><i class="fas fa-keyboard"></i> 編集</button>
+              </div>
             </div>
-            <p class="hint-text">位置ごとの字種を左から指定し、字種制限＋誤認補正（O↔0 等）を行います。<b>9</b>=数字 <b>A</b>=英大 <b>a</b>=英小 <b>X</b>=英数 <b>*</b>=任意 <b>[AR]</b>=指定文字 <b>{n}</b>=回数 <b>+</b>=以降全部。例「1文字目はA,R / 2〜6文字目は英数字」→ <code>[AR]X{5}</code>。</p>
+            <p class="hint-text">桁数と各桁に使える文字をビジュアルに設定します（例「1桁目=A/R、2桁目=英数だがOを除く」）。字種制限＋誤認補正（O↔0 等）が掛かります。</p>
             <div class="prow"><label class="plabel">抽出パターン</label><input type="text" id="dbgPattern" class="pinput" placeholder="例 [A-Z]{2}\d{4}" spellcheck="false"></div>
             <div class="wl-quick" id="dbgPatQuick">
               <button type="button" class="btn btn-ghost btn-sm" data-tok="[A-Z]">英大</button>
@@ -496,7 +491,7 @@
           <li><b>言語</b>：既定は英語。日本語ラベルを含む領域は <b>「日本語＋英語」</b>を選択してください（初回は言語データのDLに時間がかかります）</li>
           <li>数字が<b>丸数字（①②⑨）</b>になるのは、セル枠＋日本語モデルが原因。対策は <b>文字ホワイトリスト</b>（例 <code>0123456789</code>）で字種を限定 ＋ <b>正規化</b>（①→1・全角→半角）をON。さらに ①OCR領域から「注文No」など<b>日本語ラベルを除外</b>、②セル区切りの<b>縦罫線を除去</b>、③PSMを「単一行/単一単語」に、④数字欄は言語を<b>英語</b>に、も有効</li>
           <li><b>抽出パターン（正規表現）</b>：各OCR領域に書式を指定すると、はみ出した文字を無視して該当部分だけ取り出せます。例 <code>[A-Z]{2}\d{4}</code> なら「注文No AK1029 控」→「AK1029」。固定接頭辞＋固定桁数の番号欄に最適（登録画面のOCR領域リストで設定）</li>
-          <li><b>文字制約（位置別）</b>：OCR領域ごとに「1文字目はA/R、2〜6文字目は英数字」のような<b>位置別の字種</b>を指定できます。記法は <b>9</b>=数字 <b>A</b>=英大 <b>a</b>=英小 <b>X</b>=英数(大) <b>*</b>=任意 <b>[AR]</b>=指定文字 <b>{n}</b>=回数 <b>+</b>=以降全部。例 <code>[AR]X{5}</code>。この制約から<b>ホワイトリストを自動生成して字種を制限</b>し、さらに<b>位置別に誤認を補正</b>（数字欄の O→0・I→1、英字欄の 0→O 等）します。制約を満たせない結果にはフィールドに「制約」警告を表示。登録画面のOCR領域リスト、またはデバッグパネルの「文字制約（位置別）」で設定できます</li>
+          <li><b>文字制約（桁別）</b>：OCR領域ごとに <b>「文字制約」ボタン</b>からビジュアルエディタを開き、<b>①桁数を決める → ②各桁に使える文字を選ぶ</b>だけで制約を作れます（記号や正規表現の知識は不要）。各桁は「数字／英大／英数…」のボタンで一括指定し、パレットの文字をクリックして微調整できます（例「2桁目は英数だが <b>O</b> を除外」）。この制約から<b>ホワイトリストを自動生成して字種を制限</b>し、さらに<b>桁ごとに誤認を補正</b>（数字桁の O→0・I→1、英字桁の 0→O 等）します。制約を満たせない結果にはフィールドに「制約」警告を表示。設定は登録画面のOCR領域リスト、またはデバッグパネルの「文字制約（桁別）」から行えます</li>
           <li><b>切り取り倍率・位置ずれの補正</b>：マッチングは<b>スケール探索</b>に対応し、切り取り方で帳票の写る大きさが変わっても一致します。認識時にアンカーの一致位置から<b>相似変換（拡大率＋平行移動）</b>を推定してOCR領域へ反映。<b>アンカーを2つ以上</b>登録すると拡大率の推定が安定します（1つでも検出スケールで補正）。結果ヘッダーに「傾き／倍率／アンカー点数」を表示するので、補正が効いているか確認できます</li>
           <li>罫線除去後プレビューは右上のボタンで<b>拡大</b>・ドラッグで<b>移動</b>できます</li>
         </ul>
@@ -530,6 +525,63 @@
   </div>
 </div>
 
+<!-- 文字制約 ビジュアルエディタ -->
+<div class="modal-overlay hidden" id="crModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr">
+      <h2><i class="fas fa-keyboard"></i> 文字制約エディタ <span id="crFieldName" class="cr-field-name"></span></h2>
+      <button class="modal-close" id="crClose"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <p class="hint-text">①まず<b>文字数（桁数）</b>を決め、②各桁の<b>タイルを選んで使える文字</b>を指定します。字種ボタンで一括指定し、パレットの文字をクリックで除外/追加できます（例：2桁目で <b>O</b> を消す）。</p>
+
+      <!-- ① 桁数 -->
+      <div class="cr-lenctl">
+        <span class="cr-lenctl-lbl"><i class="fas fa-ruler-horizontal"></i> 文字数（桁数）</span>
+        <button type="button" id="crLenMinus" class="cr-stepper" title="減らす">−</button>
+        <input type="number" id="crLen" class="cr-len-input" min="0" max="20" value="4">
+        <button type="button" id="crLenPlus" class="cr-stepper" title="増やす">＋</button>
+        <span class="cr-len-presets" id="crLenPresets">
+          <button type="button" data-len="4">4</button>
+          <button type="button" data-len="6">6</button>
+          <button type="button" data-len="8">8</button>
+          <button type="button" data-len="10">10</button>
+        </span>
+        <button type="button" id="crNoConstraint" class="btn btn-ghost btn-sm">制約なし</button>
+      </div>
+
+      <!-- ② 桁タイル -->
+      <div class="cr-positions" id="crPositions"></div>
+
+      <!-- ③ 選択桁の文字パレット -->
+      <div class="cr-editor" id="crEditor">
+        <div class="cr-editor-hdr"><b id="crEditTitle">1桁目</b> に使える文字</div>
+        <div class="cr-basetypes" id="crBaseTypes">
+          <button type="button" data-base="digit">数字</button>
+          <button type="button" data-base="upper">英大</button>
+          <button type="button" data-base="lower">英小</button>
+          <button type="button" data-base="alnum">英数</button>
+          <button type="button" data-base="any">任意</button>
+          <span class="cr-bt-spacer"></span>
+          <button type="button" id="crToggleLower" class="cr-bt-lower" title="小文字パレットの表示切替">abc 小文字</button>
+        </div>
+        <div class="cr-palette" id="crPalette"></div>
+        <p class="cr-any-note" id="crAnyNote">任意（すべて許可）の状態です。特定の文字だけ除外したいときは、上の字種ボタンを選んでからパレットでクリックしてください。</p>
+        <div class="cr-editor-acts">
+          <span class="cr-pos-summary" id="crPosSummary"></span>
+          <button type="button" id="crApplyAll" class="btn btn-ghost btn-sm"><i class="fas fa-clone"></i> この桁の設定を全桁へ</button>
+        </div>
+      </div>
+
+      <div class="cr-preview" id="crPreview"></div>
+    </div>
+    <div class="cr-ftr">
+      <button type="button" id="crCancel" class="btn btn-ghost">キャンセル</button>
+      <button type="button" id="crSave" class="btn btn-primary"><i class="fas fa-check"></i> この内容で設定</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div id="toastContainer" class="toast-container"></div>
 
@@ -552,6 +604,7 @@
 <script src="sample_forms.js"></script>
 <!-- ui / controller -->
 <script src="studio_ui.js"></script>
+<script src="charrule_editor.js"></script>
 <script src="studio_app.js"></script>
 </body>
 </html>
