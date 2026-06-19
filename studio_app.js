@@ -504,13 +504,26 @@
     const id = $('dbgPatRegion').value;
     const rule = S.constraintOverrides[id];
     const active = CharConstraint.isActive(rule);
-    $('dbgConsSummary').textContent = active ? `${CharConstraint.normalize(rule).len}桁: ${CharConstraint.describe(rule)}` : '制約なし';
+    $('dbgConsSummary').textContent = active ? `${CharConstraint.lengthLabel(rule)}: ${CharConstraint.describe(rule)}` : '制約なし';
     $('dbgConsSummary').classList.toggle('is-set', active);
   }
   function openDbgConstraintEditor() {
     const id = $('dbgPatRegion').value; if (!id) return UI.toast('対象フィールドがありません', 'warning');
     const name = $('dbgPatRegion').selectedOptions[0]?.textContent || '';
-    CharRuleEditor.open(name, S.constraintOverrides[id], rule => { S.constraintOverrides[id] = rule; updateDbgConsSummary(); });
+    CharRuleEditor.open(name, S.constraintOverrides[id], async rule => {
+      S.constraintOverrides[id] = rule;
+      updateDbgConsSummary();
+      /* 文字制約は構造的設定のため、編集と同時に帳票へ反映・永続化する
+         （再実行で初期化されて「保存されない」ように見える問題を防ぐ）。
+         デバッグパネルに読み込み中の帳票を対象にする。 */
+      const form = S.forms.find(f => f.id === (S.dbgLoadedFormId || S.recogFormId));
+      const reg = form && (form.ocrRegions || []).find(r => r.id === id);
+      if (reg) {
+        reg.charRule = rule; delete reg.constraint;
+        try { await FormDB.putForm(form); UI.toast('文字制約を帳票に保存しました', 'success', 1800); }
+        catch (e) { UI.toast('保存に失敗しました: ' + e.message, 'error'); }
+      }
+    });
   }
   function syncDbgPattern() {
     const id = $('dbgPatRegion').value;

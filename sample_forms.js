@@ -137,14 +137,16 @@ const SampleForms = (() => {
         dataURL: url(crop(ref, r.x, r.y, r.w, r.h)),
         w: r.w, h: r.h, refX: r.x, refY: r.y,
       }));
-      /* charRule: 桁別の文字制約（字種制限＋誤認補正）のデモ
-         番号 例 PO-2024-0001（英大2 - 数字4 - 数字4）/ 日付 例 2024-06-15（数字-数字-数字） */
+      /* charRule: 文字制約のデモ
+         番号 固定長 例 PO-2024-0001（英大2 - 数字4 - 数字4）
+         日付 固定長 例 2024-06-15（数字-数字-数字）
+         担当 可変長 英大（氏名のため桁数は不問） */
       const U = CharConstraint.presetSet('upper');
       const D = CharConstraint.presetSet('digit');
       const ocrRegions = [
         { id: uid(), name: '番号', x: 105, y: 78,  w: 170, h: 18, charRule: { len: 12, pos: [U, U, '-', D, D, D, D, '-', D, D, D, D] } },
         { id: uid(), name: '日付', x: 80,  y: 104, w: 110, h: 18, charRule: { len: 10, pos: [D, D, D, D, '-', D, D, '-', D, D] } },
-        { id: uid(), name: '担当', x: 246, y: 104, w: 140, h: 18 },
+        { id: uid(), name: '担当', x: 246, y: 104, w: 140, h: 18, charRule: { variable: true, set: U } },
       ];
       return {
         id: uid(),

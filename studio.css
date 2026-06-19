@@ -297,7 +297,14 @@
 .cr-len-presets { display: flex; gap: 4px; }
 .cr-len-presets button { min-width: 28px; height: 26px; border-radius: var(--r-sm); border: 1px solid var(--c-border); background: #fff; font-size: .74rem; color: var(--c-text-2); cursor: pointer; }
 .cr-len-presets button:hover { background: var(--c-pri-lt); border-color: var(--c-pri-mid); color: var(--c-pri); }
-#crNoConstraint { margin-left: auto; }
+.cr-varbtn { padding: 4px 12px; height: 28px; border-radius: 999px; border: 1.5px solid var(--c-border-dk); background: #fff; font-size: .74rem; font-weight: 700; color: var(--c-text-2); cursor: pointer; }
+.cr-varbtn:hover { border-color: var(--c-pri-mid); background: var(--c-pri-lt); }
+.cr-varbtn.is-active { background: var(--c-pri); border-color: var(--c-pri); color: #fff; }
+#crVarToggle { margin-left: auto; }
+#crNoConstraint { margin-left: 4px; }
+.cr-var-note { display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--c-pri); font-weight: 600; border-style: solid; border-color: var(--c-pri-mid); background: var(--c-pri-lt); }
+.cr-extract { display: flex; align-items: flex-start; gap: 8px; margin: 11px 0 0; padding: 9px 11px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); font-size: .76rem; color: var(--c-text); line-height: 1.5; cursor: pointer; }
+.cr-extract input { margin-top: 2px; width: 15px; height: 15px; flex-shrink: 0; accent-color: var(--c-pri); }
 
 /* ② 桁タイル（左→右に空間配置） */
 .cr-positions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }

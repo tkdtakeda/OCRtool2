@@ -86,7 +86,7 @@ const StudioUI = (() => {
       const col = REGION_COLORS[i % REGION_COLORS.length];
       const rule = r.charRule || r.constraint;   // 旧形式(文字列)も互換表示
       const active = CharConstraint.isActive(rule);
-      const consLabel = active ? `${CharConstraint.normalize(rule).len}桁: ${CharConstraint.describe(rule)}` : '設定する';
+      const consLabel = active ? `${CharConstraint.lengthLabel(rule)}: ${CharConstraint.describe(rule)}` : '設定する';
       const block = document.createElement('div'); block.className = 'mini-region';
       block.innerHTML = `
         <div class="mini-item">
