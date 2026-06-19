@@ -127,6 +127,7 @@
 .mini-pattern { width: 100%; padding: 3px 7px; border: 1px solid var(--c-border); border-radius: var(--r-sm); font-family: 'IBM Plex Mono', monospace; font-size: .68rem; color: var(--c-text); background: #fff; }
 .mini-pattern:focus { outline: none; border-color: var(--c-pri); box-shadow: 0 0 0 2px var(--c-pri-lt); }
 .mini-pattern::placeholder { color: var(--c-text-3); }
+.mini-constraint { border-left: 3px solid var(--c-pri); }
 
 /* ════════════════════════════════════════════════════
    OCR実行ビュー

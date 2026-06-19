@@ -191,9 +191,12 @@ const Recognizer = (() => {
         fields.push({ name: region.name, text: '', confidence: 0, error: '領域の切り出しに失敗しました' });
         continue;
       }
+      /* 領域ごとの文字制約があれば、そこから導いた字種でOCR出力を制限
+         （無ければ帳票共通のホワイトリストを使用） */
+      const regWhitelist = (region.constraint && CharConstraint.derivedWhitelist(region.constraint)) || whitelist;
       const res = await OcrProcessor.recognize(cropCanvas, psm, prog => {
         cb.onOcr && cb.onOcr(i, regions.length, region.name, prog.status, prog.progress);
-      }, lang, whitelist);
+      }, lang, regWhitelist);
       const conf = (!res.error && res.words.length)
         ? Math.round(res.words.reduce((sum, w) => sum + w.confidence, 0) / res.words.length)
         : 0;
@@ -202,12 +205,17 @@ const Recognizer = (() => {
       if (doKanji) text = OcrProcessor.kanjiToNum(text);
       const raw = text;
       if (region.pattern) text = applyPattern(text, region.pattern);   // 期待書式で抽出
+      /* 文字制約による位置別チェック＋誤認補正（O↔0 等） */
+      let constraintValid = true;
+      if (region.constraint) { const cc = CharConstraint.apply(text, region.constraint); text = cc.text; constraintValid = cc.valid; }
       fields.push({
         name: region.name,
         text,
         raw,
         confidence: conf,
         error: res.error || null,
+        constraint: region.constraint || '',
+        constraintValid,
         cropDataURL: cropCanvas.toDataURL('image/png'),
       });
     }
@@ -228,19 +236,22 @@ const Recognizer = (() => {
    */
   async function comparePsm(resultCanvas, transform, region, psmList, opts, onProg) {
     const { lang = 'eng', whitelist = '', normalize = true, kanji = false } = opts || {};
+    /* 領域の文字制約を PSM 比較にも反映（字種制限＋位置別補正） */
+    const regWhitelist = (region.constraint && CharConstraint.derivedWhitelist(region.constraint)) || whitelist;
     const crop = LineRemovalProcessor.extractRect(resultCanvas, mapRect(region, transform));
     const out = [];
     for (let i = 0; i < psmList.length; i++) {
       const psm = psmList[i];
       if (onProg) onProg(i, psmList.length, psm);
       if (!crop) { out.push({ psm, text: '', confidence: 0, error: '領域切り出し失敗' }); continue; }
-      const res = await OcrProcessor.recognize(crop, psm, () => {}, lang, whitelist);
+      const res = await OcrProcessor.recognize(crop, psm, () => {}, lang, regWhitelist);
       const conf = (!res.error && res.words.length)
         ? Math.round(res.words.reduce((s, w) => s + w.confidence, 0) / res.words.length) : 0;
       let text = (res.fullText || '').trim();
       if (normalize) text = OcrProcessor.normalize(text);
       if (kanji) text = OcrProcessor.kanjiToNum(text);
       if (region.pattern) text = applyPattern(text, region.pattern);
+      if (region.constraint) text = CharConstraint.apply(text, region.constraint).text;
       out.push({ psm, text, confidence: conf, error: res.error || null });
     }
     return out;

@@ -137,10 +137,12 @@ const SampleForms = (() => {
         dataURL: url(crop(ref, r.x, r.y, r.w, r.h)),
         w: r.w, h: r.h, refX: r.x, refY: r.y,
       }));
+      /* constraint: 位置別の文字制約（字種制限＋誤認補正）のデモ
+         番号 例 PO-2024-0001 / 日付 例 2024-06-15 / 担当 例 TANAKA */
       const ocrRegions = [
-        { id: uid(), name: '番号',   x: 105, y: 78,  w: 170, h: 18 },
-        { id: uid(), name: '日付',   x: 80,  y: 104, w: 110, h: 18 },
-        { id: uid(), name: '担当',   x: 246, y: 104, w: 140, h: 18 },
+        { id: uid(), name: '番号',   x: 105, y: 78,  w: 170, h: 18, constraint: 'AA-9999-9999' },
+        { id: uid(), name: '日付',   x: 80,  y: 104, w: 110, h: 18, constraint: '9999-99-99' },
+        { id: uid(), name: '担当',   x: 246, y: 104, w: 140, h: 18, constraint: 'A+' },
       ];
       return {
         id: uid(),

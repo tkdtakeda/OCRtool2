@@ -26,7 +26,7 @@
     /* 認識 */
     recogCanvas: null, lastClassify: null,
     recogFormId: null, recogMatchInfo: null, recogResult: null, rrZoom: 1,
-    dbgLoadedFormId: null, patternOverrides: {},
+    dbgLoadedFormId: null, patternOverrides: {}, constraintOverrides: {},
   };
 
   /* PSM 比較用パターン */
@@ -77,7 +77,7 @@
     $('regCanvas').style.display = 'none'; $('regCanvasPlaceholder').style.display = 'flex';
     $('editorEmpty').classList.add('hidden'); $('editorForm').classList.remove('hidden');
     UI.renderAnchorList(S.anchors, removeAnchor);
-    UI.renderRegionList(S.regions, removeRegion, setRegionPattern);
+    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, setRegionConstraint);
     refreshSteps();
     setTimeout(() => $('formNameInput').focus(), 50);
   }
@@ -95,7 +95,7 @@
     $('editorEmpty').classList.add('hidden'); $('editorForm').classList.remove('hidden');
     setDrawMode('anchor');
     UI.renderAnchorList(S.anchors, removeAnchor);
-    UI.renderRegionList(S.regions, removeRegion, setRegionPattern);
+    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, setRegionConstraint);
     await setReference(f.referenceImage.dataURL);
     refreshSteps();
   }
@@ -210,15 +210,16 @@
     } else {
       const p = S.pending;
       S.regions.push({ id: uid(), name, x: p.x, y: p.y, w: p.w, h: p.h });
-      UI.renderRegionList(S.regions, removeRegion, setRegionPattern);
+      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, setRegionConstraint);
     }
     S.pending = null; $('rectNameInput').value = ''; $('btnAddRect').disabled = true;
     redrawRegCanvas(); refreshSteps();
     UI.toast(`「${name}」を追加しました`, 'success', 1600);
   }
   function removeAnchor(id) { S.anchors = S.anchors.filter(a => a.id !== id); UI.renderAnchorList(S.anchors, removeAnchor); redrawRegCanvas(); refreshSteps(); }
-  function removeRegion(id) { S.regions = S.regions.filter(r => r.id !== id); UI.renderRegionList(S.regions, removeRegion, setRegionPattern); redrawRegCanvas(); refreshSteps(); }
+  function removeRegion(id) { S.regions = S.regions.filter(r => r.id !== id); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, setRegionConstraint); redrawRegCanvas(); refreshSteps(); }
   function setRegionPattern(id, val) { const r = S.regions.find(x => x.id === id); if (r) r.pattern = (val || '').trim(); }
+  function setRegionConstraint(id, val) { const r = S.regions.find(x => x.id === id); if (r) r.constraint = (val || '').trim(); }
 
   /* ── 別画像から識別アンカーを自動配置 ───────────────── */
   async function addAnchorFromImage(dataURL) {
@@ -340,7 +341,7 @@
         S.regions = f.ocrRegions.map(r => ({ ...r, id: uid() }));
         $('formNameInput').value = f.name;
         applyLineRemovalToUI(f.lineRemoval); $('regPsm').value = String(f.ocrSettings.psm);
-        UI.renderAnchorList(S.anchors, removeAnchor); UI.renderRegionList(S.regions, removeRegion, setRegionPattern);
+        UI.renderAnchorList(S.anchors, removeAnchor); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, setRegionConstraint);
         await setReference(f.referenceImage.dataURL);
         UI.toast('サンプルレイアウトを読み込みました。確認して保存してください', 'info', 4000);
       });
@@ -355,7 +356,7 @@
 
   function loadRecogImage(canvas) {
     S.recogCanvas = canvas; S.lastClassify = null;
-    S.recogFormId = null; S.recogMatchInfo = null; S.recogResult = null; S.dbgLoadedFormId = null; S.patternOverrides = {};
+    S.recogFormId = null; S.recogMatchInfo = null; S.recogResult = null; S.dbgLoadedFormId = null; S.patternOverrides = {}; S.constraintOverrides = {};
     $('recogPreview').src = canvas.toDataURL('image/png'); $('recogPreview').style.display = 'block'; $('recogDropHint').style.display = 'none';
     $('btnRunRecognize').disabled = false;
     $('decisionPanel').classList.add('hidden'); $('recogResultArea').classList.add('hidden'); $('debugPanel').classList.add('hidden');
@@ -468,16 +469,21 @@
   /* デバッグパネル設定で上書きした帳票を返す */
   function effectiveForm() {
     const form = S.forms.find(f => f.id === S.recogFormId); if (!form) return null;
-    /* デバッグ編集中の抽出パターンを各領域へ反映 */
-    const ocrRegions = (form.ocrRegions || []).map(r => ({ ...r, pattern: (S.patternOverrides[r.id] ?? r.pattern) || '' }));
+    /* デバッグ編集中の抽出パターン・文字制約を各領域へ反映 */
+    const ocrRegions = (form.ocrRegions || []).map(r => ({
+      ...r,
+      pattern: (S.patternOverrides[r.id] ?? r.pattern) || '',
+      constraint: (S.constraintOverrides[r.id] ?? r.constraint) || '',
+    }));
     return { ...form, ocrRegions, lineRemoval: collectDbgLineRemoval(), ocrSettings: collectDbgOcr() };
   }
 
-  /* 帳票の設定をデバッグパネル全体（OCR/罫線/抽出パターン）へ読み込む */
+  /* 帳票の設定をデバッグパネル全体（OCR/罫線/抽出パターン/文字制約）へ読み込む */
   function loadFormIntoDebug(form) {
     applyDbgToUI(form);
     S.patternOverrides = {};
-    (form.ocrRegions || []).forEach(r => { S.patternOverrides[r.id] = r.pattern || ''; });
+    S.constraintOverrides = {};
+    (form.ocrRegions || []).forEach(r => { S.patternOverrides[r.id] = r.pattern || ''; S.constraintOverrides[r.id] = r.constraint || ''; });
     const sel = $('dbgPatRegion'); sel.innerHTML = '';
     (form.ocrRegions || []).forEach(r => { const o = document.createElement('option'); o.value = r.id; o.textContent = r.name; sel.appendChild(o); });
     loadDbgPatternForSelected();
@@ -486,10 +492,15 @@
   function loadDbgPatternForSelected() {
     const id = $('dbgPatRegion').value;
     $('dbgPattern').value = S.patternOverrides[id] || '';
+    $('dbgConstraint').value = S.constraintOverrides[id] || '';
   }
   function syncDbgPattern() {
     const id = $('dbgPatRegion').value;
     if (id) S.patternOverrides[id] = $('dbgPattern').value.trim();
+  }
+  function syncDbgConstraint() {
+    const id = $('dbgPatRegion').value;
+    if (id) S.constraintOverrides[id] = $('dbgConstraint').value.trim();
   }
   function collectDbgOcr() {
     return { psm: parseInt($('dbgPsm').value, 10), lang: $('dbgLang').value, whitelist: $('dbgWhitelist').value, normalize: $('dbgNormalize').checked, normalizeKanji: $('dbgNormalizeKanji').checked };
@@ -539,7 +550,11 @@
     const form = S.forms.find(f => f.id === S.recogFormId); if (!form) return UI.toast('対象帳票がありません', 'warning');
     form.lineRemoval = collectDbgLineRemoval();
     form.ocrSettings = collectDbgOcr();
-    form.ocrRegions = (form.ocrRegions || []).map(r => ({ ...r, pattern: (S.patternOverrides[r.id] ?? r.pattern) || '' }));
+    form.ocrRegions = (form.ocrRegions || []).map(r => ({
+      ...r,
+      pattern: (S.patternOverrides[r.id] ?? r.pattern) || '',
+      constraint: (S.constraintOverrides[r.id] ?? r.constraint) || '',
+    }));
     try { await FormDB.putForm(form); await loadForms(); UI.toast(`「${form.name}」に設定を保存しました`, 'success'); }
     catch (e) { UI.toast('保存に失敗しました: ' + e.message, 'error'); }
   }
@@ -555,11 +570,14 @@
     if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
   }
   function currentDbgPreset() {
-    /* 抽出パターンはフィールド名で保持（別帳票へも適用できるよう移植性を確保） */
+    /* 抽出パターン・文字制約はフィールド名で保持（別帳票へも適用できるよう移植性を確保） */
     const form = S.forms.find(f => f.id === S.recogFormId);
-    const patterns = {};
-    if (form) (form.ocrRegions || []).forEach(r => { const p = (S.patternOverrides[r.id] ?? r.pattern) || ''; if (p) patterns[r.name] = p; });
-    return { ocrSettings: collectDbgOcr(), lineRemoval: collectDbgLineRemoval(), patterns };
+    const patterns = {}, constraints = {};
+    if (form) (form.ocrRegions || []).forEach(r => {
+      const p = (S.patternOverrides[r.id] ?? r.pattern) || ''; if (p) patterns[r.name] = p;
+      const cn = (S.constraintOverrides[r.id] ?? r.constraint) || ''; if (cn) constraints[r.name] = cn;
+    });
+    return { ocrSettings: collectDbgOcr(), lineRemoval: collectDbgLineRemoval(), patterns, constraints };
   }
   async function savePreset() {
     const name = prompt('プリセット名を入力', `設定 ${new Date().toLocaleString('ja-JP')}`);
@@ -572,10 +590,13 @@
     const id = $('presetSelect').value; if (!id) return UI.toast('プリセットを選択してください', 'warning');
     const p = (S.presets || []).find(x => x.id === id); if (!p) return;
     applyDbgToUI({ lineRemoval: p.lineRemoval, ocrSettings: p.ocrSettings });
-    /* 抽出パターンをフィールド名で現在帳票の領域へ反映 */
-    if (p.patterns) {
+    /* 抽出パターン・文字制約をフィールド名で現在帳票の領域へ反映 */
+    if (p.patterns || p.constraints) {
       const form = S.forms.find(f => f.id === S.recogFormId);
-      if (form) (form.ocrRegions || []).forEach(r => { if (p.patterns[r.name] !== undefined) S.patternOverrides[r.id] = p.patterns[r.name]; });
+      if (form) (form.ocrRegions || []).forEach(r => {
+        if (p.patterns && p.patterns[r.name] !== undefined) S.patternOverrides[r.id] = p.patterns[r.name];
+        if (p.constraints && p.constraints[r.name] !== undefined) S.constraintOverrides[r.id] = p.constraints[r.name];
+      });
       loadDbgPatternForSelected();
     }
     UI.toast(`プリセット「${p.name}」を反映しました。「再実行」で試せます`, 'info', 3500);
@@ -736,6 +757,14 @@
       const inp = $('dbgPattern');
       if (btn.dataset.tok === 'CLR') inp.value = ''; else inp.value += btn.dataset.tok;
       syncDbgPattern();
+    });
+    /* フィールド文字制約編集 */
+    $('dbgConstraint').addEventListener('input', syncDbgConstraint);
+    $('dbgConsQuick').addEventListener('click', e => {
+      const btn = e.target.closest('button[data-tok]'); if (!btn) return;
+      const inp = $('dbgConstraint');
+      if (btn.dataset.tok === 'CLR') inp.value = ''; else inp.value += btn.dataset.tok;
+      syncDbgConstraint();
     });
     $('debugToggle').addEventListener('click', () => {
       const collapsed = $('debugBody').classList.toggle('is-collapsed');

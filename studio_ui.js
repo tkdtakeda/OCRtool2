@@ -78,7 +78,7 @@ const StudioUI = (() => {
     });
   }
 
-  function renderRegionList(regions, onRemove, onPattern) {
+  function renderRegionList(regions, onRemove, onPattern, onConstraint) {
     const c = $('ocrRegionList'); $('ocrCount').textContent = regions.length;
     if (!regions.length) { c.innerHTML = '<div class="mini-empty">未登録（OCR領域モードで描画）</div>'; return; }
     c.innerHTML = '';
@@ -92,9 +92,13 @@ const StudioUI = (() => {
           <span class="mpos">${r.x},${r.y} ${r.w}×${r.h}</span>
           <button class="btn-icon-sm" title="削除"><i class="fas fa-xmark"></i></button>
         </div>
+        <input class="mini-pattern mini-constraint" placeholder="文字制約(任意) 例: [AR]X{5}" title="位置別の文字種。9=数字 A=英大 X=英数 [AR]=指定 {n}=回数 +=以降全部" spellcheck="false">
         <input class="mini-pattern" placeholder="抽出パターン(任意) 例: [A-Z]{2}\\d{4}" spellcheck="false">`;
       block.querySelector('button').addEventListener('click', () => onRemove(r.id));
-      const inp = block.querySelector('.mini-pattern');
+      const consInp = block.querySelector('.mini-constraint');
+      consInp.value = r.constraint || '';
+      consInp.addEventListener('change', () => onConstraint && onConstraint(r.id, consInp.value));
+      const inp = block.querySelector('.mini-pattern:not(.mini-constraint)');
       inp.value = r.pattern || '';
       inp.addEventListener('change', () => onPattern && onPattern(r.id, inp.value));
       c.appendChild(block);
@@ -215,6 +219,9 @@ const StudioUI = (() => {
       const col = REGION_COLORS[i % REGION_COLORS.length];
       const badge = f.error ? '<span class="conf-badge lo">ERR</span>'
         : `<span class="conf-badge ${confClass(f.confidence)}">${f.confidence}%</span>`;
+      /* 文字制約に一致しない（補正でも満たせなかった）場合は注意を表示 */
+      const consWarn = (!f.error && f.constraint && f.constraintValid === false && f.text)
+        ? `<span class="conf-badge lo" title="文字制約「${esc(f.constraint)}」に一致しません"><i class="fas fa-triangle-exclamation"></i> 制約</span>` : '';
       const row = document.createElement('div');
       row.className = 'field-row'; row.style.animationDelay = `${(i * 0.05).toFixed(2)}s`;
       const txt = f.error ? `[エラー: ${f.error}]` : f.text;
@@ -226,6 +233,7 @@ const StudioUI = (() => {
           <span class="field-idx" style="background:${col}">${i + 1}</span>
           <span class="field-name">${esc(f.name)}</span>
           ${rawHint}
+          ${consWarn}
           ${badge}
         </div>
         <textarea class="field-text" readonly>${esc(txt)}</textarea>`;
