@@ -1,0 +1,290 @@
+/* ════════════════════════════════════════════════════════
+   studio_ui.js  統合ツール UI レンダラー
+   Responsibility: DOM 生成・描画のみ。業務ロジック・状態は持たない。
+   ════════════════════════════════════════════════════════ */
+'use strict';
+
+const StudioUI = (() => {
+
+  const $ = id => document.getElementById(id);
+  const REGION_COLORS = ['#1D6BB0', '#0F7D5E', '#7C3AED', '#B45309', '#BE1818', '#0E6E80'];
+  const ANCHOR_COLOR  = '#1D6BB0';
+  const OCR_COLOR     = '#7C3AED';
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  /* ── Toast ──────────────────────────────────────────── */
+  const TOAST_ICONS = { success: 'fa-circle-check', error: 'fa-circle-xmark', warning: 'fa-triangle-exclamation', info: 'fa-circle-info' };
+  function toast(message, type = 'info', duration = 2800) {
+    const c = $('toastContainer'); if (!c) return;
+    const t = document.createElement('div');
+    t.className = `toast toast-${type}`;
+    t.innerHTML = `<i class="fas ${TOAST_ICONS[type] || TOAST_ICONS.info}"></i><span>${esc(message)}</span>`;
+    c.appendChild(t);
+    requestAnimationFrame(() => t.classList.add('is-visible'));
+    setTimeout(() => { t.classList.remove('is-visible'); setTimeout(() => { try { c.removeChild(t); } catch (_) {} }, 280); }, duration);
+  }
+
+  /* ── 登録ステップのチェックリスト ───────────────────── */
+  function refreshRegSteps(flags) {
+    document.querySelectorAll('#regSteps .reg-step').forEach(el => {
+      el.classList.toggle('done', !!flags[el.dataset.k]);
+    });
+  }
+
+  /* ── 帳票ライブラリ ─────────────────────────────────── */
+  function renderFormLibrary(forms, handlers) {
+    const c = $('formLibList'); if (!c) return;
+    if (!forms.length) { c.innerHTML = '<div class="empty-hint"><i class="fas fa-inbox"></i><span>帳票未登録</span></div>'; return; }
+    c.innerHTML = '';
+    forms.forEach(f => {
+      const card = document.createElement('div');
+      card.className = 'form-card' + (f.isSample ? ' is-sample' : '');
+      card.innerHTML = `
+        <img src="${f.referenceImage?.dataURL || ''}" alt="">
+        <div class="form-card-body">
+          <span class="form-card-name">${esc(f.name)}</span>
+          <span class="form-card-meta">アンカー${(f.anchors || []).length} / OCR${(f.ocrRegions || []).length}</span>
+          <div class="form-card-acts">
+            <button class="btn btn-ghost btn-sm" data-act="edit"><i class="fas fa-pen"></i></button>
+            <button class="btn btn-ghost btn-sm" data-act="del"><i class="fas fa-trash-can"></i></button>
+          </div>
+        </div>`;
+      card.querySelector('[data-act=edit]').addEventListener('click', e => { e.stopPropagation(); handlers.onEdit(f.id); });
+      card.querySelector('[data-act=del]').addEventListener('click', e => { e.stopPropagation(); handlers.onDelete(f.id); });
+      card.addEventListener('click', () => handlers.onEdit(f.id));
+      c.appendChild(card);
+    });
+  }
+
+  /* ── 識別アンカー / OCR領域 ミニリスト ──────────────── */
+  function renderAnchorList(anchors, onRemove) {
+    const c = $('anchorList'); $('anchorCount').textContent = anchors.length;
+    if (!anchors.length) { c.innerHTML = '<div class="mini-empty">未登録（左の画像上にドラッグ）</div>'; return; }
+    c.innerHTML = '';
+    anchors.forEach((a, i) => {
+      const item = document.createElement('div'); item.className = 'mini-item';
+      item.innerHTML = `
+        <span class="midx" style="background:${ANCHOR_COLOR}">${i + 1}</span>
+        <img class="mthumb" src="${a.dataURL}" alt="">
+        <span class="mname">${esc(a.name)}</span>
+        <span class="mpos">${a.refX},${a.refY}</span>
+        <button class="btn-icon-sm" title="削除"><i class="fas fa-xmark"></i></button>`;
+      item.querySelector('button').addEventListener('click', () => onRemove(a.id));
+      c.appendChild(item);
+    });
+  }
+
+  function renderRegionList(regions, onRemove, onPattern) {
+    const c = $('ocrRegionList'); $('ocrCount').textContent = regions.length;
+    if (!regions.length) { c.innerHTML = '<div class="mini-empty">未登録（OCR領域モードで描画）</div>'; return; }
+    c.innerHTML = '';
+    regions.forEach((r, i) => {
+      const col = REGION_COLORS[i % REGION_COLORS.length];
+      const block = document.createElement('div'); block.className = 'mini-region';
+      block.innerHTML = `
+        <div class="mini-item">
+          <span class="midx" style="background:${col}">${i + 1}</span>
+          <span class="mname">${esc(r.name)}</span>
+          <span class="mpos">${r.x},${r.y} ${r.w}×${r.h}</span>
+          <button class="btn-icon-sm" title="削除"><i class="fas fa-xmark"></i></button>
+        </div>
+        <input class="mini-pattern" placeholder="抽出パターン(任意) 例: [A-Z]{2}\\d{4}" spellcheck="false">`;
+      block.querySelector('button').addEventListener('click', () => onRemove(r.id));
+      const inp = block.querySelector('.mini-pattern');
+      inp.value = r.pattern || '';
+      inp.addEventListener('change', () => onPattern && onPattern(r.id, inp.value));
+      c.appendChild(block);
+    });
+  }
+
+  /* ── パイプライン状態 ───────────────────────────────── */
+  const PL_ORDER = ['match', 'decide', 'rotate', 'line', 'ocr'];
+  function setPipeline(activeKey, doneKeys = []) {
+    document.querySelectorAll('#pipeline .pl-step').forEach(el => {
+      const k = el.dataset.pl;
+      el.classList.toggle('active', k === activeKey);
+      el.classList.toggle('done', doneKeys.includes(k));
+    });
+  }
+  function resetPipeline() { setPipeline(null, []); }
+
+  /* ── 判定パネル ─────────────────────────────────────── */
+  const VERDICT_TEXT = { accepted: '採用', review: '要確認', rejected: '不一致' };
+  function scoreClass(v) { return v >= 0.8 ? 'hi' : v >= 0.5 ? 'mid' : 'lo'; }
+
+  function renderDecision(result, forms, handlers) {
+    $('decisionPanel').classList.remove('hidden');
+    const badge = $('dpBadge');
+    badge.className = 'dp-badge ' + result.decision;
+    badge.textContent = VERDICT_TEXT[result.decision] || '—';
+
+    const confPct = Math.round(result.confidence * 100);
+    $('dpConfVal').textContent = confPct + '%';
+    $('dpConfBar').style.width = confPct + '%';
+
+    const best = result.best;
+    const ls = result.legacySignal;
+    let reason;
+    if (result.decision === 'accepted') {
+      reason = `「${best.formName}」を採用（peak ${best.peak.toFixed(3)}, margin ${result.margin.toFixed(3)}）。`;
+    } else if (result.decision === 'review') {
+      reason = `候補は「${best ? best.formName : '—'}」ですが確信度が低めです。帳票を確認のうえ実行してください。`;
+    } else {
+      reason = `十分に一致する帳票がありません（最良 peak ${best ? best.peak.toFixed(3) : '0'}）。未登録の帳票の可能性があります。`;
+    }
+    $('dpReason').textContent = reason;
+
+    /* 補助指標（ユーザー提案ルール） */
+    $('dpLegacy').textContent = `補助指標(順位ルール): 上位3に同一${ls.top3SameCount}件 / 上位5に${ls.top5SameCount}件 → ${ls.passesUserRule ? '合致' : '不合致'}`;
+
+    /* 帳票セレクタ */
+    const sel = $('dpFormSelect');
+    sel.innerHTML = '';
+    forms.forEach(f => {
+      const o = document.createElement('option');
+      o.value = f.id; o.textContent = f.name;
+      if (best && f.id === best.formId) o.selected = true;
+      sel.appendChild(o);
+    });
+
+    /* ランキング */
+    const list = $('dpRankList'); list.innerHTML = '';
+    result.ranking.forEach((row, i) => {
+      const pct = Math.max(0, Math.round(row.peak * 100));
+      const cls = scoreClass(row.peak);
+      const el = document.createElement('div');
+      el.className = 'rank-row' + (best && row.formId === best.formId ? ' is-best' : '');
+      el.innerHTML = `
+        <div class="rank-no">${i + 1}</div>
+        <div class="rank-info">
+          <div class="rank-name">${esc(row.formName)}</div>
+          <div class="rank-bar-track"><div class="rank-bar sc-${cls}" style="width:${pct}%"></div></div>
+          <div class="rank-meta">
+            <span class="rank-chip scv-${cls}">peak ${row.peak.toFixed(3)}</span>
+            <span class="rank-chip">集約 ${row.agg.toFixed(3)}</span>
+            <span class="rank-chip">裏付け ${row.support}</span>
+            <span class="rank-chip"><i class="fas fa-rotate"></i> ${row.angle > 0 ? '+' : ''}${row.angle}°</span>
+          </div>
+        </div>`;
+      list.appendChild(el);
+    });
+
+    handlers && handlers.afterRender && handlers.afterRender();
+  }
+
+  /* ── 認識プレビュー（罫線除去結果 + OCR領域重畳） ───── */
+  function renderRecogPreview(resultCanvas, transform, regions, angle, zoom = 1) {
+    const c = $('recogResultCanvas'); if (!c || !resultCanvas) return 1;
+    const wrap = c.parentElement;
+    const maxW = (wrap?.clientWidth || 500) - 24;
+    const fit = Math.min(1, maxW / resultCanvas.width);   // 横幅フィットを 100% の基準とする
+    const scale = Math.max(0.05, fit * zoom);
+    c.width = Math.round(resultCanvas.width * scale);
+    c.height = Math.round(resultCanvas.height * scale);
+    const ctx = c.getContext('2d');
+    ctx.drawImage(resultCanvas, 0, 0, c.width, c.height);
+    const tf = transform || { sx: 1, sy: 1, tx: 0, ty: 0 };
+    (regions || []).forEach((r, i) => {
+      const col = REGION_COLORS[i % REGION_COLORS.length];
+      /* 軸独立スケール変換で入力座標へ写像してから表示スケールを掛ける */
+      const rx = Math.round((tf.sx * r.x + tf.tx) * scale);
+      const ry = Math.round((tf.sy * r.y + tf.ty) * scale);
+      const rw = Math.max(2, Math.round(tf.sx * r.w * scale));
+      const rh = Math.max(2, Math.round(tf.sy * r.h * scale));
+      ctx.fillStyle = col + '22'; ctx.fillRect(rx, ry, rw, rh);
+      ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.strokeRect(rx, ry, rw, rh);
+      ctx.fillStyle = col; ctx.font = 'bold 10px sans-serif'; ctx.textBaseline = 'bottom';
+      ctx.fillText(`${i + 1}.${r.name}`, rx + 2, Math.max(10, ry - 2));
+      ctx.textBaseline = 'alphabetic';
+    });
+    const sxPct = Math.round((tf.sx || 1) * 100), syPct = Math.round((tf.sy || 1) * 100);
+    const sizeTxt = (sxPct === syPct) ? `${sxPct}%` : `${sxPct}%×${syPct}%`;
+    $('rrAngle').textContent = `傾き ${angle > 0 ? '+' : ''}${angle}° / 倍率 ${sizeTxt} / アンカー${tf.n || 0}点`;
+    return scale;
+  }
+
+  /* ── OCR フィールド結果 ─────────────────────────────── */
+  function confClass(c) { return c >= 85 ? 'hi' : c >= 60 ? 'mid' : 'lo'; }
+  function renderFieldResults(fields) {
+    const c = $('fieldResults'); c.innerHTML = '';
+    fields.forEach((f, i) => {
+      const col = REGION_COLORS[i % REGION_COLORS.length];
+      const badge = f.error ? '<span class="conf-badge lo">ERR</span>'
+        : `<span class="conf-badge ${confClass(f.confidence)}">${f.confidence}%</span>`;
+      const row = document.createElement('div');
+      row.className = 'field-row'; row.style.animationDelay = `${(i * 0.05).toFixed(2)}s`;
+      const txt = f.error ? `[エラー: ${f.error}]` : f.text;
+      /* 抽出パターン適用で生テキストと変わった場合は元の値を併記 */
+      const rawHint = (f.raw !== undefined && f.raw !== f.text)
+        ? `<span class="field-raw" title="抽出パターン適用前">元: ${esc(f.raw || '（空）')}</span>` : '';
+      row.innerHTML = `
+        <div class="field-row-hdr">
+          <span class="field-idx" style="background:${col}">${i + 1}</span>
+          <span class="field-name">${esc(f.name)}</span>
+          ${rawHint}
+          ${badge}
+        </div>
+        <textarea class="field-text" readonly>${esc(txt)}</textarea>`;
+      c.appendChild(row);
+    });
+  }
+
+  function showRecogProgress(show) {
+    $('recogProgress').classList.toggle('hidden', !show);
+  }
+  function updateRecogProgress(msg, pct) {
+    $('recogProgressFill').style.width = `${Math.round((pct || 0) * 100)}%`;
+    $('recogProgressMsg').textContent = msg || '処理中…';
+  }
+
+  /* ── 履歴 ───────────────────────────────────────────── */
+  function fmtTime(ts) {
+    const d = new Date(ts);
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  const VERDICT_SHORT = { accepted: '採用', review: '要確認', rejected: '不一致' };
+  function renderHistory(results, handlers) {
+    const c = $('historyList'); if (!c) return;
+    if (!results.length) { c.innerHTML = '<div class="empty-hint"><i class="fas fa-inbox"></i><span>履歴なし</span></div>'; return; }
+    c.innerHTML = '';
+    results.forEach(r => {
+      const item = document.createElement('div'); item.className = 'hist-item';
+      const fieldsHtml = (r.fields || []).map(f => `
+        <div class="hist-field">
+          <span class="hf-name">${esc(f.name)}</span>
+          <span class="hf-text">${esc(f.text || (f.error ? '[エラー]' : ''))}</span>
+          <span class="hf-conf scv-${confClass(f.confidence)}">${f.confidence}%</span>
+        </div>`).join('');
+      item.innerHTML = `
+        <div class="hist-row">
+          <img class="hist-thumb" src="${r.sourceThumb || ''}" alt="">
+          <div class="hist-info">
+            <div class="hist-form">${esc(r.formName || '—')}</div>
+            <div class="hist-time">${fmtTime(r.createdAt)} ・ 確信度 ${Math.round((r.confidence || 0) * 100)}%</div>
+          </div>
+          <span class="hist-verdict ${r.decision}">${VERDICT_SHORT[r.decision] || '—'}</span>
+          <button class="btn-icon-sm" data-act="del" title="削除"><i class="fas fa-xmark"></i></button>
+        </div>
+        <div class="hist-detail">${fieldsHtml || '<div class="hint-text">フィールドなし</div>'}</div>`;
+      const row = item.querySelector('.hist-row');
+      const detail = item.querySelector('.hist-detail');
+      row.addEventListener('click', e => { if (e.target.closest('[data-act=del]')) return; detail.classList.toggle('open'); });
+      item.querySelector('[data-act=del]').addEventListener('click', e => { e.stopPropagation(); handlers.onDelete(r.id); });
+      c.appendChild(item);
+    });
+  }
+
+  return {
+    $, esc, toast, REGION_COLORS, ANCHOR_COLOR, OCR_COLOR,
+    refreshRegSteps, renderFormLibrary, renderAnchorList, renderRegionList,
+    setPipeline, resetPipeline,
+    renderDecision, renderRecogPreview, renderFieldResults,
+    showRecogProgress, updateRecogProgress, renderHistory,
+  };
+
+})();

@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>帳票OCR統合ツール</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="studio.css">
+</head>
+<body>
+
+<!-- ── Loading Overlay ───────────────────────────────── -->
+<div id="loadingOverlay" class="loading-overlay">
+  <div class="loading-box">
+    <i class="fas fa-circle-notch fa-spin loading-spin"></i>
+    <p class="loading-title">OpenCV.js を読み込み中</p>
+    <p id="loadingMsg" class="loading-sub">インターネット接続が必要です</p>
+  </div>
+</div>
+
+<!-- ── Header ────────────────────────────────────────── -->
+<header class="app-header">
+  <div class="header-brand">
+    <i class="fas fa-file-invoice brand-icon"></i>
+    <span class="brand-name">帳票OCR</span>
+  </div>
+
+  <!-- モード切替（Hick の法則: 上位選択は2つに絞る） -->
+  <div class="mode-switch" id="modeSwitch" role="tablist">
+    <button class="mode-btn is-active" id="modeRegister" role="tab" data-mode="register">
+      <i class="fas fa-pen-ruler"></i> ① レイアウト登録
+    </button>
+    <button class="mode-btn" id="modeRecognize" role="tab" data-mode="recognize">
+      <i class="fas fa-wand-magic-sparkles"></i> ② OCR実行
+    </button>
+  </div>
+
+  <nav class="header-nav">
+    <a href="line_removal.html" class="btn btn-ghost btn-sm" title="罫線除去ツール（単体）">
+      <i class="fas fa-table-cells"></i><span>罫線除去</span>
+    </a>
+    <a href="image_matcher.html" class="btn btn-ghost btn-sm" title="画像マッチングツール（単体）">
+      <i class="fas fa-crosshairs"></i><span>マッチング</span>
+    </a>
+    <div class="nav-sep"></div>
+    <button id="btnHelp" class="btn btn-icon" title="使い方・設計思想">
+      <i class="fas fa-circle-question"></i>
+    </button>
+  </nav>
+</header>
+
+<!-- ════════════════════════════════════════════════════
+     VIEW A : レイアウト登録工程
+     ════════════════════════════════════════════════════ -->
+<main class="app-main view" id="viewRegister">
+
+  <!-- 左: 帳票ライブラリ（IndexedDB に永続化） -->
+  <aside class="library-panel">
+    <div class="lib-hdr">
+      <span><i class="fas fa-layer-group"></i> 帳票ライブラリ</span>
+      <button id="btnNewForm" class="btn btn-primary btn-sm"><i class="fas fa-plus"></i> 新規</button>
+    </div>
+    <div class="lib-sub">
+      <button id="btnLoadSampleForms" class="btn btn-ghost btn-sm"><i class="fas fa-database"></i> サンプル登録</button>
+      <button id="btnClearForms" class="btn btn-ghost btn-sm"><i class="fas fa-trash-can"></i> 全削除</button>
+    </div>
+    <div id="formLibList" class="lib-list">
+      <div class="empty-hint"><i class="fas fa-inbox"></i><span>帳票未登録</span></div>
+    </div>
+  </aside>
+
+  <!-- 右: 帳票エディタ -->
+  <section class="editor-panel" id="editorPanel">
+    <!-- 未編集時のプレースホルダ -->
+    <div id="editorEmpty" class="editor-empty">
+      <i class="fas fa-pen-ruler"></i>
+      <p class="ee-title">帳票レイアウトを登録</p>
+      <p class="ee-sub">「新規」から帳票を登録します。基準画像に<br>識別アンカーとOCR領域を矩形で指定してください。</p>
+      <button id="btnNewForm2" class="btn btn-primary"><i class="fas fa-plus"></i> 新規帳票を作成</button>
+    </div>
+
+    <!-- 編集フォーム -->
+    <div id="editorForm" class="editor-form hidden">
+      <!-- 進捗チェックリスト（Zeigarnik 効果: 未完了を可視化） -->
+      <div class="reg-steps" id="regSteps">
+        <span class="reg-step" data-k="name"><i class="fas fa-circle-check"></i> 帳票名</span>
+        <span class="reg-step" data-k="ref"><i class="fas fa-circle-check"></i> 基準画像</span>
+        <span class="reg-step" data-k="anchor"><i class="fas fa-circle-check"></i> 識別アンカー</span>
+        <span class="reg-step" data-k="ocr"><i class="fas fa-circle-check"></i> OCR領域</span>
+        <span class="reg-step" data-k="save"><i class="fas fa-circle-check"></i> 保存</span>
+      </div>
+
+      <div class="editor-body">
+        <!-- 左カラム: 名前・基準画像・設定 -->
+        <div class="editor-col editor-col--side">
+          <div class="form-group">
+            <label class="form-label">帳票名 <span class="required">*</span></label>
+            <input type="text" id="formNameInput" class="form-input" placeholder="例：発注書" autocomplete="off">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">基準画像（帳票全体） <span class="required">*</span></label>
+            <div class="modal-drop-zone modal-drop-zone--sm" id="refDropZone">
+              <div id="refDropHint" class="drop-hint-inner">
+                <i class="fas fa-file-image"></i>
+                <p>Ctrl+V／ドロップ／クリック<br><small>OCR座標の基準となる帳票全体画像</small></p>
+              </div>
+              <img id="refPreview" alt="" style="display:none;max-height:120px;max-width:100%;object-fit:contain;">
+            </div>
+            <input type="file" id="refFileInput" accept="image/*" style="display:none">
+            <button id="btnRefSample" class="btn btn-ghost btn-sm btn-block" style="margin-top:6px">
+              <i class="fas fa-images"></i> サンプル帳票を使う
+            </button>
+          </div>
+
+          <!-- 別画像から識別アンカーを追加（自動配置） -->
+          <div class="form-group">
+            <label class="form-label">識別アンカーを別画像から追加</label>
+            <div class="modal-drop-zone modal-drop-zone--xs" id="anchorDropZone">
+              <div id="anchorDropHint" class="drop-hint-inner">
+                <i class="fas fa-image"></i>
+                <p>特徴画像をドロップ/貼付<br><small>基準画像内の位置を自動検出</small></p>
+              </div>
+            </div>
+            <input type="file" id="anchorFileInput" accept="image/*" style="display:none">
+          </div>
+
+          <!-- OCR設定 -->
+          <div class="acc">
+            <button class="acc-hdr" data-acc="accOcr"><span><i class="fas fa-spell-check"></i> OCR設定</span><i class="fas fa-chevron-down acc-caret"></i></button>
+            <div class="acc-body" id="accOcr">
+              <div class="prow"><label class="plabel">言語</label>
+                <select id="regLang" class="pselect">
+                  <option value="eng" selected>英語</option>
+                  <option value="jpn+eng">日本語＋英語</option>
+                  <option value="jpn">日本語</option>
+                </select>
+              </div>
+              <div class="prow"><label class="plabel">解析モード(PSM)</label>
+                <select id="regPsm" class="pselect">
+                  <option value="3">自動</option>
+                  <option value="6">単一ブロック</option>
+                  <option value="4">縦長テキスト</option>
+                  <option value="7" selected>単一行</option>
+                  <option value="8">単一単語</option>
+                  <option value="13">1行(生)</option>
+                </select>
+              </div>
+              <div class="prow"><label class="plabel">文字ホワイトリスト</label><input type="text" id="regWhitelist" class="pinput" placeholder="空=制限なし 例:0123456789" autocomplete="off"></div>
+              <div class="prow"><label class="plabel">正規化 ①→1 / 全角→半角</label><label class="ptoggle"><input type="checkbox" id="regNormalize" checked><span class="ptoggle-track"></span></label></div>
+              <div class="prow"><label class="plabel">漢数字→数字 (一→1)</label><label class="ptoggle"><input type="checkbox" id="regNormalizeKanji"><span class="ptoggle-track"></span></label></div>
+              <p class="hint-text">日本語ラベルを含む領域は「日本語＋英語」を推奨。番号など数字欄はホワイトリストで字種を限定し、必要なら「漢数字→数字」もONに（氏名欄では注意）。</p>
+            </div>
+          </div>
+
+          <!-- 罫線除去設定（リポジトリ既定値を引き継ぎ） -->
+          <div class="acc">
+            <button class="acc-hdr" data-acc="accLine"><span><i class="fas fa-eraser"></i> 罫線除去設定</span><i class="fas fa-chevron-down acc-caret"></i></button>
+            <div class="acc-body is-collapsed" id="accLine">
+              <p class="hint-text">既定値は罫線除去ツールの設定を引き継いでいます。</p>
+              <div class="prow"><label class="plabel">二値化方式</label>
+                <select id="regBinaryMethod" class="pselect">
+                  <option value="otsu">Otsu 自動</option><option value="adaptive" selected>適応的</option><option value="manual">手動</option>
+                </select>
+              </div>
+              <div class="prow" id="regRowBlock"><label class="plabel">ブロック <b id="regValBlock" class="pval">51</b></label><input type="range" id="regAdaptiveBlock" class="pslider" min="3" max="51" step="2" value="51"></div>
+              <div class="prow" id="regRowC"><label class="plabel">定数C <b id="regValC" class="pval">-5</b></label><input type="range" id="regAdaptiveC" class="pslider" min="-20" max="20" value="-5"></div>
+              <div class="prow hidden" id="regRowThresh"><label class="plabel">閾値 <b id="regValThresh" class="pval">128</b></label><input type="range" id="regManualThresh" class="pslider" min="0" max="255" value="128"></div>
+              <div class="prow"><label class="plabel">水平罫線 検出</label><label class="ptoggle"><input type="checkbox" id="regEnableHoriz" checked><span class="ptoggle-track"></span></label></div>
+              <div class="prow"><label class="plabel">水平 最小線長 <b id="regValHLen" class="pval">5</b>%</label><input type="range" id="regHorizLen" class="pslider" min="1" max="80" value="5"></div>
+              <div class="prow"><label class="plabel">水平 線の太さ <b id="regValHThick" class="pval">1</b>px</label><input type="range" id="regHorizThick" class="pslider" min="1" max="10" value="1"></div>
+              <div class="prow"><label class="plabel">水平 膨張 <b id="regValHDil" class="pval">2</b>回</label><input type="range" id="regHorizDilate" class="pslider" min="0" max="5" value="2"></div>
+              <div class="prow"><label class="plabel">垂直罫線 検出</label><label class="ptoggle"><input type="checkbox" id="regEnableVert" checked><span class="ptoggle-track"></span></label></div>
+              <div class="prow"><label class="plabel">垂直 最小線長 <b id="regValVLen" class="pval">5</b>%</label><input type="range" id="regVertLen" class="pslider" min="1" max="80" value="5"></div>
+              <div class="prow"><label class="plabel">垂直 線の幅 <b id="regValVThick" class="pval">1</b>px</label><input type="range" id="regVertThick" class="pslider" min="1" max="10" value="1"></div>
+              <div class="prow"><label class="plabel">垂直 膨張 <b id="regValVDil" class="pval">2</b>回</label><input type="range" id="regVertDilate" class="pslider" min="0" max="5" value="2"></div>
+              <div class="prow"><label class="plabel">マスク膨張 <b id="regValMaskDil" class="pval">0</b>px</label><input type="range" id="regMaskDilate" class="pslider" min="0" max="5" value="0"></div>
+            </div>
+          </div>
+
+          <div class="editor-actions">
+            <button id="btnSaveForm" class="btn btn-success btn-block"><i class="fas fa-floppy-disk"></i> 帳票を保存</button>
+            <button id="btnCancelEdit" class="btn btn-ghost btn-block" style="margin-top:6px">キャンセル</button>
+          </div>
+        </div>
+
+        <!-- 中央: 描画キャンバス -->
+        <div class="editor-col editor-col--canvas">
+          <div class="canvas-toolbar">
+            <div class="draw-mode" id="drawModeSwitch">
+              <button class="dm-btn is-active" data-dm="anchor"><span class="dot dot-anchor"></span> 識別アンカー</button>
+              <button class="dm-btn" data-dm="ocr"><span class="dot dot-ocr"></span> OCR領域</button>
+              <button class="dm-btn" data-dm="pan" title="ドラッグで画像を移動"><i class="fas fa-up-down-left-right"></i> 移動</button>
+            </div>
+            <div class="canvas-zoom">
+              <button id="btnZoomOut" class="btn btn-ghost btn-sm" title="縮小"><i class="fas fa-magnifying-glass-minus"></i></button>
+              <span id="zoomLabel" class="zoom-label">100%</span>
+              <button id="btnZoomIn" class="btn btn-ghost btn-sm" title="拡大"><i class="fas fa-magnifying-glass-plus"></i></button>
+              <button id="btnZoomFit" class="btn btn-ghost btn-sm" title="フィット"><i class="fas fa-compress"></i></button>
+            </div>
+          </div>
+          <div class="reg-name-row">
+            <input type="text" id="rectNameInput" class="cs-name-input" placeholder="矩形を描いてから名前を入力（先入力も可）" autocomplete="off">
+            <button id="btnAddRect" class="btn btn-primary btn-sm" disabled><i class="fas fa-check"></i> 追加</button>
+          </div>
+          <div class="reg-canvas-wrap" id="regCanvasWrap">
+            <div id="regCanvasPlaceholder" class="canvas-placeholder">
+              <i class="fas fa-image"></i><span>基準画像を読み込んでください</span>
+            </div>
+            <canvas id="regCanvas" style="display:none;cursor:crosshair;"></canvas>
+          </div>
+        </div>
+
+        <!-- 右: 登録済みリスト -->
+        <div class="editor-col editor-col--lists">
+          <div class="list-block">
+            <div class="list-hdr"><span class="dot dot-anchor"></span> 識別アンカー <span id="anchorCount" class="list-count">0</span></div>
+            <div id="anchorList" class="mini-list"><div class="mini-empty">未登録</div></div>
+          </div>
+          <div class="list-block">
+            <div class="list-hdr"><span class="dot dot-ocr"></span> OCR領域 <span id="ocrCount" class="list-count">0</span></div>
+            <div id="ocrRegionList" class="mini-list"><div class="mini-empty">未登録</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ════════════════════════════════════════════════════
+     VIEW B : OCR実行工程
+     ════════════════════════════════════════════════════ -->
+<main class="app-main view hidden" id="viewRecognize">
+  <section class="recog-main">
+
+    <!-- 入力 + パイプライン状態 -->
+    <div class="recog-top">
+      <div class="recog-input">
+        <div id="recogDrop" class="modal-drop-zone modal-drop-zone--input">
+          <div id="recogDropHint" class="drop-hint-inner">
+            <i class="fas fa-paste"></i>
+            <p>帳票画像を Ctrl+V／ドロップ／クリック<br><small>※将来はPDF対応予定（現在は画像）</small></p>
+          </div>
+          <img id="recogPreview" alt="" style="display:none;max-height:160px;max-width:100%;object-fit:contain;">
+        </div>
+        <input type="file" id="recogFileInput" accept="image/*" style="display:none">
+        <div class="recog-input-acts">
+          <button id="btnRecogSample" class="btn btn-ghost btn-sm"><i class="fas fa-images"></i> サンプル画像（傾き付）</button>
+          <button id="btnRunRecognize" class="btn btn-primary" disabled><i class="fas fa-play"></i> 認識を実行</button>
+        </div>
+      </div>
+
+      <!-- パイプライン進捗（システム状態の可視化） -->
+      <div class="pipeline" id="pipeline">
+        <div class="pl-step" data-pl="match"><span class="pl-dot"></span> マッチング</div>
+        <i class="fas fa-chevron-right pl-arr"></i>
+        <div class="pl-step" data-pl="decide"><span class="pl-dot"></span> 帳票判定</div>
+        <i class="fas fa-chevron-right pl-arr"></i>
+        <div class="pl-step" data-pl="rotate"><span class="pl-dot"></span> 傾き補正</div>
+        <i class="fas fa-chevron-right pl-arr"></i>
+        <div class="pl-step" data-pl="line"><span class="pl-dot"></span> 罫線除去</div>
+        <i class="fas fa-chevron-right pl-arr"></i>
+        <div class="pl-step" data-pl="ocr"><span class="pl-dot"></span> OCR</div>
+      </div>
+    </div>
+
+    <!-- 判定結果パネル -->
+    <div id="decisionPanel" class="decision-panel hidden">
+      <div class="dp-verdict" id="dpVerdict">
+        <div class="dp-badge" id="dpBadge">—</div>
+        <div class="dp-gauge">
+          <div class="dp-gauge-label">確信度 <b id="dpConfVal">0%</b></div>
+          <div class="dp-gauge-track"><div id="dpConfBar" class="dp-gauge-fill"></div></div>
+          <div class="dp-reason" id="dpReason"></div>
+        </div>
+        <div class="dp-form-pick">
+          <label class="form-label">採用する帳票</label>
+          <div class="dp-pick-row">
+            <select id="dpFormSelect" class="pselect"></select>
+            <button id="btnApplyForm" class="btn btn-primary btn-sm"><i class="fas fa-spell-check"></i> この帳票でOCR</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ランキング（透明性: なぜその帳票か） -->
+      <div class="dp-ranking">
+        <div class="dp-rank-hdr"><i class="fas fa-ranking-star"></i> スコアランキング（帳票ごと集約） <span id="dpLegacy" class="dp-legacy"></span></div>
+        <div id="dpRankList" class="dp-rank-list"></div>
+      </div>
+    </div>
+
+    <!-- デバッグ設定パネル（OCR・罫線除去を再調整して再実行） -->
+    <div id="debugPanel" class="debug-panel hidden">
+      <button class="acc-hdr" id="debugToggle"><span><i class="fas fa-flask"></i> 認識設定（デバッグ：数値を変えて再実行）</span><i class="fas fa-chevron-down acc-caret"></i></button>
+      <div class="acc-body debug-body" id="debugBody">
+        <div class="preset-bar">
+          <span class="preset-lbl"><i class="fas fa-bookmark"></i> プリセット</span>
+          <select id="presetSelect" class="pselect"><option value="">（プリセットを選択）</option></select>
+          <button id="btnApplyPreset" class="btn btn-ghost btn-sm" title="選択中のプリセットを反映"><i class="fas fa-arrow-down"></i> 適用</button>
+          <button id="btnSavePreset" class="btn btn-outline btn-sm" title="現在の設定をプリセットとして保存"><i class="fas fa-plus"></i> 現在値を保存</button>
+          <button id="btnDeletePreset" class="btn btn-ghost btn-sm" title="選択中のプリセットを削除"><i class="fas fa-trash-can"></i></button>
+        </div>
+        <div class="debug-grid">
+          <div class="debug-sec">
+            <div class="debug-sec-ttl"><i class="fas fa-spell-check"></i> OCR</div>
+            <div class="prow"><label class="plabel">言語</label><select id="dbgLang" class="pselect"><option value="eng">英語</option><option value="jpn+eng">日本語＋英語</option><option value="jpn">日本語</option></select></div>
+            <div class="prow"><label class="plabel">PSM</label><select id="dbgPsm" class="pselect"><option value="3">自動</option><option value="6">単一ブロック</option><option value="4">縦長</option><option value="7">単一行</option><option value="8">単一単語</option><option value="10">単一文字</option><option value="11">疎</option><option value="13">1行(生)</option></select></div>
+            <div class="prow"><label class="plabel">文字ホワイトリスト</label><input type="text" id="dbgWhitelist" class="pinput" placeholder="空=制限なし" autocomplete="off"></div>
+            <div class="wl-quick" id="dbgWlQuick">
+              <button type="button" class="btn btn-ghost btn-sm" data-wl="0123456789">数字</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-wl="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ">英数(大)</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-wl="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-/.">コード</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-wl="">クリア</button>
+            </div>
+            <div class="prow"><label class="plabel">正規化 ①→1/全角→半角</label><label class="ptoggle"><input type="checkbox" id="dbgNormalize" checked><span class="ptoggle-track"></span></label></div>
+            <div class="prow"><label class="plabel">漢数字→数字 (一→1)</label><label class="ptoggle"><input type="checkbox" id="dbgNormalizeKanji"><span class="ptoggle-track"></span></label></div>
+          </div>
+          <div class="debug-sec">
+            <div class="debug-sec-ttl"><i class="fas fa-scissors"></i> フィールド抽出（文字数・位置別文字）</div>
+            <div class="prow"><label class="plabel">対象フィールド</label><select id="dbgPatRegion" class="pselect"></select></div>
+            <div class="prow"><label class="plabel">抽出パターン</label><input type="text" id="dbgPattern" class="pinput" placeholder="例 [A-Z]{2}\d{4}" spellcheck="false"></div>
+            <div class="wl-quick" id="dbgPatQuick">
+              <button type="button" class="btn btn-ghost btn-sm" data-tok="[A-Z]">英大</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-tok="\d">数字</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-tok="[A-Z0-9]">英数</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-tok=".">任意</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-tok="{2}">×2</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-tok="{3}">×3</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-tok="{4}">×4</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-tok="{5}">×5</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-tok="CLR">クリア</button>
+            </div>
+            <p class="hint-text">例「英大 ×2 数字 ×4」→ <code>[A-Z]{2}\d{4}</code>。該当部分のみ抽出し、はみ出した文字を無視します。</p>
+          </div>
+          <div class="debug-sec">
+            <div class="debug-sec-ttl"><i class="fas fa-sliders"></i> 二値化</div>
+            <div class="prow"><label class="plabel">方式</label><select id="dbgBinaryMethod" class="pselect"><option value="otsu">Otsu</option><option value="adaptive">適応的</option><option value="manual">手動</option></select></div>
+            <div class="prow" id="dbgRowBlock"><label class="plabel">ブロック <b id="dbgValBlock" class="pval">51</b></label><input type="range" id="dbgAdaptiveBlock" class="pslider" min="3" max="51" step="2" value="51"></div>
+            <div class="prow" id="dbgRowC"><label class="plabel">定数C <b id="dbgValC" class="pval">-5</b></label><input type="range" id="dbgAdaptiveC" class="pslider" min="-20" max="20" value="-5"></div>
+            <div class="prow hidden" id="dbgRowThresh"><label class="plabel">閾値 <b id="dbgValThresh" class="pval">128</b></label><input type="range" id="dbgManualThresh" class="pslider" min="0" max="255" value="128"></div>
+          </div>
+          <div class="debug-sec">
+            <div class="debug-sec-ttl"><i class="fas fa-grip-lines"></i> 水平罫線</div>
+            <div class="prow"><label class="plabel">検出</label><label class="ptoggle"><input type="checkbox" id="dbgEnableHoriz" checked><span class="ptoggle-track"></span></label></div>
+            <div class="prow"><label class="plabel">最小線長 <b id="dbgValHLen" class="pval">5</b>%</label><input type="range" id="dbgHorizLen" class="pslider" min="1" max="80" value="5"></div>
+            <div class="prow"><label class="plabel">線の太さ <b id="dbgValHThick" class="pval">1</b>px</label><input type="range" id="dbgHorizThick" class="pslider" min="1" max="10" value="1"></div>
+            <div class="prow"><label class="plabel">膨張 <b id="dbgValHDil" class="pval">2</b>回</label><input type="range" id="dbgHorizDilate" class="pslider" min="0" max="5" value="2"></div>
+          </div>
+          <div class="debug-sec">
+            <div class="debug-sec-ttl"><i class="fas fa-grip-lines-vertical"></i> 垂直罫線</div>
+            <div class="prow"><label class="plabel">検出</label><label class="ptoggle"><input type="checkbox" id="dbgEnableVert" checked><span class="ptoggle-track"></span></label></div>
+            <div class="prow"><label class="plabel">最小線長 <b id="dbgValVLen" class="pval">5</b>%</label><input type="range" id="dbgVertLen" class="pslider" min="1" max="80" value="5"></div>
+            <div class="prow"><label class="plabel">線の幅 <b id="dbgValVThick" class="pval">1</b>px</label><input type="range" id="dbgVertThick" class="pslider" min="1" max="10" value="1"></div>
+            <div class="prow"><label class="plabel">膨張 <b id="dbgValVDil" class="pval">2</b>回</label><input type="range" id="dbgVertDilate" class="pslider" min="0" max="5" value="2"></div>
+          </div>
+          <div class="debug-sec">
+            <div class="debug-sec-ttl"><i class="fas fa-wand-magic-sparkles"></i> 後処理</div>
+            <div class="prow"><label class="plabel">マスク膨張 <b id="dbgValMaskDil" class="pval">0</b>px</label><input type="range" id="dbgMaskDilate" class="pslider" min="0" max="5" value="0"></div>
+            <div class="prow"><label class="plabel">出力ベース</label><select id="dbgOutputBase" class="pselect"><option value="original">カラー原画像</option><option value="gray">グレースケール</option><option value="binary">二値化</option></select></div>
+          </div>
+        </div>
+        <div class="debug-acts">
+          <button id="btnRerun" class="btn btn-primary btn-sm"><i class="fas fa-rotate"></i> この設定で再実行</button>
+          <button id="btnPsmCompare" class="btn btn-outline btn-sm"><i class="fas fa-table-list"></i> 全PSM比較</button>
+          <button id="btnSaveSettingsToForm" class="btn btn-ghost btn-sm"><i class="fas fa-floppy-disk"></i> 設定を帳票に保存</button>
+          <span class="hint-text">数値を調整 → 「再実行」。最適値は「現在値を保存」でプリセット化できます</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 処理プレビュー + OCR結果 -->
+    <div id="recogResultArea" class="recog-result-area hidden">
+      <div class="rr-preview">
+        <div class="rr-hdr">
+          <span><i class="fas fa-eye"></i> 罫線除去 + OCR領域</span>
+          <span id="rrAngle" class="rr-angle"></span>
+          <div class="rr-zoom">
+            <button id="btnRrZoomOut" class="btn btn-ghost btn-sm" title="縮小"><i class="fas fa-magnifying-glass-minus"></i></button>
+            <span id="rrZoomLabel" class="zoom-label">100%</span>
+            <button id="btnRrZoomIn" class="btn btn-ghost btn-sm" title="拡大"><i class="fas fa-magnifying-glass-plus"></i></button>
+            <button id="btnRrZoomFit" class="btn btn-ghost btn-sm" title="フィット"><i class="fas fa-compress"></i></button>
+          </div>
+        </div>
+        <div class="rr-canvas-wrap" id="rrCanvasWrap"><canvas id="recogResultCanvas"></canvas></div>
+      </div>
+      <div class="rr-fields">
+        <div class="rr-hdr">
+          <span><i class="fas fa-list-check"></i> OCR認識結果</span>
+          <div class="rr-acts">
+            <button id="btnCopyAll" class="btn btn-outline btn-sm"><i class="fas fa-copy"></i> 全コピー</button>
+          </div>
+        </div>
+        <div id="recogProgress" class="recog-progress hidden">
+          <div class="ocr-progress-track"><div id="recogProgressFill" class="ocr-progress-fill"></div></div>
+          <span id="recogProgressMsg" class="ocr-progress-msg">処理中…</span>
+        </div>
+        <div id="fieldResults" class="field-results"></div>
+        <div id="saveStatus" class="save-status"></div>
+      </div>
+    </div>
+
+    <!-- 履歴（IndexedDB） -->
+    <div class="recog-history">
+      <div class="rh-hdr">
+        <span><i class="fas fa-clock-rotate-left"></i> 認識履歴（IndexedDB・信頼度つき）</span>
+        <button id="btnClearHistory" class="btn btn-ghost btn-sm"><i class="fas fa-trash-can"></i> 履歴削除</button>
+      </div>
+      <div id="historyList" class="history-list"><div class="empty-hint"><i class="fas fa-inbox"></i><span>履歴なし</span></div></div>
+    </div>
+  </section>
+</main>
+
+<!-- サンプル帳票選択モーダル -->
+<div class="modal-overlay hidden" id="sampleFormModal">
+  <div class="modal">
+    <div class="modal-hdr"><h2><i class="fas fa-images"></i> サンプル帳票を選択</h2>
+      <button class="modal-close" id="closeSampleFormModal"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy"><div class="sample-grid" id="sampleFormGrid"></div></div>
+  </div>
+</div>
+
+<!-- PSM 全パターン比較モーダル -->
+<div class="modal-overlay hidden" id="psmModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr"><h2><i class="fas fa-table-list"></i> PSM 全パターン比較</h2>
+      <button class="modal-close" id="closePsmModal"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <p class="hint-text">同じ罫線除去結果に対して、各 PSM（ページ分割モード）でどう読み取れるかを比較します。現在のデバッグ設定の罫線除去・言語を使用します。</p>
+      <div class="psm-ctl">
+        <label class="plabel">対象領域</label>
+        <select id="psmRegionSelect" class="pselect"></select>
+        <button id="btnPsmRun" class="btn btn-primary btn-sm"><i class="fas fa-play"></i> 全PSMで認識</button>
+      </div>
+      <div id="psmProgress" class="recog-progress hidden">
+        <div class="ocr-progress-track"><div id="psmProgressFill" class="ocr-progress-fill"></div></div>
+        <span id="psmProgressMsg" class="ocr-progress-msg">処理中…</span>
+      </div>
+      <div id="psmCrop" class="psm-crop hidden"><span class="psm-crop-lbl">切り出し画像:</span><img id="psmCropImg" alt=""></div>
+      <div id="psmResults" class="psm-results"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ヘルプ / 設計思想モーダル -->
+<div class="modal-overlay hidden" id="helpModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr"><h2><i class="fas fa-circle-question"></i> 使い方と設計思想</h2>
+      <button class="modal-close" id="closeHelpModal"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy help-bdy">
+      <div class="help-sec">
+        <h3><i class="fas fa-pen-ruler"></i> ① レイアウト登録工程</h3>
+        <ol>
+          <li><b>帳票名</b>と<b>基準画像</b>（帳票全体）を設定</li>
+          <li>基準画像上に<b>識別アンカー</b>（複数可）を矩形で描く ― 帳票判定と傾き補正に使用</li>
+          <li>同じ画像上に<b>OCR領域</b>を矩形で描く ― 基準画像の<b>絶対座標</b>で保存</li>
+          <li>OCR(PSM)・罫線除去パラメータを設定（既定は罫線除去ツールから引き継ぎ）</li>
+          <li>保存 → <b>IndexedDB</b> に永続化（再読込後も保持）</li>
+        </ol>
+      </div>
+      <div class="help-sec">
+        <h3><i class="fas fa-wand-magic-sparkles"></i> ② OCR実行工程</h3>
+        <ol>
+          <li>帳票画像を読み込む（将来 PDF 対応）</li>
+          <li>登録帳票の<b>全アンカー</b>と一括照合 → スコア順にランキング</li>
+          <li>帳票を<b>自動判定</b>（下記アルゴリズム）。低確信なら「要確認」で手動選択へ</li>
+          <li>登録画像と比較して<b>傾きを補正</b></li>
+          <li>補正後に<b>罫線除去</b>（登録パラメータを引き継ぎ）</li>
+          <li>登録した<b>OCR領域</b>を認識し、<b>信頼度つきで IndexedDB に保存・表示</b></li>
+        </ol>
+      </div>
+      <div class="help-sec">
+        <h3><i class="fas fa-flask"></i> 認識設定の調整（デバッグ）と日本語OCR</h3>
+        <ul>
+          <li>OCR実行画面の「認識設定（デバッグ）」で <b>OCR言語・PSM・罫線除去パラメータ</b>（膨張含む）を表示・変更し、「再実行」で再マッチング無しに即試行できます</li>
+          <li>良い値が決まったら<b>「現在値を保存」でプリセット化</b>（IndexedDB保存）。以後はプリセットを選んで「適用」→「再実行」で素早く切替できます。「設定を帳票に保存」で帳票自体にも反映可能</li>
+          <li><b>「全PSM比較」</b>: 同じ罫線除去結果に対し各PSMの読み取り結果を一覧表示。最良を「採用」して即反映できます</li>
+          <li><b>言語</b>：既定は英語。日本語ラベルを含む領域は <b>「日本語＋英語」</b>を選択してください（初回は言語データのDLに時間がかかります）</li>
+          <li>数字が<b>丸数字（①②⑨）</b>になるのは、セル枠＋日本語モデルが原因。対策は <b>文字ホワイトリスト</b>（例 <code>0123456789</code>）で字種を限定 ＋ <b>正規化</b>（①→1・全角→半角）をON。さらに ①OCR領域から「注文No」など<b>日本語ラベルを除外</b>、②セル区切りの<b>縦罫線を除去</b>、③PSMを「単一行/単一単語」に、④数字欄は言語を<b>英語</b>に、も有効</li>
+          <li><b>抽出パターン（正規表現）</b>：各OCR領域に書式を指定すると、はみ出した文字を無視して該当部分だけ取り出せます。例 <code>[A-Z]{2}\d{4}</code> なら「注文No AK1029 控」→「AK1029」。固定接頭辞＋固定桁数の番号欄に最適（登録画面のOCR領域リストで設定）</li>
+          <li><b>切り取り倍率・位置ずれの補正</b>：マッチングは<b>スケール探索</b>に対応し、切り取り方で帳票の写る大きさが変わっても一致します。認識時にアンカーの一致位置から<b>相似変換（拡大率＋平行移動）</b>を推定してOCR領域へ反映。<b>アンカーを2つ以上</b>登録すると拡大率の推定が安定します（1つでも検出スケールで補正）。結果ヘッダーに「傾き／倍率／アンカー点数」を表示するので、補正が効いているか確認できます</li>
+          <li>罫線除去後プレビューは右上のボタンで<b>拡大</b>・ドラッグで<b>移動</b>できます</li>
+        </ul>
+      </div>
+      <div class="help-sec">
+        <h3><i class="fas fa-scale-balanced"></i> 帳票判定アルゴリズム（採用根拠）</h3>
+        <p>ご提案の「上位5中・上位3に同一2件以上 かつ 半数以上」は<b>順位のみ</b>を見るため、(1)スコアの絶対値を無視し弱い一致でも採用しうる、(2)アンカー登録数が多い帳票がランキングを占有して有利になる、という弱点があります。本ツールは次の<b>スコア加重＋確信度＋棄却</b>方式を既定とします:</p>
+        <ul>
+          <li><b>peak</b>：帳票ごとの最良アンカースコアを主証拠とする</li>
+          <li><b>裏付け</b>：複数アンカーの一致は<b>小さな加点</b>に留め、登録数バイアスを排除</li>
+          <li><b>margin</b>：1位と2位の差で接戦かを評価</li>
+          <li><b>確信度</b>＝絶対スコアと margin の加重 → <b>採用 / 要確認 / 不一致</b>に分類</li>
+          <li>低確信は<b>棄却して人手確認</b>（誤判定は全フィールド誤りに直結するため）</li>
+        </ul>
+        <p>ご提案の順位ルールの合否も「補助指標」として併記し、判断の透明性を確保しています。閾値は voting.js で調整可能です。</p>
+      </div>
+      <div class="help-sec">
+        <h3><i class="fas fa-brain"></i> 認知心理学に基づく設計</h3>
+        <ul>
+          <li><b>Hickの法則</b>：上位操作を「登録／OCR」の2モードに限定し選択負荷を低減</li>
+          <li><b>認識 > 想起</b>：帳票・領域はサムネイルと色で提示。座標や名称を記憶させない</li>
+          <li><b>システム状態の可視化</b>：マッチング→判定→補正→除去→OCR の進捗を常時表示</li>
+          <li><b>直接操作</b>：OCR領域は画像上に直接描画。結果も同じ座標系で重畳表示</li>
+          <li><b>一貫した色分け</b>（Von Restorff）：領域色を登録・プレビュー・結果で統一</li>
+          <li><b>段階的開示</b>：罫線除去など詳細設定はアコーディオンに格納</li>
+          <li><b>クローズ欲求（Zeigarnik）</b>：登録の完了チェックリストで未完了を可視化</li>
+          <li><b>信頼の較正</b>：確信度と根拠を提示し、低確信時は人間に判断を委ねる</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toastContainer" class="toast-container"></div>
+
+<!-- ── Scripts ───────────────────────────────────────── -->
+<script>
+  var Module = { onRuntimeInitialized: function () { document.dispatchEvent(new CustomEvent('cv-ready')); } };
+</script>
+<script async src="https://docs.opencv.org/4.8.0/opencv.js"
+  onerror="document.dispatchEvent(new CustomEvent('cv-error'))"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+<!-- engines -->
+<script src="processor.js"></script>
+<script src="matcher_engine.js"></script>
+<script src="ocr.js"></script>
+<!-- logic -->
+<script src="db.js"></script>
+<script src="voting.js"></script>
+<script src="recognizer.js"></script>
+<script src="sample_forms.js"></script>
+<!-- ui / controller -->
+<script src="studio_ui.js"></script>
+<script src="studio_app.js"></script>
+</body>
+</html>
