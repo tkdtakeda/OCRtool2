@@ -369,15 +369,20 @@
     UI.resetPipeline();
   }
 
-  /* PDF 対応の拡張ポイント: ファイル種別で分岐（現状は画像のみ） */
-  async function fileToCanvas(file) {
-    if (file.type === 'application/pdf') {
-      UI.toast('PDF は将来対応予定です。現在は画像を読み込んでください', 'warning', 4500);
-      return null;
+  /* 画像/PDF を共通の入口で受け取り、キャンバスにして渡す。
+     画像 → そのままキャンバス化。PDF → 取り込みモーダル（ページ/DPI選択）経由。
+     これにより基準画像・アンカー・OCR入力のどこでも画像/PDFを同様に扱える。 */
+  async function acceptFile(file, useCanvas) {
+    if (!file) return;
+    if (PdfImport.isPdf(file)) { PdfImport.open(file, useCanvas); return; }
+    if (file.type && file.type.startsWith('image/')) {
+      try {
+        const img = await dataURLtoImg(await fileToDataURL(file));
+        useCanvas(canvasFromImg(img));
+      } catch (_) { UI.toast('画像の読み込みに失敗しました', 'error'); }
+      return;
     }
-    const url = await fileToDataURL(file);
-    const img = await dataURLtoImg(url);
-    return canvasFromImg(img);
+    UI.toast('画像 または PDF を読み込んでください', 'warning', 4000);
   }
 
   async function runRecognize() {
@@ -743,11 +748,11 @@
   /* ════════════════════════════════════════════════════
      共通 UI 配線
      ════════════════════════════════════════════════════ */
-  function setupDrop(zoneId, onDataURL, clickFileId) {
+  function setupDrop(zoneId, onFile, clickFileId) {
     const z = $(zoneId); if (!z) return;
     z.addEventListener('dragover', e => { e.preventDefault(); z.classList.add('drag-over'); });
     z.addEventListener('dragleave', () => z.classList.remove('drag-over'));
-    z.addEventListener('drop', async e => { e.preventDefault(); z.classList.remove('drag-over'); const f = e.dataTransfer.files[0]; if (f && f.type.startsWith('image/')) onDataURL(await fileToDataURL(f)); });
+    z.addEventListener('drop', e => { e.preventDefault(); z.classList.remove('drag-over'); const f = e.dataTransfer.files[0]; if (f) onFile(f); });
     if (clickFileId) z.addEventListener('click', () => $(clickFileId).click());
   }
 
@@ -825,6 +830,7 @@
   function init() {
     initAccordions(); initRegSliders(); initRegCanvasEvents(); initDbgControls(); initRrPan();
     CharRuleEditor.init();
+    PdfImport.init();
 
     /* モード切替 */
     $('modeRegister').addEventListener('click', () => setMode('register'));
@@ -836,13 +842,15 @@
     $('btnLoadSampleForms').addEventListener('click', loadSampleForms);
     $('btnClearForms').addEventListener('click', async () => { if (!confirm('登録帳票をすべて削除しますか？')) return; await FormDB.clearForms(); await loadForms(); cancelEdit(); UI.toast('全帳票を削除しました', 'info'); });
 
-    /* エディタ: 名前/基準画像/設定 */
+    /* エディタ: 名前/基準画像/設定（画像・PDF 共通の入口を使用） */
     $('formNameInput').addEventListener('input', refreshSteps);
-    setupDrop('refDropZone', url => setReference(url), 'refFileInput');
-    $('refFileInput').addEventListener('change', async e => { const f = e.target.files[0]; if (f) setReference(await fileToDataURL(f)); e.target.value = ''; });
+    const useAsReference = c => setReference(c.toDataURL('image/png'));
+    const useAsAnchor    = c => addAnchorFromImage(c.toDataURL('image/png'));
+    setupDrop('refDropZone', f => acceptFile(f, useAsReference), 'refFileInput');
+    $('refFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) acceptFile(f, useAsReference); e.target.value = ''; });
     $('btnRefSample').addEventListener('click', openSampleFormModal);
-    setupDrop('anchorDropZone', url => addAnchorFromImage(url), 'anchorFileInput');
-    $('anchorFileInput').addEventListener('change', async e => { const f = e.target.files[0]; if (f) addAnchorFromImage(await fileToDataURL(f)); e.target.value = ''; });
+    setupDrop('anchorDropZone', f => acceptFile(f, useAsAnchor), 'anchorFileInput');
+    $('anchorFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) acceptFile(f, useAsAnchor); e.target.value = ''; });
     $('regBinaryMethod').addEventListener('change', updateBinaryRows);
 
     /* 描画 */
@@ -857,9 +865,9 @@
     $('btnSaveForm').addEventListener('click', saveForm);
     $('btnCancelEdit').addEventListener('click', cancelEdit);
 
-    /* OCR工程 */
-    setupDrop('recogDrop', url => dataURLtoImg(url).then(img => loadRecogImage(canvasFromImg(img))), 'recogFileInput');
-    $('recogFileInput').addEventListener('change', async e => { const f = e.target.files[0]; if (f) { const c = await fileToCanvas(f); if (c) loadRecogImage(c); } e.target.value = ''; });
+    /* OCR工程（画像・PDF 共通の入口を使用） */
+    setupDrop('recogDrop', f => acceptFile(f, loadRecogImage), 'recogFileInput');
+    $('recogFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) acceptFile(f, loadRecogImage); e.target.value = ''; });
     $('btnRecogSample').addEventListener('click', () => loadRecogImage(SampleForms.sampleInputCanvas(0, 1.5)));
     $('btnRunRecognize').addEventListener('click', runRecognize);
     $('btnApplyForm').addEventListener('click', () => applyForm($('dpFormSelect').value));

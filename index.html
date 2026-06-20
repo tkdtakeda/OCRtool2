@@ -106,11 +106,11 @@
             <div class="modal-drop-zone modal-drop-zone--sm" id="refDropZone">
               <div id="refDropHint" class="drop-hint-inner">
                 <i class="fas fa-file-image"></i>
-                <p>Ctrl+V／ドロップ／クリック<br><small>OCR座標の基準となる帳票全体画像</small></p>
+                <p>画像/PDF を ドロップ／クリック<br><small>OCR座標の基準となる帳票全体（PDFは1ページを取り込み）</small></p>
               </div>
               <img id="refPreview" alt="" style="display:none;max-height:120px;max-width:100%;object-fit:contain;">
             </div>
-            <input type="file" id="refFileInput" accept="image/*" style="display:none">
+            <input type="file" id="refFileInput" accept="image/*,application/pdf" style="display:none">
             <button id="btnRefSample" class="btn btn-ghost btn-sm btn-block" style="margin-top:6px">
               <i class="fas fa-images"></i> サンプル帳票を使う
             </button>
@@ -125,7 +125,7 @@
                 <p>特徴画像をドロップ/貼付<br><small>基準画像内の位置を自動検出</small></p>
               </div>
             </div>
-            <input type="file" id="anchorFileInput" accept="image/*" style="display:none">
+            <input type="file" id="anchorFileInput" accept="image/*,application/pdf" style="display:none">
           </div>
 
           <!-- OCR設定 -->
@@ -243,11 +243,11 @@
         <div id="recogDrop" class="modal-drop-zone modal-drop-zone--input">
           <div id="recogDropHint" class="drop-hint-inner">
             <i class="fas fa-paste"></i>
-            <p>帳票画像を Ctrl+V／ドロップ／クリック<br><small>※将来はPDF対応予定（現在は画像）</small></p>
+            <p>帳票画像/PDF を Ctrl+V／ドロップ／クリック<br><small>画像 と PDF に対応（PDFはページ・DPIを選択）</small></p>
           </div>
           <img id="recogPreview" alt="" style="display:none;max-height:160px;max-width:100%;object-fit:contain;">
         </div>
-        <input type="file" id="recogFileInput" accept="image/*" style="display:none">
+        <input type="file" id="recogFileInput" accept="image/*,application/pdf" style="display:none">
         <div class="recog-input-acts">
           <button id="btnRecogSample" class="btn btn-ghost btn-sm"><i class="fas fa-images"></i> サンプル画像（傾き付）</button>
           <button id="btnRunRecognize" class="btn btn-primary" disabled><i class="fas fa-play"></i> 認識を実行</button>
@@ -474,7 +474,7 @@
       <div class="help-sec">
         <h3><i class="fas fa-wand-magic-sparkles"></i> ② OCR実行工程</h3>
         <ol>
-          <li>帳票画像を読み込む（将来 PDF 対応）</li>
+          <li>帳票画像／PDF を読み込む（PDFはページとDPIを選択して取り込み）</li>
           <li>登録帳票の<b>全アンカー</b>と一括照合 → スコア順にランキング</li>
           <li>帳票を<b>自動判定</b>（下記アルゴリズム）。低確信なら「要確認」で手動選択へ</li>
           <li>登録画像と比較して<b>傾きを補正</b></li>
@@ -584,16 +584,52 @@
   </div>
 </div>
 
+<!-- PDF 取り込みモーダル -->
+<div class="modal-overlay hidden" id="pdfModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr">
+      <h2><i class="fas fa-file-pdf"></i> PDF を読み込み</h2>
+      <button class="modal-close" id="pdfClose"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <div class="pdf-row">
+        <span class="pdf-file"><i class="fas fa-file-pdf"></i> <span id="pdfFileName"></span></span>
+        <span class="pdf-pages" id="pdfPageInfo"></span>
+      </div>
+      <div class="pdf-ctl">
+        <span class="pdf-ctl-lbl"><i class="fas fa-gauge-high"></i> 解像度（DPI）</span>
+        <div class="pdf-dpi-btns" id="pdfDpiBtns">
+          <button type="button" data-dpi="100"><b>100</b><small>速い</small></button>
+          <button type="button" data-dpi="150"><b>150</b><small>推奨</small></button>
+          <button type="button" data-dpi="200"><b>200</b><small>高精度</small></button>
+          <button type="button" data-dpi="300"><b>300</b><small>最高・重い</small></button>
+        </div>
+      </div>
+      <p class="pdf-out" id="pdfOutInfo"></p>
+      <div class="pdf-pagenav" id="pdfPageNav">
+        <button type="button" id="pdfPrev" class="cr-stepper" title="前のページ">◀</button>
+        <span id="pdfPageLabel">1 / 1</span>
+        <button type="button" id="pdfNext" class="cr-stepper" title="次のページ">▶</button>
+      </div>
+      <div class="pdf-preview"><canvas id="pdfPreviewCanvas"></canvas></div>
+      <p class="hint-text">DPIが高いほど文字は鮮明になり認識精度が上がりますが、処理は重くなります。迷ったら<b>150（推奨）</b>。</p>
+    </div>
+    <div class="cr-ftr">
+      <button type="button" id="pdfCancel" class="btn btn-ghost">キャンセル</button>
+      <button type="button" id="pdfLoadBtn" class="btn btn-primary"><i class="fas fa-check"></i> このページを読み込む</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div id="toastContainer" class="toast-container"></div>
-
-<!-- ── Scripts ───────────────────────────────────────── -->
 <script>
   var Module = { onRuntimeInitialized: function () { document.dispatchEvent(new CustomEvent('cv-ready')); } };
 </script>
 <script async src="https://docs.opencv.org/4.8.0/opencv.js"
   onerror="document.dispatchEvent(new CustomEvent('cv-error'))"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
 <!-- engines -->
 <script src="processor.js"></script>
 <script src="matcher_engine.js"></script>
@@ -607,6 +643,7 @@
 <!-- ui / controller -->
 <script src="studio_ui.js"></script>
 <script src="charrule_editor.js"></script>
+<script src="pdf_import.js"></script>
 <script src="studio_app.js"></script>
 </body>
 </html>

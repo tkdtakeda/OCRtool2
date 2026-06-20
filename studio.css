@@ -350,3 +350,31 @@
 .cons-field { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 .cons-summary { flex: 1; min-width: 0; font-size: .72rem; font-family: 'IBM Plex Mono', monospace; color: var(--c-text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cons-summary.is-set { color: var(--c-text); }
+
+/* ════════════════════════════════════════════════════════
+   PDF 取り込みモーダル
+   ════════════════════════════════════════════════════════ */
+.pdf-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.pdf-file { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: .9rem; color: var(--c-text); overflow: hidden; }
+.pdf-file i { color: #C0392B; }
+.pdf-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pdf-pages { font-size: .76rem; color: var(--c-text-3); white-space: nowrap; }
+
+.pdf-ctl { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 12px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); }
+.pdf-ctl-lbl { font-size: .8rem; font-weight: 700; color: var(--c-text-2); display: flex; align-items: center; gap: 6px; }
+.pdf-ctl-lbl i { color: var(--c-pri); }
+.pdf-dpi-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.pdf-dpi-btns button { display: flex; flex-direction: column; align-items: center; min-width: 60px; padding: 5px 10px; border: 1.5px solid var(--c-border-dk); border-radius: var(--r-sm); background: #fff; cursor: pointer; line-height: 1.25; transition: all var(--ease); }
+.pdf-dpi-btns button:hover { border-color: var(--c-pri-mid); background: var(--c-pri-lt); }
+.pdf-dpi-btns button b { font-size: .9rem; color: var(--c-text); }
+.pdf-dpi-btns button small { font-size: .62rem; color: var(--c-text-3); }
+.pdf-dpi-btns button.is-active { background: var(--c-pri); border-color: var(--c-pri); }
+.pdf-dpi-btns button.is-active b, .pdf-dpi-btns button.is-active small { color: #fff; }
+
+.pdf-out { font-size: .74rem; color: var(--c-text-2); margin: 9px 0; font-family: 'IBM Plex Mono', monospace; }
+.pdf-pagenav { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 4px 0 10px; }
+.pdf-pagenav span { font-size: .82rem; font-weight: 700; color: var(--c-text); min-width: 64px; text-align: center; font-family: 'IBM Plex Mono', monospace; }
+.pdf-pagenav .cr-stepper:disabled { opacity: .4; cursor: default; }
+
+.pdf-preview { display: flex; justify-content: center; align-items: center; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); padding: 10px; min-height: 160px; max-height: 46vh; overflow: auto; }
+.pdf-preview canvas { max-width: 100%; box-shadow: var(--sh-sm); background: #fff; }

@@ -77,6 +77,21 @@ const Recognizer = (() => {
     } catch (_) { return text; }   // 不正な正規表現はそのまま
   }
 
+  /** 領域の文字制約から OCR の言語・ホワイトリストを決める（runOcr/comparePsm 共通）。
+      英数字・記号のみの欄は英語モデル＋制限なし（後処理で整形）。それ以外は従来通り。 */
+  function recogParamsFor(rule, fallbackLang, fallbackWhitelist) {
+    const active = CharConstraint.isActive(rule);
+    if (active && CharConstraint.isLatinOnly(rule)) return { lang: 'eng', whitelist: '' };
+    return { lang: fallbackLang, whitelist: active ? (CharConstraint.derivedWhitelist(rule) || fallbackWhitelist) : fallbackWhitelist };
+  }
+
+  /** OCR結果の信頼度（単語別平均、空/0なら領域全体平均で補う）。 */
+  function confOf(res) {
+    if (res.error) return 0;
+    const wordAvg = res.words.length ? res.words.reduce((s, w) => s + w.confidence, 0) / res.words.length : 0;
+    return Math.round(wordAvg > 0 ? wordAvg : (res.confidence || 0));
+  }
+
   /**
    * マッチング + 自動判定のみを実行（採用前に結果を提示するため分離）。
    * @returns {{ decision, scores: Map, forms }}
@@ -189,15 +204,8 @@ const Recognizer = (() => {
        抑えきれない（LSTMが守らない）ため。英語＋後処理（補正/抽出）が高精度。 */
     const plan = regions.map(region => {
       const rule = region.charRule || region.constraint;
-      const active = CharConstraint.isActive(rule);
-      const latin = active && CharConstraint.isLatinOnly(rule);
-      return {
-        region, rule, active,
-        lang: latin ? 'eng' : lang,
-        /* 英語モデルは自由認識させて後処理で整形（ホワイトリスト競合による
-           信頼度0%や記号漏れを避ける）。日本語含む欄は従来通り字種制限。 */
-        whitelist: latin ? '' : (active ? (CharConstraint.derivedWhitelist(rule) || whitelist) : whitelist),
-      };
+      const p = recogParamsFor(rule, lang, whitelist);
+      return { region, rule, active: CharConstraint.isActive(rule), lang: p.lang, whitelist: p.whitelist };
     });
     /* 言語切替（worker再初期化）を最小化するため同一言語をまとめて処理する */
     const order = plan.map((_, i) => i).sort((a, b) => (plan[a].lang < plan[b].lang ? -1 : plan[a].lang > plan[b].lang ? 1 : 0));
@@ -214,10 +222,7 @@ const Recognizer = (() => {
       const res = await OcrProcessor.recognize(cropCanvas, psm, prog => {
         cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
       }, useLang, useWl);
-      /* 信頼度: 単語別の平均を基本とし、空/0のときは領域全体の平均で補う */
-      const wordAvg = (!res.error && res.words.length)
-        ? res.words.reduce((sum, w) => sum + w.confidence, 0) / res.words.length : 0;
-      const conf = res.error ? 0 : Math.round(wordAvg > 0 ? wordAvg : (res.confidence || 0));
+      const conf = confOf(res);
       let text = (res.fullText || '').trim();
       if (doNorm) text = OcrProcessor.normalize(text);
       if (doKanji) text = OcrProcessor.kanjiToNum(text);
@@ -254,13 +259,10 @@ const Recognizer = (() => {
    */
   async function comparePsm(resultCanvas, transform, region, psmList, opts, onProg) {
     const { lang = 'eng', whitelist = '', normalize = true, kanji = false } = opts || {};
-    /* 領域の文字制約を PSM 比較にも反映。英数字・記号のみの欄は英語モデルで
-       自由認識し、後処理（補正/抽出）で整形する（本認識と同じ方針）。 */
+    /* 領域の文字制約を PSM 比較にも反映（本認識と同じ言語・字種判定を使用） */
     const rule = region.charRule || region.constraint;
     const ruleActive = CharConstraint.isActive(rule);
-    const latin = ruleActive && CharConstraint.isLatinOnly(rule);
-    const useLang = latin ? 'eng' : lang;
-    const regWhitelist = latin ? '' : ((ruleActive && CharConstraint.derivedWhitelist(rule)) || whitelist);
+    const { lang: useLang, whitelist: regWhitelist } = recogParamsFor(rule, lang, whitelist);
     const crop = LineRemovalProcessor.extractRect(resultCanvas, mapRect(region, transform));
     const out = [];
     for (let i = 0; i < psmList.length; i++) {
@@ -268,9 +270,7 @@ const Recognizer = (() => {
       if (onProg) onProg(i, psmList.length, psm);
       if (!crop) { out.push({ psm, text: '', confidence: 0, error: '領域切り出し失敗' }); continue; }
       const res = await OcrProcessor.recognize(crop, psm, () => {}, useLang, regWhitelist);
-      const wordAvg = (!res.error && res.words.length)
-        ? res.words.reduce((s, w) => s + w.confidence, 0) / res.words.length : 0;
-      const conf = res.error ? 0 : Math.round(wordAvg > 0 ? wordAvg : (res.confidence || 0));
+      const conf = confOf(res);
       let text = (res.fullText || '').trim();
       if (normalize) text = OcrProcessor.normalize(text);
       if (kanji) text = OcrProcessor.kanjiToNum(text);
