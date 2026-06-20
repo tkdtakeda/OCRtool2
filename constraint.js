@@ -149,6 +149,17 @@ const CharConstraint = (() => {
 
   function isActive(rule) { return !!normalize(rule); }
 
+  /** 許可文字がすべて ASCII（英数字・記号）か＝日本語不要か。
+      true の領域は英語OCRモデルで認識した方が高精度（数字の「1」→「一」誤認を防ぐ）。 */
+  function isLatinOnly(rule) {
+    const r = normalize(rule);
+    if (!r) return false;
+    const chars = r.variable ? r.set : r.pos.join('');
+    if (!chars) return false;
+    for (const c of chars) if (c.charCodeAt(0) > 0x7F) return false;   // 非ASCII（日本語等）
+    return true;
+  }
+
   /* ── 1文字補正（許可集合に合うように寄せる） ─────────── */
   function correctChar(c, allow) {
     if (allow.has(c)) return c;
@@ -280,7 +291,7 @@ const CharConstraint = (() => {
   return {
     DIGITS, UPPER, LOWER,
     presetSet, orderSet, sameSet,
-    normalize, isActive, derivedWhitelist, apply, correctChar, extractStr,
+    normalize, isActive, isLatinOnly, derivedWhitelist, apply, correctChar, extractStr,
     summarizePos, lengthLabel, describe, fromMask,
   };
 

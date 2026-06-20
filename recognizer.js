@@ -182,25 +182,39 @@ const Recognizer = (() => {
     const whitelist = form.ocrSettings?.whitelist || '';
     const doNorm = form.ocrSettings?.normalize !== false;   // 既定で正規化ON
     const doKanji = !!form.ocrSettings?.normalizeKanji;      // 漢数字→数字（既定OFF）
-    const fields = [];
-    for (let i = 0; i < regions.length; i++) {
-      const region = regions[i];
-      stage(`OCR ${i + 1}/${regions.length}`, 0.55 + 0.4 * (i / Math.max(1, regions.length)));
+
+    /* 各領域の認識方針を決定。
+       文字制約が英数字・記号だけ（日本語不要）の欄は英語モデルで認識する。
+       日本語モデルは数字「1」を「一」と誤認しやすく、ホワイトリストでも
+       抑えきれない（LSTMが守らない）ため。英語＋後処理（補正/抽出）が高精度。 */
+    const plan = regions.map(region => {
+      const rule = region.charRule || region.constraint;
+      const active = CharConstraint.isActive(rule);
+      const latin = active && CharConstraint.isLatinOnly(rule);
+      return {
+        region, rule, active,
+        lang: latin ? 'eng' : lang,
+        /* 英語モデルは自由認識させて後処理で整形（ホワイトリスト競合による
+           信頼度0%や記号漏れを避ける）。日本語含む欄は従来通り字種制限。 */
+        whitelist: latin ? '' : (active ? (CharConstraint.derivedWhitelist(rule) || whitelist) : whitelist),
+      };
+    });
+    /* 言語切替（worker再初期化）を最小化するため同一言語をまとめて処理する */
+    const order = plan.map((_, i) => i).sort((a, b) => (plan[a].lang < plan[b].lang ? -1 : plan[a].lang > plan[b].lang ? 1 : 0));
+    const fields = new Array(regions.length);
+    for (let oi = 0; oi < order.length; oi++) {
+      const i = order[oi];
+      const { region, rule, active, lang: useLang, whitelist: useWl } = plan[i];
+      stage(`OCR ${oi + 1}/${regions.length}`, 0.55 + 0.4 * (oi / Math.max(1, regions.length)));
       const cropCanvas = LineRemovalProcessor.extractRect(resultCanvas, mapRect(region, transform));
       if (!cropCanvas) {
-        fields.push({ name: region.name, text: '', confidence: 0, error: '領域の切り出しに失敗しました' });
+        fields[i] = { name: region.name, text: '', confidence: 0, error: '領域の切り出しに失敗しました' };
         continue;
       }
-      /* 領域ごとの文字制約（桁別ルール）があれば、そこから導いた字種でOCR出力を制限
-         （無ければ帳票共通のホワイトリストを使用） */
-      const rule = region.charRule || region.constraint;   // 旧形式(文字列)も互換
-      const ruleActive = CharConstraint.isActive(rule);
-      const regWhitelist = (ruleActive && CharConstraint.derivedWhitelist(rule)) || whitelist;
       const res = await OcrProcessor.recognize(cropCanvas, psm, prog => {
-        cb.onOcr && cb.onOcr(i, regions.length, region.name, prog.status, prog.progress);
-      }, lang, regWhitelist);
-      /* 信頼度: 単語別の平均を基本とし、空/0のときは領域全体の平均で補う
-         （ホワイトリスト指定時に words が空でも 0% にならないように） */
+        cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
+      }, useLang, useWl);
+      /* 信頼度: 単語別の平均を基本とし、空/0のときは領域全体の平均で補う */
       const wordAvg = (!res.error && res.words.length)
         ? res.words.reduce((sum, w) => sum + w.confidence, 0) / res.words.length : 0;
       const conf = res.error ? 0 : Math.round(wordAvg > 0 ? wordAvg : (res.confidence || 0));
@@ -209,19 +223,19 @@ const Recognizer = (() => {
       if (doKanji) text = OcrProcessor.kanjiToNum(text);
       const raw = text;
       if (region.pattern) text = applyPattern(text, region.pattern);   // 期待書式で抽出
-      /* 文字制約による桁別チェック＋誤認補正（O↔0 等） */
+      /* 文字制約による桁別チェック＋誤認補正（O↔0 等）＋前後の余分文字除去 */
       let constraintValid = true;
-      if (ruleActive) { const cc = CharConstraint.apply(text, rule); text = cc.text; constraintValid = cc.valid; }
-      fields.push({
+      if (active) { const cc = CharConstraint.apply(text, rule); text = cc.text; constraintValid = cc.valid; }
+      fields[i] = {
         name: region.name,
         text,
         raw,
         confidence: conf,
         error: res.error || null,
-        constraint: ruleActive ? CharConstraint.describe(rule) : '',
+        constraint: active ? CharConstraint.describe(rule) : '',
         constraintValid,
         cropDataURL: cropCanvas.toDataURL('image/png'),
-      });
+      };
     }
 
     stage('完了', 1);
@@ -240,17 +254,20 @@ const Recognizer = (() => {
    */
   async function comparePsm(resultCanvas, transform, region, psmList, opts, onProg) {
     const { lang = 'eng', whitelist = '', normalize = true, kanji = false } = opts || {};
-    /* 領域の文字制約を PSM 比較にも反映（字種制限＋桁別補正） */
+    /* 領域の文字制約を PSM 比較にも反映。英数字・記号のみの欄は英語モデルで
+       自由認識し、後処理（補正/抽出）で整形する（本認識と同じ方針）。 */
     const rule = region.charRule || region.constraint;
     const ruleActive = CharConstraint.isActive(rule);
-    const regWhitelist = (ruleActive && CharConstraint.derivedWhitelist(rule)) || whitelist;
+    const latin = ruleActive && CharConstraint.isLatinOnly(rule);
+    const useLang = latin ? 'eng' : lang;
+    const regWhitelist = latin ? '' : ((ruleActive && CharConstraint.derivedWhitelist(rule)) || whitelist);
     const crop = LineRemovalProcessor.extractRect(resultCanvas, mapRect(region, transform));
     const out = [];
     for (let i = 0; i < psmList.length; i++) {
       const psm = psmList[i];
       if (onProg) onProg(i, psmList.length, psm);
       if (!crop) { out.push({ psm, text: '', confidence: 0, error: '領域切り出し失敗' }); continue; }
-      const res = await OcrProcessor.recognize(crop, psm, () => {}, lang, regWhitelist);
+      const res = await OcrProcessor.recognize(crop, psm, () => {}, useLang, regWhitelist);
       const wordAvg = (!res.error && res.words.length)
         ? res.words.reduce((s, w) => s + w.confidence, 0) / res.words.length : 0;
       const conf = res.error ? 0 : Math.round(wordAvg > 0 ? wordAvg : (res.confidence || 0));
