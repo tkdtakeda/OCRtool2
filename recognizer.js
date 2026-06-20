@@ -199,9 +199,11 @@ const Recognizer = (() => {
       const res = await OcrProcessor.recognize(cropCanvas, psm, prog => {
         cb.onOcr && cb.onOcr(i, regions.length, region.name, prog.status, prog.progress);
       }, lang, regWhitelist);
-      const conf = (!res.error && res.words.length)
-        ? Math.round(res.words.reduce((sum, w) => sum + w.confidence, 0) / res.words.length)
-        : 0;
+      /* 信頼度: 単語別の平均を基本とし、空/0のときは領域全体の平均で補う
+         （ホワイトリスト指定時に words が空でも 0% にならないように） */
+      const wordAvg = (!res.error && res.words.length)
+        ? res.words.reduce((sum, w) => sum + w.confidence, 0) / res.words.length : 0;
+      const conf = res.error ? 0 : Math.round(wordAvg > 0 ? wordAvg : (res.confidence || 0));
       let text = (res.fullText || '').trim();
       if (doNorm) text = OcrProcessor.normalize(text);
       if (doKanji) text = OcrProcessor.kanjiToNum(text);
@@ -249,8 +251,9 @@ const Recognizer = (() => {
       if (onProg) onProg(i, psmList.length, psm);
       if (!crop) { out.push({ psm, text: '', confidence: 0, error: '領域切り出し失敗' }); continue; }
       const res = await OcrProcessor.recognize(crop, psm, () => {}, lang, regWhitelist);
-      const conf = (!res.error && res.words.length)
-        ? Math.round(res.words.reduce((s, w) => s + w.confidence, 0) / res.words.length) : 0;
+      const wordAvg = (!res.error && res.words.length)
+        ? res.words.reduce((s, w) => s + w.confidence, 0) / res.words.length : 0;
+      const conf = res.error ? 0 : Math.round(wordAvg > 0 ? wordAvg : (res.confidence || 0));
       let text = (res.fullText || '').trim();
       if (normalize) text = OcrProcessor.normalize(text);
       if (kanji) text = OcrProcessor.kanjiToNum(text);

@@ -253,6 +253,13 @@ const CharConstraint = (() => {
       if (removed.length === 0) return name;
       if (removed.length <= 3) return `${name}−${removed.join('')}`;
     }
+    /* 既知グループ＋記号（例 数字+- ）。大きいグループ優先で余りを最小化 */
+    for (const [g, name] of [[UPPER + LOWER + DIGITS, '英数(小)'], [UPPER + DIGITS, '英数'], [UPPER, '英大'], [DIGITS, '数字'], [LOWER, '英小']]) {
+      const hasAll = [...g].every(c => uniq.includes(c));
+      if (!hasAll) continue;
+      const extra = [...uniq].filter(c => !g.includes(c));
+      if (extra.length && extra.length <= 3) return `${name}+${extra.join('')}`;
+    }
     return `${[...uniq].length}種`;
   }
   /** 桁数ラベル（'5桁' / '可変長'） */

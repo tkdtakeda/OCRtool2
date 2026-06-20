@@ -21,6 +21,7 @@ const CharRuleEditor = (() => {
 
   const DEF = () => CharConstraint.presetSet('alnum');             // 新規桁の既定＝英数
   const visAlnum = () => CharConstraint.presetSet(showLower ? 'alnumAll' : 'alnum');
+  const SYMBOLS = ['-', '/', '.', ':', '(', ')', '#', '&', ' '];   // 区切り・記号（' '=空白）
 
   /* ── 公開: 開く ─────────────────────────────────────── */
   function open(fieldName, rule, onSave) {
@@ -107,8 +108,9 @@ const CharRuleEditor = (() => {
     const setStr = activeSet();
     const isAny = !setStr;
     const allow = new Set(setStr);
-    const groups = [['数字', CharConstraint.DIGITS], ['英大', CharConstraint.UPPER]];
-    if (showLower) groups.push(['英小', CharConstraint.LOWER]);
+    const groups = [['数字', [...CharConstraint.DIGITS]], ['英大', [...CharConstraint.UPPER]]];
+    if (showLower) groups.push(['英小', [...CharConstraint.LOWER]]);
+    groups.push(['記号', SYMBOLS]);          // 区切り記号（- / . など）も指定できる
     groups.forEach(([label, chars]) => {
       const row = document.createElement('div'); row.className = 'cr-prow';
       const lab = document.createElement('span'); lab.className = 'cr-prow-lab'; lab.textContent = label;
@@ -116,7 +118,8 @@ const CharRuleEditor = (() => {
       for (const ch of chars) {
         const chip = document.createElement('button'); chip.type = 'button';
         chip.className = 'cr-chip' + (isAny ? ' is-on is-anyon' : (allow.has(ch) ? ' is-on' : ' is-off'));
-        chip.textContent = ch;
+        chip.textContent = ch === ' ' ? '␣' : ch;
+        if (ch === ' ') chip.title = '空白';
         chip.addEventListener('click', () => toggleChar(ch));
         row.appendChild(chip);
       }

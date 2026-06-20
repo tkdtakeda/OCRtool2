@@ -91,7 +91,9 @@ const OcrProcessor = (() => {
           bbox:       w.bbox,
         }));
 
-      return { fullText: data.text || '', words, error: null };
+      /* data.confidence は領域全体の平均信頼度。文字ホワイトリスト指定時は
+         words が空/0になることがあるため、フォールバックとして返す。 */
+      return { fullText: data.text || '', words, confidence: typeof data.confidence === 'number' ? data.confidence : 0, error: null };
 
     } catch (e) {
       return {
