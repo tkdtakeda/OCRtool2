@@ -46,6 +46,9 @@
       <i class="fas fa-crosshairs"></i><span>マッチング</span>
     </a>
     <div class="nav-sep"></div>
+    <button id="btnSettings" class="btn btn-icon" title="設定（判定しきい値・マッチング精度）">
+      <i class="fas fa-gear"></i>
+    </button>
     <button id="btnHelp" class="btn btn-icon" title="使い方・設計思想">
       <i class="fas fa-circle-question"></i>
     </button>
@@ -65,7 +68,10 @@
     </div>
     <div class="lib-sub">
       <button id="btnLoadSampleForms" class="btn btn-ghost btn-sm"><i class="fas fa-database"></i> サンプル登録</button>
+      <button id="btnExportForms" class="btn btn-ghost btn-sm" title="登録帳票をJSONで書き出し"><i class="fas fa-file-export"></i> 書出</button>
+      <button id="btnImportForms" class="btn btn-ghost btn-sm" title="JSONから帳票を読み込み"><i class="fas fa-file-import"></i> 読込</button>
       <button id="btnClearForms" class="btn btn-ghost btn-sm"><i class="fas fa-trash-can"></i> 全削除</button>
+      <input type="file" id="importFormsInput" accept="application/json,.json" style="display:none">
     </div>
     <div id="formLibList" class="lib-list">
       <div class="empty-hint"><i class="fas fa-inbox"></i><span>帳票未登録</span></div>
@@ -629,6 +635,40 @@
       <button type="button" id="pdfCancel" class="btn btn-ghost">キャンセル</button>
       <button type="button" id="pdfBatchBtn" class="btn btn-outline" style="display:none"><i class="fas fa-layer-group"></i> 全ページを一括OCR</button>
       <button type="button" id="pdfLoadBtn" class="btn btn-primary"><i class="fas fa-check"></i> このページを読み込む</button>
+    </div>
+  </div>
+</div>
+
+<!-- 設定モーダル（判定しきい値・マッチング精度） -->
+<div class="modal-overlay hidden" id="settingsModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr">
+      <h2><i class="fas fa-gear"></i> 設定</h2>
+      <button class="modal-close" id="settingsClose"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <div class="debug-sec-ttl"><i class="fas fa-scale-balanced"></i> 帳票判定のしきい値</div>
+      <p class="hint-text">マッチングのランキングから帳票を選びます。確信度が <b>「採用」しきい値</b>以上なら自動採用、<b>「不一致」下限</b>未満なら不一致、その間は <b>要確認（ユーザー確認）</b>になります。</p>
+      <div class="prow"><label class="plabel">「採用」しきい値（確信度） <b id="setValAcceptConf" class="pval">0.70</b></label><input type="range" id="setAcceptConf" class="pslider" min="0.40" max="0.95" step="0.01" value="0.70"></div>
+      <div class="prow"><label class="plabel">ほぼ一致で即採用（peak） <b id="setValNearExact" class="pval">0.90</b></label><input type="range" id="setNearExact" class="pslider" min="0.70" max="1.00" step="0.01" value="0.90"></div>
+      <div class="prow"><label class="plabel">「不一致」下限（peak） <b id="setValAcceptFloor" class="pval">0.45</b></label><input type="range" id="setAcceptFloor" class="pslider" min="0.20" max="0.70" step="0.01" value="0.45"></div>
+      <div class="prow"><label class="plabel">2位との最小差（margin） <b id="setValMarginMin" class="pval">0.06</b></label><input type="range" id="setMarginMin" class="pslider" min="0.00" max="0.30" step="0.01" value="0.06"></div>
+
+      <div class="debug-sec-ttl" style="margin-top:14px"><i class="fas fa-crosshairs"></i> マッチング探索（精度↔速度）</div>
+      <p class="hint-text">探索を広げると、傾き・サイズ違いに強くなり一致度が上がりますが、処理は重くなります。</p>
+      <div class="prow"><label class="plabel">傾き探索範囲 ± <b id="setValAngle" class="pval">2</b>°</label><input type="range" id="setAngleRange" class="pslider" min="0" max="6" step="1" value="2"></div>
+      <div class="prow"><label class="plabel">サイズ（スケール）探索</label>
+        <select id="setScaleMode" class="pselect">
+          <option value="narrow">狭い（等倍中心・速い）</option>
+          <option value="standard" selected>標準（±15%）</option>
+          <option value="wide">広い（±30%・精度重視）</option>
+        </select>
+      </div>
+      <p class="hint-text">精度を上げるコツ：識別的で文字/罫線がはっきりした領域をアンカーにし、<b>2つ以上</b>登録。OCR実行画面の判定パネルに「アンカー別スコア」が出るので、低いアンカーを差し替えると改善します。</p>
+    </div>
+    <div class="cr-ftr">
+      <button type="button" id="settingsReset" class="btn btn-ghost"><i class="fas fa-rotate-left"></i> 既定に戻す</button>
+      <button type="button" id="settingsSave" class="btn btn-primary"><i class="fas fa-check"></i> 保存して閉じる</button>
     </div>
   </div>
 </div>

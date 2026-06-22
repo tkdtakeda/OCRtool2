@@ -41,6 +41,25 @@
   function canvasFromImg(img) { const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d').drawImage(img, 0, 0); return c; }
   function thumbURL(canvas, w = 90) { const s = Math.min(1, w / canvas.width); const c = document.createElement('canvas'); c.width = Math.round(canvas.width * s); c.height = Math.round(canvas.height * s); c.getContext('2d').drawImage(canvas, 0, 0, c.width, c.height); return c.toDataURL('image/png'); }
 
+  /* ── 設定（判定しきい値・マッチング探索）。localStorage 永続化 ── */
+  const SETTINGS_KEY = 'ocrtool_settings';
+  const SCALE_PRESETS = { narrow: [1.0], standard: [0.85, 1.0, 1.15], wide: [0.7, 0.85, 1.0, 1.15, 1.3] };
+  function defaultSettings() { return { acceptConf: 0.70, nearExact: 0.90, acceptFloor: 0.45, marginMin: 0.06, angleRange: 2, scaleMode: 'standard' }; }
+  function loadSettings() {
+    try { S.settings = { ...defaultSettings(), ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }; }
+    catch (_) { S.settings = defaultSettings(); }
+  }
+  function persistSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(S.settings)); } catch (_) {} }
+  /* 判定（classify）に渡す探索・しきい値オプションを設定から構築 */
+  function classifyOpts() {
+    const s = S.settings || defaultSettings();
+    return {
+      angleRange: s.angleRange, angleStep: 1,
+      scaleFactors: SCALE_PRESETS[s.scaleMode] || SCALE_PRESETS.standard,
+      voting: { acceptConf: s.acceptConf, nearExact: s.nearExact, acceptFloor: s.acceptFloor, marginMin: s.marginMin },
+    };
+  }
+
   /* ── CV lifecycle ───────────────────────────────────── */
   document.addEventListener('cv-ready', () => { S.cvReady = true; $('loadingOverlay').classList.add('hidden'); UI.toast('OpenCV.js の準備が完了しました', 'success'); });
   document.addEventListener('cv-error', () => { $('loadingMsg').textContent = '読み込み失敗。インターネット接続を確認してください。'; UI.toast('OpenCV.js の読み込みに失敗しました', 'error', 6000); });
@@ -395,8 +414,7 @@
     UI.setPipeline('match', []);
     await new Promise(r => setTimeout(r, 30));
     try {
-      const { decision, scores } = await Recognizer.classify(S.recogCanvas, S.forms,
-        { angleRange: 2, angleStep: 1 });
+      const { decision, scores } = await Recognizer.classify(S.recogCanvas, S.forms, classifyOpts());
       S.lastClassify = { decision, scores };
       UI.setPipeline('decide', ['match']);
       UI.renderDecision(decision, S.forms, {});
@@ -753,7 +771,7 @@
   async function recognizePageQuietly(canvas, page, forcedFormId) {
     const thumb = thumbURL(canvas, 120);
     try {
-      const { decision, scores } = await Recognizer.classify(canvas, S.forms, { angleRange: 2, angleStep: 1 });
+      const { decision, scores } = await Recognizer.classify(canvas, S.forms, classifyOpts());
       const candId = decision.best && decision.best.formId;
       const useId = forcedFormId || candId;
       const form = useId ? S.forms.find(f => f.id === useId) : null;
@@ -943,6 +961,70 @@
     }
   }
 
+  /* ── 設定モーダル ───────────────────────────────────── */
+  function applySettingsToUI() {
+    const s = S.settings;
+    const set = (id, v, lbl, d) => { $(id).value = v; if (lbl) $(lbl).textContent = Number(v).toFixed(d); };
+    set('setAcceptConf', s.acceptConf, 'setValAcceptConf', 2);
+    set('setNearExact', s.nearExact, 'setValNearExact', 2);
+    set('setAcceptFloor', s.acceptFloor, 'setValAcceptFloor', 2);
+    set('setMarginMin', s.marginMin, 'setValMarginMin', 2);
+    set('setAngleRange', s.angleRange, 'setValAngle', 0);
+    $('setScaleMode').value = s.scaleMode;
+  }
+  function openSettings() { applySettingsToUI(); $('settingsModal').classList.remove('hidden'); }
+  function closeSettings() { $('settingsModal').classList.add('hidden'); }
+  function saveSettings() {
+    const num = id => parseFloat($(id).value);
+    S.settings = {
+      acceptConf: num('setAcceptConf'), nearExact: num('setNearExact'),
+      acceptFloor: num('setAcceptFloor'), marginMin: num('setMarginMin'),
+      angleRange: parseInt($('setAngleRange').value, 10), scaleMode: $('setScaleMode').value,
+    };
+    persistSettings();
+    closeSettings();
+    UI.toast('設定を保存しました', 'success');
+  }
+  function resetSettings() { S.settings = defaultSettings(); applySettingsToUI(); UI.toast('既定値に戻しました（保存で確定）', 'info'); }
+
+  /* ── 帳票のインポート / エクスポート ────────────────── */
+  function downloadJson(obj, name) {
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  async function exportForms() {
+    let forms = [];
+    try { forms = await FormDB.getAllForms(); } catch (_) {}
+    if (!forms.length) return UI.toast('エクスポートする帳票がありません', 'warning');
+    downloadJson({ app: 'chouhyou-ocr', version: 1, exportedAt: new Date().toISOString(), matchSettings: S.settings, forms }, `forms_${Date.now()}.json`);
+    UI.toast(`${forms.length} 件の帳票を書き出しました`, 'success');
+  }
+  async function importFormsFromFile(file) {
+    try {
+      const data = JSON.parse(await file.text());
+      const forms = Array.isArray(data) ? data : (data.forms || []);
+      if (!forms.length) return UI.toast('帳票が見つかりません', 'warning');
+      let n = 0;
+      for (const f of forms) {
+        if (!f || !f.referenceImage || !f.referenceImage.dataURL) continue;
+        const copy = {
+          ...f, id: uid(), isSample: false, createdAt: Date.now(), updatedAt: Date.now(),
+          /* アンカー/領域の内部IDは振り直し（既存帳票とのID衝突を防ぐ） */
+          anchors: (f.anchors || []).map(a => ({ ...a, id: uid() })),
+          ocrRegions: (f.ocrRegions || []).map(r => ({ ...r, id: uid() })),
+        };
+        await FormDB.putForm(copy); n++;
+      }
+      if (!Array.isArray(data) && data.matchSettings && confirm('判定しきい値などの設定も取り込みますか？')) {
+        S.settings = { ...defaultSettings(), ...data.matchSettings }; persistSettings();
+      }
+      await loadForms();
+      UI.toast(`${n} 件の帳票を読み込みました`, 'success');
+    } catch (e) { UI.toast('読み込みに失敗しました: ' + (e.message || e), 'error', 6000); }
+  }
+
   /* ── Init ───────────────────────────────────────────── */
   function init() {
     initAccordions(); initRegSliders(); initRegCanvasEvents(); initDbgControls(); initRrPan();
@@ -1024,6 +1106,20 @@
     $('helpModal').addEventListener('click', e => { if (e.target === $('helpModal')) $('helpModal').classList.add('hidden'); });
     document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => m.classList.add('hidden')); });
 
+    /* 設定モーダル */
+    $('btnSettings').addEventListener('click', openSettings);
+    $('settingsClose').addEventListener('click', closeSettings);
+    $('settingsSave').addEventListener('click', saveSettings);
+    $('settingsReset').addEventListener('click', resetSettings);
+    $('settingsModal').addEventListener('click', e => { if (e.target === $('settingsModal')) closeSettings(); });
+    [['setAcceptConf', 'setValAcceptConf', 2], ['setNearExact', 'setValNearExact', 2], ['setAcceptFloor', 'setValAcceptFloor', 2], ['setMarginMin', 'setValMarginMin', 2], ['setAngleRange', 'setValAngle', 0]]
+      .forEach(([sl, lb, d]) => $(sl).addEventListener('input', () => { $(lb).textContent = Number($(sl).value).toFixed(d); }));
+
+    /* 帳票インポート/エクスポート */
+    $('btnExportForms').addEventListener('click', exportForms);
+    $('btnImportForms').addEventListener('click', () => $('importFormsInput').click());
+    $('importFormsInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) importFormsFromFile(f); e.target.value = ''; });
+
     document.addEventListener('paste', handlePaste);
 
     /* 初期データ + IndexedDB 可用性チェック（file:// の Safari 等で無効な場合に通知） */
@@ -1033,6 +1129,7 @@
     } else {
       FormDB.open().catch(() => UI.toast('IndexedDB を初期化できませんでした。Chrome/Edge で開くと保存できます', 'warning', 8000));
     }
+    loadSettings();
     loadForms();
     refreshHistory();
     loadPresets();
