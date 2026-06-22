@@ -27,7 +27,7 @@
     recogCanvas: null, lastClassify: null,
     recogFormId: null, recogMatchInfo: null, recogResult: null, rrZoom: 1,
     dbgLoadedFormId: null, patternOverrides: {}, constraintOverrides: {},
-    batchResults: null,
+    batchResults: null, batchCancel: false,
   };
 
   /* PSM 比較用パターン */
@@ -707,18 +707,23 @@
     $('rrZoomLabel').textContent = Math.round(scale * 100) + '%';
   }
 
-  /* 認識結果を履歴レコードへ整形（単一ページ・一括の共通処理） */
-  function buildResultRecord(form, dec, result, srcCanvas, manual) {
+  /* 認識結果を履歴レコードへ整形（単一ページ・一括の共通処理）。
+     DB出力用に page（ページ数）と ocrValues（OCR1, OCR2,… の番号付き値）も保持する。 */
+  function buildResultRecord(form, dec, result, srcCanvas, manual, page) {
     const avgConf = result.fields.length ? Math.round(result.fields.reduce((s, f) => s + (f.confidence || 0), 0) / result.fields.length) : 0;
+    const ocrValues = {};
+    result.fields.forEach((f, i) => { ocrValues['OCR' + (i + 1)] = f.text || ''; });
     return {
       id: uid(),
       formId: form.id, formName: form.name,
+      page: page || 1,
       createdAt: Date.now(),
       sourceThumb: thumbURL(srcCanvas, 90),
       decision: manual ? 'review' : dec.decision,
       confidence: dec.confidence,
       angle: result.angle,
       overallFieldConfidence: avgConf,
+      ocrValues,                                   // { OCR1:'…', OCR2:'…' }（DB出力用）
       voting: { margin: dec.margin, legacySignal: dec.legacySignal, ranking: (dec.ranking || []).map(r => ({ formName: r.formName, peak: r.peak, agg: r.agg, support: r.support })) },
       settings: { ocr: form.ocrSettings, lineRemoval: form.lineRemoval },
       fields: result.fields.map(f => ({ name: f.name, text: f.text, confidence: f.confidence, error: f.error || null })),
@@ -727,7 +732,7 @@
   async function saveResult(form, result) {
     const dec = S.lastClassify.decision;
     const manual = !(dec.best && dec.best.formId === form.id);
-    const record = buildResultRecord(form, dec, result, S.recogCanvas, manual);
+    const record = buildResultRecord(form, dec, result, S.recogCanvas, manual, 1);
     try { await FormDB.putResult(record); $('saveStatus').innerHTML = `<i class="fas fa-circle-check"></i> IndexedDB に保存しました（平均信頼度 ${record.overallFieldConfidence}%）`; refreshHistory(); }
     catch (e) { $('saveStatus').textContent = '保存に失敗: ' + e.message; }
   }
@@ -759,7 +764,7 @@
       if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
       LineRemovalProcessor.cleanupMats(res.previewMats);
       const manual = forcedFormId ? true : !(candId === form.id);
-      try { await FormDB.putResult(buildResultRecord(form, decision, res, canvas, manual)); } catch (_) {}
+      try { await FormDB.putResult(buildResultRecord(form, decision, res, canvas, manual, page)); } catch (_) {}
       const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
       return { page, decision: verdict, formName: form.name, forced: !!forcedFormId, avgConf: avg, fields: res.fields, thumb };
     } catch (e) {
@@ -767,19 +772,23 @@
     }
   }
 
-  /* 指定範囲のページを順に一括OCR（pageSource = { pages:[n…], total, getPage(n), done() }） */
+  /* 指定範囲のページを順に一括OCR（pageSource = { pages:[n…], total, getPage(n), done() }）。
+     大量ページでも 1枚ずつ描画→OCR→破棄するためメモリは一定。中止可能。 */
   async function runBatchPdf(src) {
     if (!S.cvReady) { src.done && src.done(); return UI.toast('OpenCV.js 読み込み中です', 'warning'); }
     if (!S.forms.length) { src.done && src.done(); return UI.toast('先に帳票を登録してください', 'warning'); }
     const pages = src.pages || [];
     const total = src.total || pages.length;
     UI.openBatchModal(total);
+    S.batchCancel = false;
     const results = [];
+    let cancelled = false;
     try {
       for (let idx = 0; idx < pages.length; idx++) {
+        if (S.batchCancel) { cancelled = true; break; }
         const p = pages[idx];
         UI.updateBatchProgress(`ページ ${p}（${idx + 1}/${total}）を認識中…`, idx / Math.max(1, total));
-        await new Promise(r => setTimeout(r, 15));   // 進捗描画の隙間
+        await new Promise(r => setTimeout(r, 5));   // 進捗描画・中止受付の隙間
         let canvas;
         try { canvas = await src.getPage(p); }
         catch (_) { results.push({ page: p, decision: 'error', formName: '—', error: 'ページ描画に失敗', thumb: '' }); continue; }
@@ -792,23 +801,54 @@
     UI.renderBatchResults(results);
     refreshHistory();
     const ok = results.filter(r => r.decision === 'accepted').length;
-    UI.toast(`一括OCR完了 — ${total}ページ中 ${ok}件を自動採用し履歴に保存`, 'success', 4500);
+    UI.toast(`一括OCR${cancelled ? '中止' : '完了'} — ${results.length}/${total}ページ処理・${ok}件採用、履歴に保存`, cancelled ? 'warning' : 'success', 4500);
   }
 
-  /* 一括結果を CSV（ページ + 全フィールド）でクリップボードへ */
+  /* OCR結果を「ページ数, OCR1, OCR2, …」形式の CSV に整形（DB出力フォーマット）。
+     rows: [{ page, formName, decision, fields:[{text}] }]。OCR列はページ最大数に合わせる。 */
+  function resultsToCsv(rows) {
+    const maxN = rows.reduce((m, r) => Math.max(m, (r.fields || []).length), 0);
+    const esc = v => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : String(v == null ? '' : v);
+    const head = ['ページ数'];
+    for (let i = 1; i <= maxN; i++) head.push('OCR' + i);
+    head.push('帳票', '判定');
+    const verdict = { accepted: '採用', review: '要確認', rejected: '不一致', error: 'エラー' };
+    const lines = rows.map(r => {
+      const vals = (r.fields || []).map(f => f.text || '');
+      const cols = [r.page ?? ''];
+      for (let i = 0; i < maxN; i++) cols.push(vals[i] ?? '');
+      cols.push(r.formName || '', verdict[r.decision] || r.decision || '');
+      return cols.map(esc).join(',');
+    });
+    return [head.map(esc).join(','), ...lines].join('\n');
+  }
+  function copyCsvToClipboard(csv) {
+    navigator.clipboard.writeText(csv).then(() => UI.toast('CSVをコピーしました', 'success')).catch(() => UI.toast('コピーに失敗しました', 'error'));
+  }
+  /* CSV をファイルとしてダウンロード（BOM付きで Excel の文字化け回避） */
+  function downloadCsv(csv, name) {
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    UI.toast(`${name} を保存しました`, 'success');
+  }
   function copyBatchCsv() {
     const results = S.batchResults || [];
     if (!results.length) return UI.toast('コピーするデータがありません', 'warning');
-    const names = [];
-    results.forEach(r => (r.fields || []).forEach(f => { if (!names.includes(f.name)) names.push(f.name); }));
-    const esc = v => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
-    const head = ['ページ', '帳票', '判定', ...names];
-    const rows = results.map(r => {
-      const map = {}; (r.fields || []).forEach(f => { map[f.name] = f.text || ''; });
-      return [r.page, r.formName || '', r.decision || '', ...names.map(n => map[n] ?? '')].map(esc).join(',');
-    });
-    const csv = [head.map(esc).join(','), ...rows].join('\n');
-    navigator.clipboard.writeText(csv).then(() => UI.toast('CSVをコピーしました', 'success')).catch(() => UI.toast('コピーに失敗しました', 'error'));
+    copyCsvToClipboard(resultsToCsv(results));
+  }
+  function downloadBatchCsv() {
+    const results = S.batchResults || [];
+    if (!results.length) return UI.toast('出力するデータがありません', 'warning');
+    downloadCsv(resultsToCsv(results), `ocr_batch_${Date.now()}.csv`);
+  }
+  /* 履歴（IndexedDB）の全件を CSV 出力 */
+  async function exportHistoryCsv() {
+    let rows = [];
+    try { rows = await FormDB.getAllResults(100000); } catch (_) {}
+    if (!rows.length) return UI.toast('履歴がありません', 'warning');
+    downloadCsv(resultsToCsv(rows), `ocr_history_${Date.now()}.csv`);
   }
 
   /* ── 履歴 ───────────────────────────────────────────── */
@@ -950,11 +990,14 @@
     $('batchClose').addEventListener('click', () => UI.closeBatchModal());
     $('batchCloseBtn').addEventListener('click', () => UI.closeBatchModal());
     $('batchCsv').addEventListener('click', copyBatchCsv);
+    $('batchCsvDl').addEventListener('click', downloadBatchCsv);
+    $('batchCancel').addEventListener('click', () => { S.batchCancel = true; UI.updateBatchProgress('中止しています…', 1); });
     $('btnRecogSample').addEventListener('click', () => loadRecogImage(SampleForms.sampleInputCanvas(0, 1.5)));
     $('btnRunRecognize').addEventListener('click', runRecognize);
     $('btnApplyForm').addEventListener('click', () => applyForm($('dpFormSelect').value));
     $('btnCopyAll').addEventListener('click', copyAllFields);
     $('btnClearHistory').addEventListener('click', clearHistory);
+    $('btnExportHistory').addEventListener('click', exportHistoryCsv);
 
     /* 罫線除去結果プレビューのズーム */
     $('btnRrZoomIn').addEventListener('click', () => { S.rrZoom = Math.min(8, S.rrZoom * 1.3); renderResultPreview(); });

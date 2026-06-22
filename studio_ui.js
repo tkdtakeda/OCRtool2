@@ -312,7 +312,7 @@ const StudioUI = (() => {
           <img class="hist-thumb" src="${r.sourceThumb || ''}" alt="">
           <div class="hist-info">
             <div class="hist-form">${esc(r.formName || '—')}</div>
-            <div class="hist-time">${fmtTime(r.createdAt)} ・ 確信度 ${Math.round((r.confidence || 0) * 100)}%</div>
+            <div class="hist-time">${r.page ? `P${r.page} ・ ` : ''}${fmtTime(r.createdAt)} ・ 確信度 ${Math.round((r.confidence || 0) * 100)}%</div>
           </div>
           <span class="hist-verdict ${r.decision}">${VERDICT_SHORT[r.decision] || '—'}</span>
           <button class="btn-icon-sm" data-act="del" title="削除"><i class="fas fa-xmark"></i></button>
@@ -330,6 +330,7 @@ const StudioUI = (() => {
   function openBatchModal(total) {
     $('batchModal').classList.remove('hidden');
     $('batchProgress').classList.remove('hidden');
+    $('batchCancel').style.display = '';
     $('batchSummary').classList.add('hidden');
     $('batchList').innerHTML = '';
     updateBatchProgress(`${total} ページを認識します…`, 0);
@@ -339,8 +340,10 @@ const StudioUI = (() => {
     $('batchProgressFill').style.width = `${Math.round((pct || 0) * 100)}%`;
     $('batchProgressMsg').textContent = msg || '処理中…';
   }
+  const BATCH_RENDER_CAP = 200;   // 大量ページでもDOMが重くならないよう表示は上限まで
   function renderBatchResults(results) {
     $('batchProgress').classList.add('hidden');
+    $('batchCancel').style.display = 'none';
     const count = k => results.filter(r => r.decision === k).length;
     const sum = $('batchSummary');
     sum.classList.remove('hidden');
@@ -348,7 +351,8 @@ const StudioUI = (() => {
       + `<span class="bs-rv">要確認 ${count('review')}</span> / <span class="bs-rj">不一致 ${count('rejected')}</span>`
       + (count('error') ? ` / <span class="bs-er">エラー ${count('error')}</span>` : '');
     const c = $('batchList'); c.innerHTML = '';
-    results.forEach(r => {
+    const shown = results.slice(0, BATCH_RENDER_CAP);
+    shown.forEach(r => {
       const item = document.createElement('div'); item.className = 'batch-card';
       const verdict = VERDICT_SHORT[r.decision] || (r.decision === 'error' ? 'エラー' : '—');
       const fieldsHtml = (r.fields || []).length
@@ -364,6 +368,11 @@ const StudioUI = (() => {
         <div class="batch-fields">${fieldsHtml}</div>`;
       c.appendChild(item);
     });
+    if (results.length > BATCH_RENDER_CAP) {
+      const more = document.createElement('div'); more.className = 'batch-more';
+      more.textContent = `… 表示は先頭 ${BATCH_RENDER_CAP} 件のみ（全 ${results.length} 件は「CSV出力」または認識履歴で確認できます）`;
+      c.appendChild(more);
+    }
   }
 
   return {

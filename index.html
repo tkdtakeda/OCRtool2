@@ -414,7 +414,10 @@
     <div class="recog-history">
       <div class="rh-hdr">
         <span><i class="fas fa-clock-rotate-left"></i> 認識履歴（IndexedDB・信頼度つき）</span>
-        <button id="btnClearHistory" class="btn btn-ghost btn-sm"><i class="fas fa-trash-can"></i> 履歴削除</button>
+        <span class="rh-acts">
+          <button id="btnExportHistory" class="btn btn-outline btn-sm" title="ページ数・OCR1, OCR2,… 形式でCSV出力"><i class="fas fa-file-csv"></i> CSV出力</button>
+          <button id="btnClearHistory" class="btn btn-ghost btn-sm"><i class="fas fa-trash-can"></i> 履歴削除</button>
+        </span>
       </div>
       <div id="historyList" class="history-list"><div class="empty-hint"><i class="fas fa-inbox"></i><span>履歴なし</span></div></div>
     </div>
@@ -641,11 +644,13 @@
       <div id="batchProgress" class="recog-progress">
         <div class="ocr-progress-track"><div id="batchProgressFill" class="ocr-progress-fill"></div></div>
         <span id="batchProgressMsg" class="ocr-progress-msg">処理中…</span>
+        <button type="button" id="batchCancel" class="btn btn-ghost btn-sm batch-cancel"><i class="fas fa-stop"></i> 中止（ここまでを保存）</button>
       </div>
       <div id="batchSummary" class="batch-summary hidden"></div>
       <div id="batchList" class="batch-list"></div>
     </div>
     <div class="cr-ftr">
+      <button type="button" id="batchCsvDl" class="btn btn-outline"><i class="fas fa-download"></i> CSV出力</button>
       <button type="button" id="batchCsv" class="btn btn-outline"><i class="fas fa-file-csv"></i> CSVコピー</button>
       <button type="button" id="batchCloseBtn" class="btn btn-primary">閉じる</button>
     </div>

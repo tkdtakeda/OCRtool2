@@ -435,3 +435,8 @@
 .rank-anchors { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 5px; }
 .rank-anchors-lbl { font-size: .64rem; color: var(--c-text-3); font-weight: 700; }
 .anchor-chip { font-size: .64rem; font-weight: 700; padding: 1px 6px; border-radius: 8px; font-family: 'IBM Plex Mono', monospace; }
+
+/* 履歴ヘッダのアクション / 一括の中止ボタン */
+.rh-acts { display: flex; align-items: center; gap: 6px; }
+.batch-cancel { margin-left: 10px; }
+.batch-more { font-size: .76rem; color: var(--c-text-3); text-align: center; padding: 8px; font-style: italic; }
