@@ -24,6 +24,7 @@ const CharConstraint = (() => {
   const UPPER  = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   const LOWER  = 'abcdefghijklmnopqrstuvwxyz';
   const ORDER  = DIGITS + UPPER + LOWER;   // 正規順（要約・整列に使用）
+  const NUM_NOISE = ', 　，¥￥$\t';         // 数字欄で出るノイズ（桁区切り・空白・通貨）
 
   /** ベース字種 → 文字集合（任意は ''） */
   function presetSet(type) {
@@ -224,12 +225,17 @@ const CharConstraint = (() => {
 
     if (r.variable) {
       const setS = new Set(r.set);
-      let valid = chars.length > 0;
+      /* 数字のみの欄では、桁区切り(,)・空白・通貨記号は常にノイズとして除去
+         （「201,300」→「201300」。元の値に含めたい場合は記号を許可文字に追加） */
+      const numeric = r.set.length > 0 && [...r.set].every(c => c >= '0' && c <= '9');
+      let valid = true;
       const out = [];
       for (const c of chars) {
+        if (numeric && !setS.has(c) && NUM_NOISE.includes(c)) continue;   // 桁区切り等を除去
         const f = correctChar(c, setS);
         if (f != null) out.push(f); else { out.push(c); valid = false; }
       }
+      if (!out.length) valid = false;
       return { text: out.join(''), valid, applied: true };
     }
 

@@ -91,9 +91,14 @@ const OcrProcessor = (() => {
           bbox:       w.bbox,
         }));
 
+      /* 文字別の確信度（デバッグ表示用。低信頼の原因箇所が分かる） */
+      const symbols = (data.symbols || [])
+        .filter(s => s.text && s.text.trim())
+        .map(s => ({ text: s.text, confidence: Math.round(s.confidence) }));
+
       /* data.confidence は領域全体の平均信頼度。文字ホワイトリスト指定時は
          words が空/0になることがあるため、フォールバックとして返す。 */
-      return { fullText: data.text || '', words, confidence: typeof data.confidence === 'number' ? data.confidence : 0, error: null };
+      return { fullText: data.text || '', words, symbols, confidence: typeof data.confidence === 'number' ? data.confidence : 0, error: null };
 
     } catch (e) {
       return {

@@ -27,6 +27,7 @@
     recogCanvas: null, lastClassify: null,
     recogFormId: null, recogMatchInfo: null, recogResult: null, rrZoom: 1,
     dbgLoadedFormId: null, patternOverrides: {}, constraintOverrides: {},
+    batchResults: null,
   };
 
   /* PSM 比較用パターン */
@@ -372,9 +373,9 @@
   /* 画像/PDF を共通の入口で受け取り、キャンバスにして渡す。
      画像 → そのままキャンバス化。PDF → 取り込みモーダル（ページ/DPI選択）経由。
      これにより基準画像・アンカー・OCR入力のどこでも画像/PDFを同様に扱える。 */
-  async function acceptFile(file, useCanvas) {
+  async function acceptFile(file, useCanvas, opts) {
     if (!file) return;
-    if (PdfImport.isPdf(file)) { PdfImport.open(file, useCanvas); return; }
+    if (PdfImport.isPdf(file)) { PdfImport.open(file, { onCanvas: useCanvas, ...(opts || {}) }); return; }
     if (file.type && file.type.startsWith('image/')) {
       try {
         const img = await dataURLtoImg(await fileToDataURL(file));
@@ -706,24 +707,28 @@
     $('rrZoomLabel').textContent = Math.round(scale * 100) + '%';
   }
 
-  async function saveResult(form, result) {
-    const dec = S.lastClassify.decision;
-    const manual = !(dec.best && dec.best.formId === form.id);
+  /* 認識結果を履歴レコードへ整形（単一ページ・一括の共通処理） */
+  function buildResultRecord(form, dec, result, srcCanvas, manual) {
     const avgConf = result.fields.length ? Math.round(result.fields.reduce((s, f) => s + (f.confidence || 0), 0) / result.fields.length) : 0;
-    const record = {
+    return {
       id: uid(),
       formId: form.id, formName: form.name,
       createdAt: Date.now(),
-      sourceThumb: thumbURL(S.recogCanvas, 90),
+      sourceThumb: thumbURL(srcCanvas, 90),
       decision: manual ? 'review' : dec.decision,
       confidence: dec.confidence,
       angle: result.angle,
       overallFieldConfidence: avgConf,
-      voting: { margin: dec.margin, legacySignal: dec.legacySignal, ranking: dec.ranking.map(r => ({ formName: r.formName, peak: r.peak, agg: r.agg, support: r.support })) },
-      settings: { ocr: form.ocrSettings, lineRemoval: form.lineRemoval },  // 再現用に使用した設定も保存
+      voting: { margin: dec.margin, legacySignal: dec.legacySignal, ranking: (dec.ranking || []).map(r => ({ formName: r.formName, peak: r.peak, agg: r.agg, support: r.support })) },
+      settings: { ocr: form.ocrSettings, lineRemoval: form.lineRemoval },
       fields: result.fields.map(f => ({ name: f.name, text: f.text, confidence: f.confidence, error: f.error || null })),
     };
-    try { await FormDB.putResult(record); $('saveStatus').innerHTML = `<i class="fas fa-circle-check"></i> IndexedDB に保存しました（平均信頼度 ${avgConf}%）`; refreshHistory(); }
+  }
+  async function saveResult(form, result) {
+    const dec = S.lastClassify.decision;
+    const manual = !(dec.best && dec.best.formId === form.id);
+    const record = buildResultRecord(form, dec, result, S.recogCanvas, manual);
+    try { await FormDB.putResult(record); $('saveStatus').innerHTML = `<i class="fas fa-circle-check"></i> IndexedDB に保存しました（平均信頼度 ${record.overallFieldConfidence}%）`; refreshHistory(); }
     catch (e) { $('saveStatus').textContent = '保存に失敗: ' + e.message; }
   }
 
@@ -732,6 +737,71 @@
     if (!rows.length) return UI.toast('コピーするデータがありません', 'warning');
     const lines = Array.from(rows).map(r => `${r.querySelector('.field-name').textContent}: ${r.querySelector('.field-text').value}`);
     navigator.clipboard.writeText(lines.join('\n')).then(() => UI.toast('全フィールドをコピーしました', 'success')).catch(() => UI.toast('コピーに失敗しました', 'error'));
+  }
+
+  /* ════════════════════════════════════════════════════
+     複数ページ一括OCR（PDFの全ページ）
+     ════════════════════════════════════════════════════ */
+  /* 1枚のキャンバスを判定→（採用なら）OCRし、結果と履歴保存まで行う（UIは触らない） */
+  async function recognizePageQuietly(canvas, page) {
+    const thumb = thumbURL(canvas, 120);
+    try {
+      const { decision, scores } = await Recognizer.classify(canvas, S.forms, { angleRange: 2, angleStep: 1 });
+      const candId = decision.best && decision.best.formId;
+      const candName = candId ? (S.forms.find(f => f.id === candId)?.name || '—') : '—';
+      if (decision.decision === 'accepted' && candId) {
+        const form = S.forms.find(f => f.id === candId);
+        const res = await Recognizer.runOcr(canvas, form, bestAnchorFor(form, scores), {}, {});
+        if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
+        LineRemovalProcessor.cleanupMats(res.previewMats);
+        try { await FormDB.putResult(buildResultRecord(form, decision, res, canvas, false)); } catch (_) {}
+        const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
+        return { page, decision: 'accepted', formName: form.name, avgConf: avg, fields: res.fields, thumb };
+      }
+      return { page, decision: decision.decision, formName: candName, fields: [], thumb };
+    } catch (e) {
+      return { page, decision: 'error', formName: '—', error: e.message || String(e), thumb };
+    }
+  }
+
+  /* PDF全ページを順に一括OCR（pageSource = { numPages, getPage(n), done() }） */
+  async function runBatchPdf(src) {
+    if (!S.cvReady) { src.done && src.done(); return UI.toast('OpenCV.js 読み込み中です', 'warning'); }
+    if (!S.forms.length) { src.done && src.done(); return UI.toast('先に帳票を登録してください', 'warning'); }
+    UI.openBatchModal(src.numPages);
+    const results = [];
+    try {
+      for (let p = 1; p <= src.numPages; p++) {
+        UI.updateBatchProgress(`ページ ${p}/${src.numPages} を認識中…`, (p - 1) / src.numPages);
+        await new Promise(r => setTimeout(r, 15));   // 進捗描画の隙間
+        let canvas;
+        try { canvas = await src.getPage(p); }
+        catch (_) { results.push({ page: p, decision: 'error', formName: '—', error: 'ページ描画に失敗', thumb: '' }); continue; }
+        results.push(await recognizePageQuietly(canvas, p));
+      }
+    } finally { src.done && src.done(); }
+    S.batchResults = results;
+    UI.updateBatchProgress('完了', 1);
+    UI.renderBatchResults(results);
+    refreshHistory();
+    const ok = results.filter(r => r.decision === 'accepted').length;
+    UI.toast(`一括OCR完了 — ${src.numPages}ページ中 ${ok}件を自動採用し履歴に保存`, 'success', 4500);
+  }
+
+  /* 一括結果を CSV（ページ + 全フィールド）でクリップボードへ */
+  function copyBatchCsv() {
+    const results = S.batchResults || [];
+    if (!results.length) return UI.toast('コピーするデータがありません', 'warning');
+    const names = [];
+    results.forEach(r => (r.fields || []).forEach(f => { if (!names.includes(f.name)) names.push(f.name); }));
+    const esc = v => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
+    const head = ['ページ', '帳票', '判定', ...names];
+    const rows = results.map(r => {
+      const map = {}; (r.fields || []).forEach(f => { map[f.name] = f.text || ''; });
+      return [r.page, r.formName || '', r.decision || '', ...names.map(n => map[n] ?? '')].map(esc).join(',');
+    });
+    const csv = [head.map(esc).join(','), ...rows].join('\n');
+    navigator.clipboard.writeText(csv).then(() => UI.toast('CSVをコピーしました', 'success')).catch(() => UI.toast('コピーに失敗しました', 'error'));
   }
 
   /* ── 履歴 ───────────────────────────────────────────── */
@@ -865,9 +935,13 @@
     $('btnSaveForm').addEventListener('click', saveForm);
     $('btnCancelEdit').addEventListener('click', cancelEdit);
 
-    /* OCR工程（画像・PDF 共通の入口を使用） */
-    setupDrop('recogDrop', f => acceptFile(f, loadRecogImage), 'recogFileInput');
-    $('recogFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) acceptFile(f, loadRecogImage); e.target.value = ''; });
+    /* OCR工程（画像・PDF 共通の入口。PDFは複数ページの一括OCRも可） */
+    const recogOpts = { onBatch: runBatchPdf, allowBatch: true };
+    setupDrop('recogDrop', f => acceptFile(f, loadRecogImage, recogOpts), 'recogFileInput');
+    $('recogFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) acceptFile(f, loadRecogImage, recogOpts); e.target.value = ''; });
+    $('batchClose').addEventListener('click', () => UI.closeBatchModal());
+    $('batchCloseBtn').addEventListener('click', () => UI.closeBatchModal());
+    $('batchCsv').addEventListener('click', copyBatchCsv);
     $('btnRecogSample').addEventListener('click', () => loadRecogImage(SampleForms.sampleInputCanvas(0, 1.5)));
     $('btnRunRecognize').addEventListener('click', runRecognize);
     $('btnApplyForm').addEventListener('click', () => applyForm($('dpFormSelect').value));

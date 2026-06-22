@@ -217,6 +217,14 @@ const StudioUI = (() => {
 
   /* ── OCR フィールド結果 ─────────────────────────────── */
   function confClass(c) { return c >= 85 ? 'hi' : c >= 60 ? 'mid' : 'lo'; }
+  /** 文字別の確信度チップ（低信頼の原因箇所が一目で分かる） */
+  function symbolChipsHTML(symbols) {
+    if (!symbols || !symbols.length) return '<span class="field-syms-empty">（文字別データなし）</span>';
+    return symbols.map(s => {
+      const t = s.text === ' ' ? '␣' : esc(s.text);
+      return `<span class="sym-chip ${confClass(s.confidence)}" title="${s.confidence}%">${t}<small>${s.confidence}</small></span>`;
+    }).join('');
+  }
   function renderFieldResults(fields) {
     const c = $('fieldResults'); c.innerHTML = '';
     fields.forEach((f, i) => {
@@ -232,6 +240,9 @@ const StudioUI = (() => {
       /* 抽出パターン適用で生テキストと変わった場合は元の値を併記 */
       const rawHint = (f.raw !== undefined && f.raw !== f.text)
         ? `<span class="field-raw" title="抽出パターン適用前">元: ${esc(f.raw || '（空）')}</span>` : '';
+      const hasDetail = !!(f.cropDataURL || (f.symbols && f.symbols.length));
+      const detailBtn = hasDetail
+        ? `<button class="field-detail-btn" title="切り出し画像と文字別の確信度を表示"><i class="fas fa-magnifying-glass-chart"></i></button>` : '';
       row.innerHTML = `
         <div class="field-row-hdr">
           <span class="field-idx" style="background:${col}">${i + 1}</span>
@@ -239,8 +250,26 @@ const StudioUI = (() => {
           ${rawHint}
           ${consWarn}
           ${badge}
+          ${detailBtn}
         </div>
-        <textarea class="field-text" readonly>${esc(txt)}</textarea>`;
+        <textarea class="field-text" readonly>${esc(txt)}</textarea>
+        ${hasDetail ? `
+        <div class="field-detail hidden">
+          <div class="field-detail-col">
+            <span class="field-detail-lbl">切り出し画像（OCR対象）</span>
+            <img class="field-crop" src="${f.cropDataURL || ''}" alt="">
+          </div>
+          <div class="field-detail-col">
+            <span class="field-detail-lbl">文字別の確信度（OCR生データ）</span>
+            <div class="field-syms">${symbolChipsHTML(f.symbols)}</div>
+            <p class="field-detail-hint">低い箇所が原因です。画像にノイズ・罫線が写っていないか確認し、①OCR領域を値だけにタイトに ②罫線除去/二値化を調整 ③PDFはDPIを上げる と改善します。</p>
+          </div>
+        </div>` : ''}`;
+      if (hasDetail) {
+        const btn = row.querySelector('.field-detail-btn');
+        const detail = row.querySelector('.field-detail');
+        btn.addEventListener('click', () => { detail.classList.toggle('hidden'); btn.classList.toggle('is-open'); });
+      }
       c.appendChild(row);
     });
   }
@@ -291,12 +320,53 @@ const StudioUI = (() => {
     });
   }
 
+  /* ── 複数ページ一括OCR モーダル ─────────────────────── */
+  function openBatchModal(numPages) {
+    $('batchModal').classList.remove('hidden');
+    $('batchProgress').classList.remove('hidden');
+    $('batchSummary').classList.add('hidden');
+    $('batchList').innerHTML = '';
+    updateBatchProgress(`全 ${numPages} ページを認識します…`, 0);
+  }
+  function closeBatchModal() { $('batchModal').classList.add('hidden'); }
+  function updateBatchProgress(msg, pct) {
+    $('batchProgressFill').style.width = `${Math.round((pct || 0) * 100)}%`;
+    $('batchProgressMsg').textContent = msg || '処理中…';
+  }
+  function renderBatchResults(results) {
+    $('batchProgress').classList.add('hidden');
+    const count = k => results.filter(r => r.decision === k).length;
+    const sum = $('batchSummary');
+    sum.classList.remove('hidden');
+    sum.innerHTML = `全 <b>${results.length}</b> ページ ・ <span class="bs-ok">採用 ${count('accepted')}</span> / `
+      + `<span class="bs-rv">要確認 ${count('review')}</span> / <span class="bs-rj">不一致 ${count('rejected')}</span>`
+      + (count('error') ? ` / <span class="bs-er">エラー ${count('error')}</span>` : '');
+    const c = $('batchList'); c.innerHTML = '';
+    results.forEach(r => {
+      const item = document.createElement('div'); item.className = 'batch-card';
+      const verdict = VERDICT_SHORT[r.decision] || (r.decision === 'error' ? 'エラー' : '—');
+      const fieldsHtml = (r.fields || []).length
+        ? (r.fields).map(f => `<div class="batch-field"><span class="bf-name">${esc(f.name)}</span><span class="bf-text">${esc(f.text || (f.error ? '[エラー]' : ''))}</span><span class="bf-conf scv-${confClass(f.confidence)}">${f.confidence != null ? f.confidence + '%' : ''}</span></div>`).join('')
+        : `<div class="batch-none">${esc(r.error || '採用された帳票がありません')}</div>`;
+      item.innerHTML = `
+        <div class="batch-card-hdr">
+          <span class="batch-page">P${r.page}</span>
+          <span class="batch-form">${esc(r.formName || '—')}</span>
+          <span class="hist-verdict ${r.decision}">${verdict}</span>
+        </div>
+        <img class="batch-thumb" src="${r.thumb || ''}" alt="">
+        <div class="batch-fields">${fieldsHtml}</div>`;
+      c.appendChild(item);
+    });
+  }
+
   return {
     $, esc, toast, REGION_COLORS, ANCHOR_COLOR, OCR_COLOR,
     refreshRegSteps, renderFormLibrary, renderAnchorList, renderRegionList,
     setPipeline, resetPipeline,
     renderDecision, renderRecogPreview, renderFieldResults,
     showRecogProgress, updateRecogProgress, renderHistory,
+    openBatchModal, closeBatchModal, updateBatchProgress, renderBatchResults,
   };
 
 })();

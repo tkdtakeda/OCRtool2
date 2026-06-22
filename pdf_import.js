@@ -17,7 +17,19 @@ const PdfImport = (() => {
   const LS_KEY = 'ocrtool_pdf_dpi';
   const DEFAULT_DPI = 150;
 
-  let doc = null, numPages = 0, curPage = 1, dpi = DEFAULT_DPI, fileName = '', onCanvasCb = null, busy = false, workerSet = false;
+  let doc = null, numPages = 0, curPage = 1, dpi = DEFAULT_DPI, fileName = '', onCanvasCb = null, onBatchCb = null, allowBatch = false, busy = false, workerSet = false;
+
+  /* 指定ページを現在のDPIでキャンバスへラスタライズ */
+  async function renderPageToCanvas(pdfDoc, n, useDpi) {
+    const page = await pdfDoc.getPage(n);
+    const vp = page.getViewport({ scale: useDpi / 72 });
+    const c = document.createElement('canvas');
+    c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);   // 透過PDF対策
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    return c;
+  }
 
   function isPdf(file) {
     return !!file && (file.type === 'application/pdf' || /\.pdf$/i.test(file.name || ''));
@@ -37,9 +49,13 @@ const PdfImport = (() => {
     });
   }
 
-  /* ── 公開: PDF を開いて取り込みモーダルを表示 ───────── */
-  async function open(file, onCanvas) {
-    onCanvasCb = onCanvas;
+  /* ── 公開: PDF を開いて取り込みモーダルを表示 ───────────
+     opts = { onCanvas(canvas), onBatch(pageSource), allowBatch } */
+  async function open(file, opts) {
+    opts = opts || {};
+    onCanvasCb = opts.onCanvas || null;
+    onBatchCb  = opts.onBatch || null;
+    allowBatch = !!opts.allowBatch;
     if (doc) { try { doc.destroy(); } catch (_) {} doc = null; }   // 直前のPDF（ESCで閉じた等）を解放
     try {
       ensureLib();
@@ -58,7 +74,7 @@ const PdfImport = (() => {
   function close() {
     $('pdfModal').classList.add('hidden');
     if (doc) { try { doc.destroy(); } catch (_) {} }
-    doc = null; onCanvasCb = null;
+    doc = null; onCanvasCb = null; onBatchCb = null;
   }
 
   function renderControls() {
@@ -68,6 +84,7 @@ const PdfImport = (() => {
     $('pdfPageLabel').textContent = `${curPage} / ${numPages}`;
     $('pdfPrev').disabled = curPage <= 1;
     $('pdfNext').disabled = curPage >= numPages;
+    $('pdfBatchBtn').style.display = (allowBatch && onBatchCb && numPages > 1) ? '' : 'none';
     document.querySelectorAll('#pdfDpiBtns [data-dpi]').forEach(b => b.classList.toggle('is-active', parseInt(b.dataset.dpi, 10) === dpi));
   }
 
@@ -97,13 +114,7 @@ const PdfImport = (() => {
     const btn = $('pdfLoadBtn'); const orig = btn.innerHTML;
     btn.disabled = true; btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> 変換中…';
     try {
-      const page = await doc.getPage(curPage);
-      const vp = page.getViewport({ scale: dpi / 72 });
-      const c = document.createElement('canvas');
-      c.width = Math.round(vp.width); c.height = Math.round(vp.height);
-      const ctx = c.getContext('2d');
-      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);   // 透過PDF対策で白地
-      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      const c = await renderPageToCanvas(doc, curPage, dpi);
       localStorage.setItem(LS_KEY, String(dpi));
       const cb = onCanvasCb;
       close();
@@ -112,6 +123,21 @@ const PdfImport = (() => {
       StudioUI.toast('PDFの変換に失敗しました: ' + (e.message || e), 'error', 5000);
       busy = false; btn.disabled = false; btn.innerHTML = orig;
     }
+  }
+
+  /* 全ページ一括: doc を保持したままモーダルを閉じ、ページ供給元を渡す */
+  function loadBatch() {
+    if (!doc || busy || !onBatchCb) return;
+    localStorage.setItem(LS_KEY, String(dpi));
+    const d = doc, np = numPages, dp = dpi, cb = onBatchCb;
+    doc = null;                                 // close()/次のopen()で破棄させない（pageSourceが保持）
+    onCanvasCb = null; onBatchCb = null;
+    $('pdfModal').classList.add('hidden');
+    cb({
+      numPages: np, dpi: dp, fileName,
+      getPage: n => renderPageToCanvas(d, n, dp),
+      done: () => { try { d.destroy(); } catch (_) {} },
+    });
   }
 
   /* ── 初期化（モーダル配線） ─────────────────────────── */
@@ -127,6 +153,7 @@ const PdfImport = (() => {
     $('pdfPrev').addEventListener('click', () => { if (curPage > 1) { curPage--; renderControls(); renderPreview(); } });
     $('pdfNext').addEventListener('click', () => { if (curPage < numPages) { curPage++; renderControls(); renderPreview(); } });
     $('pdfLoadBtn').addEventListener('click', loadChosen);
+    $('pdfBatchBtn').addEventListener('click', loadBatch);
   }
 
   return { isPdf, open, init };

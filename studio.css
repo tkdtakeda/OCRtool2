@@ -378,3 +378,42 @@
 
 .pdf-preview { display: flex; justify-content: center; align-items: center; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); padding: 10px; min-height: 160px; max-height: 46vh; overflow: auto; }
 .pdf-preview canvas { max-width: 100%; box-shadow: var(--sh-sm); background: #fff; }
+
+/* ── フィールド結果: 確信度デバッグ（切り出し画像＋文字別確信度） ── */
+.field-detail-btn { width: 24px; height: 24px; border-radius: var(--r-sm); border: 1px solid var(--c-border); background: #fff; color: var(--c-text-3); cursor: pointer; flex-shrink: 0; }
+.field-detail-btn:hover { background: var(--c-pri-lt); color: var(--c-pri); border-color: var(--c-pri-mid); }
+.field-detail-btn.is-open { background: var(--c-pri); color: #fff; border-color: var(--c-pri); }
+.field-detail { display: grid; grid-template-columns: minmax(120px, 38%) 1fr; gap: 12px; padding: 10px; margin: 2px 0 0; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); }
+.field-detail.hidden { display: none; }
+.field-detail-col { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.field-detail-lbl { font-size: .68rem; font-weight: 700; color: var(--c-text-2); }
+.field-crop { max-width: 100%; max-height: 96px; object-fit: contain; border: 1px solid var(--c-border-dk); border-radius: 3px; background:
+  repeating-conic-gradient(#eef2f6 0% 25%, #fff 0% 50%) 0 / 14px 14px; }
+.field-syms { display: flex; flex-wrap: wrap; gap: 4px; }
+.field-syms-empty { font-size: .72rem; color: var(--c-text-3); }
+.sym-chip { display: inline-flex; flex-direction: column; align-items: center; min-width: 22px; padding: 2px 4px; border-radius: var(--r-sm); font-family: 'IBM Plex Mono', monospace; font-size: .82rem; line-height: 1.05; border: 1px solid transparent; }
+.sym-chip small { font-size: .54rem; opacity: .85; font-weight: 700; }
+.sym-chip.hi { background: #DCFCE7; color: #166534; }
+.sym-chip.mid { background: #FEF3C7; color: #92400E; }
+.sym-chip.lo { background: #FEE2E2; color: #991B1B; }
+.field-detail-hint { font-size: .68rem; color: var(--c-text-3); line-height: 1.5; margin: 2px 0 0; }
+
+/* ── 複数ページ一括OCR 結果 ──────────────────────────── */
+.batch-summary { font-size: .82rem; color: var(--c-text-2); padding: 8px 11px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); margin-bottom: 10px; }
+.batch-summary.hidden { display: none; }
+.batch-summary .bs-ok { color: var(--c-suc); font-weight: 700; }
+.batch-summary .bs-rv { color: var(--c-warn); font-weight: 700; }
+.batch-summary .bs-rj { color: var(--c-err); font-weight: 700; }
+.batch-summary .bs-er { color: var(--c-err); font-weight: 700; }
+.batch-list { display: flex; flex-direction: column; gap: 8px; }
+.batch-card { border: 1px solid var(--c-border); border-radius: var(--r-sm); padding: 9px 11px; background: var(--c-surface); }
+.batch-card-hdr { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.batch-page { font-family: 'IBM Plex Mono', monospace; font-weight: 700; font-size: .76rem; color: #fff; background: var(--c-pri); padding: 1px 8px; border-radius: 9px; }
+.batch-form { font-weight: 700; font-size: .82rem; color: var(--c-text); flex: 1; }
+.batch-thumb { max-height: 70px; max-width: 100%; object-fit: contain; border: 1px solid var(--c-border); border-radius: 3px; background: var(--c-surface2); margin-bottom: 7px; }
+.batch-fields { display: flex; flex-direction: column; gap: 3px; }
+.batch-field { display: flex; align-items: center; gap: 8px; font-size: .76rem; }
+.bf-name { color: var(--c-text-3); min-width: 84px; }
+.bf-text { flex: 1; font-family: 'IBM Plex Mono', monospace; color: var(--c-text); word-break: break-all; }
+.bf-conf { font-size: .68rem; font-weight: 700; }
+.batch-none { font-size: .76rem; color: var(--c-text-3); font-style: italic; }

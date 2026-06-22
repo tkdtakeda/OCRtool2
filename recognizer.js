@@ -92,6 +92,21 @@ const Recognizer = (() => {
     return Math.round(wordAvg > 0 ? wordAvg : (res.confidence || 0));
   }
 
+  /** 小さい切り出しは拡大してからOCR（Tesseractは文字が小さいと精度・信頼度が落ちる）。
+      表示用の元画像は別に保持し、これはOCR入力専用。 */
+  function upscaleForOcr(canvas, minH = 44, maxScale = 4) {
+    const h = canvas.height || 0;
+    if (h === 0 || h >= minH) return canvas;
+    const scale = Math.min(maxScale, minH / h);
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(canvas.width * scale));
+    c.height = Math.max(1, Math.round(canvas.height * scale));
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(canvas, 0, 0, c.width, c.height);
+    return c;
+  }
+
   /**
    * マッチング + 自動判定のみを実行（採用前に結果を提示するため分離）。
    * @returns {{ decision, scores: Map, forms }}
@@ -219,7 +234,7 @@ const Recognizer = (() => {
         fields[i] = { name: region.name, text: '', confidence: 0, error: '領域の切り出しに失敗しました' };
         continue;
       }
-      const res = await OcrProcessor.recognize(cropCanvas, psm, prog => {
+      const res = await OcrProcessor.recognize(upscaleForOcr(cropCanvas), psm, prog => {
         cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
       }, useLang, useWl);
       const conf = confOf(res);
@@ -239,6 +254,7 @@ const Recognizer = (() => {
         error: res.error || null,
         constraint: active ? CharConstraint.describe(rule) : '',
         constraintValid,
+        symbols: res.symbols || [],
         cropDataURL: cropCanvas.toDataURL('image/png'),
       };
     }
@@ -269,7 +285,7 @@ const Recognizer = (() => {
       const psm = psmList[i];
       if (onProg) onProg(i, psmList.length, psm);
       if (!crop) { out.push({ psm, text: '', confidence: 0, error: '領域切り出し失敗' }); continue; }
-      const res = await OcrProcessor.recognize(crop, psm, () => {}, useLang, regWhitelist);
+      const res = await OcrProcessor.recognize(upscaleForOcr(crop), psm, () => {}, useLang, regWhitelist);
       const conf = confOf(res);
       let text = (res.fullText || '').trim();
       if (normalize) text = OcrProcessor.normalize(text);
