@@ -18,6 +18,8 @@ const PdfImport = (() => {
   const DEFAULT_DPI = 150;
 
   let doc = null, numPages = 0, curPage = 1, dpi = DEFAULT_DPI, fileName = '', onCanvasCb = null, onBatchCb = null, allowBatch = false, busy = false, workerSet = false;
+  let getFormsFn = null;          // 帳票一覧の取得関数（一括の帳票割り当て用）
+  let assigns = [];               // 一括OCRの割り当て [{ from, to, formId }]
 
   /* 指定ページを現在のDPIでキャンバスへラスタライズ */
   async function renderPageToCanvas(pdfDoc, n, useDpi) {
@@ -56,6 +58,7 @@ const PdfImport = (() => {
     onCanvasCb = opts.onCanvas || null;
     onBatchCb  = opts.onBatch || null;
     allowBatch = !!opts.allowBatch;
+    getFormsFn = opts.getForms || null;
     if (doc) { try { doc.destroy(); } catch (_) {} doc = null; }   // 直前のPDF（ESCで閉じた等）を解放
     try {
       ensureLib();
@@ -63,7 +66,7 @@ const PdfImport = (() => {
       doc = await window.pdfjsLib.getDocument({ data: buf }).promise;
       numPages = doc.numPages; curPage = 1; fileName = file.name || 'PDF';
       dpi = clampDpi(parseInt(localStorage.getItem(LS_KEY), 10) || DEFAULT_DPI);
-      $('pdfRangeFrom').value = 1; $('pdfRangeTo').value = numPages;   // 既定=全ページ
+      assigns = [{ from: 1, to: numPages, formId: '' }];   // 既定=全ページ・自動判定
       $('pdfModal').classList.remove('hidden');
       renderControls();
       await renderPreview();
@@ -86,31 +89,59 @@ const PdfImport = (() => {
     $('pdfPrev').disabled = curPage <= 1;
     $('pdfNext').disabled = curPage >= numPages;
     document.querySelectorAll('#pdfDpiBtns [data-dpi]').forEach(b => b.classList.toggle('is-active', parseInt(b.dataset.dpi, 10) === dpi));
-    syncRange();
+    renderAssigns();
   }
 
-  /* 一括OCRの対象範囲（開始〜終了ページ） */
+  /* 一括OCR: ページ範囲ごとに使う帳票を割り当てる（formId '' = 自動判定） */
   function batchAvailable() { return allowBatch && !!onBatchCb && numPages > 1; }
-  function currentRange() {
-    let from = parseInt($('pdfRangeFrom').value, 10) || 1;
-    let to = parseInt($('pdfRangeTo').value, 10) || numPages;
-    from = Math.max(1, Math.min(numPages, from));
-    to = Math.max(1, Math.min(numPages, to));
-    if (from > to) { const t = from; from = to; to = t; }
-    return { from, to };
+  function formOptionsHTML(selId) {
+    const forms = (getFormsFn && getFormsFn()) || [];
+    const opts = ['<option value="">自動判定</option>'];
+    forms.forEach(f => opts.push(`<option value="${f.id}"${f.id === selId ? ' selected' : ''}>${(f.name || '').replace(/</g, '&lt;')}</option>`));
+    return opts.join('');
   }
-  function syncRange() {
+  /* 全ルールから処理対象ページ（重複排除・昇順）と page→formId を求める */
+  function resolveBatch() {
+    const pages = [];
+    const formFor = {};
+    assigns.forEach(a => {
+      const from = Math.max(1, Math.min(numPages, a.from));
+      const to = Math.max(1, Math.min(numPages, a.to));
+      for (let n = Math.min(from, to); n <= Math.max(from, to); n++) {
+        if (!(n in formFor)) pages.push(n);
+        formFor[n] = a.formId || '';   // 後勝ち
+      }
+    });
+    pages.sort((x, y) => x - y);
+    return { pages, formFor };
+  }
+  function renderAssigns() {
     const show = batchAvailable();
-    $('pdfBatchRange').style.display = show ? '' : 'none';
+    $('pdfBatchAssign').style.display = show ? '' : 'none';
     $('pdfBatchBtn').style.display = show ? '' : 'none';
     if (!show) return;
-    $('pdfRangeFrom').max = numPages; $('pdfRangeTo').max = numPages;
-    const r = currentRange();
-    $('pdfRangeFrom').value = r.from; $('pdfRangeTo').value = r.to;
-    const count = r.to - r.from + 1;
-    $('pdfRangeCount').textContent = `（${count}ページ）`;
-    const full = r.from === 1 && r.to === numPages;
-    $('pdfBatchBtn').innerHTML = `<i class="fas fa-layer-group"></i> ${full ? `全ページ（${numPages}枚）を一括OCR` : `P${r.from}–${r.to}（${count}枚）を一括OCR`}`;
+    const wrap = $('pdfAssignRows'); wrap.innerHTML = '';
+    assigns.forEach((a, i) => {
+      const row = document.createElement('div'); row.className = 'pdf-assign-row';
+      row.innerHTML = `ページ <input type="number" class="pdf-range-input pa-from" min="1" max="${numPages}" value="${a.from}">`
+        + ` – <input type="number" class="pdf-range-input pa-to" min="1" max="${numPages}" value="${a.to}">`
+        + ` → <select class="pselect pa-form">${formOptionsHTML(a.formId)}</select>`
+        + ` <button type="button" class="pa-del" title="この範囲を削除"${assigns.length <= 1 ? ' disabled' : ''}><i class="fas fa-xmark"></i></button>`;
+      row.querySelector('.pa-from').addEventListener('change', e => { a.from = parseInt(e.target.value, 10) || 1; renderAssigns(); });
+      row.querySelector('.pa-to').addEventListener('change', e => { a.to = parseInt(e.target.value, 10) || numPages; renderAssigns(); });
+      row.querySelector('.pa-form').addEventListener('change', e => { a.formId = e.target.value; });
+      row.querySelector('.pa-del').addEventListener('click', () => { assigns.splice(i, 1); renderAssigns(); });
+      wrap.appendChild(row);
+    });
+    const { pages } = resolveBatch();
+    $('pdfBatchBtn').innerHTML = `<i class="fas fa-layer-group"></i> 一括OCR（${pages.length}ページ）`;
+    $('pdfBatchBtn').disabled = pages.length === 0;
+  }
+  function addAssign() {
+    const last = assigns[assigns.length - 1];
+    const from = last ? Math.min(numPages, last.to + 1) : 1;
+    assigns.push({ from, to: numPages, formId: last ? last.formId : '' });
+    renderAssigns();
   }
 
   async function renderPreview() {
@@ -150,12 +181,10 @@ const PdfImport = (() => {
     }
   }
 
-  /* 指定範囲を一括: doc を保持したままモーダルを閉じ、ページ供給元を渡す */
+  /* 一括: 割り当てを解決し、doc を保持したままモーダルを閉じてページ供給元を渡す */
   function loadBatch() {
     if (!doc || busy || !onBatchCb) return;
-    const r = currentRange();
-    const pages = [];
-    for (let n = r.from; n <= r.to; n++) pages.push(n);
+    const { pages, formFor } = resolveBatch();
     if (!pages.length) return;
     localStorage.setItem(LS_KEY, String(dpi));
     const d = doc, dp = dpi, cb = onBatchCb, fn = fileName;
@@ -164,6 +193,7 @@ const PdfImport = (() => {
     $('pdfModal').classList.add('hidden');
     cb({
       pages, total: pages.length, dpi: dp, fileName: fn,
+      formFor: n => formFor[n] || '',
       getPage: n => renderPageToCanvas(d, n, dp),
       done: () => { try { d.destroy(); } catch (_) {} },
     });
@@ -183,11 +213,7 @@ const PdfImport = (() => {
     $('pdfNext').addEventListener('click', () => { if (curPage < numPages) { curPage++; renderControls(); renderPreview(); } });
     $('pdfLoadBtn').addEventListener('click', loadChosen);
     $('pdfBatchBtn').addEventListener('click', loadBatch);
-    /* 一括OCRの範囲指定 */
-    $('pdfRangeFrom').addEventListener('input', syncRange);
-    $('pdfRangeTo').addEventListener('input', syncRange);
-    $('pdfRangeAll').addEventListener('click', () => { $('pdfRangeFrom').value = 1; $('pdfRangeTo').value = numPages; syncRange(); });
-    $('pdfRangeFromCur').addEventListener('click', () => { $('pdfRangeFrom').value = curPage; if (parseInt($('pdfRangeTo').value, 10) < curPage) $('pdfRangeTo').value = numPages; syncRange(); });
+    $('pdfAssignAdd').addEventListener('click', addAssign);
   }
 
   return { isPdf, open, init };

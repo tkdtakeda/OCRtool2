@@ -92,6 +92,25 @@ const Recognizer = (() => {
     return Math.round(wordAvg > 0 ? wordAvg : (res.confidence || 0));
   }
 
+  /** 最終的な値の文字に対応する記号の確信度だけで平均を取る。
+      ＝周辺のゴミ（領域に写り込んだ点・罫線片）で信頼度が下がるのを防ぐ。
+      値の6割以上を記号に対応づけられたときのみ採用し、無理なら fallback。 */
+  function valueConfidence(text, symbols, fallback) {
+    if (!symbols || !symbols.length || !text) return fallback;
+    const want = [...String(text)];
+    let si = 0, sum = 0, matched = 0;
+    for (const ch of want) {
+      const up = ch.toUpperCase();
+      let found = -1;
+      for (let k = si; k < symbols.length; k++) {
+        const st = symbols[k].text;
+        if (st === ch || (st && st.toUpperCase() === up)) { found = k; break; }
+      }
+      if (found >= 0) { sum += symbols[found].confidence; matched++; si = found + 1; }
+    }
+    return (matched && matched >= Math.ceil(want.length * 0.6)) ? Math.round(sum / matched) : fallback;
+  }
+
   /** 小さい切り出しは拡大してからOCR（Tesseractは文字が小さいと精度・信頼度が落ちる）。
       表示用の元画像は別に保持し、これはOCR入力専用。 */
   function upscaleForOcr(canvas, minH = 44, maxScale = 4) {
@@ -237,7 +256,6 @@ const Recognizer = (() => {
       const res = await OcrProcessor.recognize(upscaleForOcr(cropCanvas), psm, prog => {
         cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
       }, useLang, useWl);
-      const conf = confOf(res);
       let text = (res.fullText || '').trim();
       if (doNorm) text = OcrProcessor.normalize(text);
       if (doKanji) text = OcrProcessor.kanjiToNum(text);
@@ -246,6 +264,8 @@ const Recognizer = (() => {
       /* 文字制約による桁別チェック＋誤認補正（O↔0 等）＋前後の余分文字除去 */
       let constraintValid = true;
       if (active) { const cc = CharConstraint.apply(text, rule); text = cc.text; constraintValid = cc.valid; }
+      /* 信頼度は「最終的な値の文字」基準（周辺のゴミで下がらないように） */
+      const conf = valueConfidence(text, res.symbols, confOf(res));
       fields[i] = {
         name: region.name,
         text,

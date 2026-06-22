@@ -418,8 +418,15 @@
 .bf-conf { font-size: .68rem; font-weight: 700; }
 .batch-none { font-size: .76rem; color: var(--c-text-3); font-style: italic; }
 
-/* PDF 一括OCR 範囲指定 */
-.pdf-range { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 9px 12px; margin-top: 10px; background: var(--c-pri-lt); border: 1px solid var(--c-pri-mid); border-radius: var(--r-sm); }
-.pdf-range-input { width: 60px; height: 30px; text-align: center; font-size: .9rem; font-weight: 700; border: 1px solid var(--c-border-dk); border-radius: var(--r-sm); color: var(--c-text); }
+/* PDF 一括OCR: 範囲ごとの帳票割り当て */
+.pdf-assign { padding: 10px 12px; margin-top: 10px; background: var(--c-pri-lt); border: 1px solid var(--c-pri-mid); border-radius: var(--r-sm); }
+.pdf-assign-hdr { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.pdf-assign-rows { display: flex; flex-direction: column; gap: 6px; }
+.pdf-assign-row { display: flex; align-items: center; gap: 6px; font-size: .8rem; color: var(--c-text-2); flex-wrap: wrap; }
+.pdf-assign-row .pa-form { flex: 1; min-width: 120px; height: 30px; }
+.pdf-range-input { width: 56px; height: 30px; text-align: center; font-size: .9rem; font-weight: 700; border: 1px solid var(--c-border-dk); border-radius: var(--r-sm); color: var(--c-text); background: #fff; }
 .pdf-range-input:focus { outline: none; border-color: var(--c-pri); box-shadow: 0 0 0 2px #fff; }
-.pdf-range-count { font-size: .76rem; color: var(--c-pri-dk); font-weight: 700; margin-left: auto; }
+.pa-del { width: 26px; height: 28px; border-radius: var(--r-sm); border: 1px solid var(--c-border); background: #fff; color: var(--c-text-3); cursor: pointer; flex-shrink: 0; }
+.pa-del:hover:not(:disabled) { background: #FEE2E2; color: var(--c-err); border-color: var(--c-err); }
+.pa-del:disabled { opacity: .4; cursor: default; }
+.pdf-assign-hint { font-size: .68rem; color: var(--c-pri-dk); line-height: 1.5; margin: 8px 0 0; }

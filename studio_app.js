@@ -742,23 +742,26 @@
   /* ════════════════════════════════════════════════════
      複数ページ一括OCR（PDFの全ページ）
      ════════════════════════════════════════════════════ */
-  /* 1枚のキャンバスを判定→（採用なら）OCRし、結果と履歴保存まで行う（UIは触らない） */
-  async function recognizePageQuietly(canvas, page) {
+  /* 1枚のキャンバスを判定→OCRし、結果と履歴保存まで行う（UIは触らない）。
+     forcedFormId 指定時はその帳票で必ずOCR。未指定（自動）でも、確信度が低く
+     「要確認」でも best候補があれば停止せずOCRする（複数ページで止まらないように）。 */
+  async function recognizePageQuietly(canvas, page, forcedFormId) {
     const thumb = thumbURL(canvas, 120);
     try {
       const { decision, scores } = await Recognizer.classify(canvas, S.forms, { angleRange: 2, angleStep: 1 });
       const candId = decision.best && decision.best.formId;
-      const candName = candId ? (S.forms.find(f => f.id === candId)?.name || '—') : '—';
-      if (decision.decision === 'accepted' && candId) {
-        const form = S.forms.find(f => f.id === candId);
-        const res = await Recognizer.runOcr(canvas, form, bestAnchorFor(form, scores), {}, {});
-        if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
-        LineRemovalProcessor.cleanupMats(res.previewMats);
-        try { await FormDB.putResult(buildResultRecord(form, decision, res, canvas, false)); } catch (_) {}
-        const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
-        return { page, decision: 'accepted', formName: form.name, avgConf: avg, fields: res.fields, thumb };
-      }
-      return { page, decision: decision.decision, formName: candName, fields: [], thumb };
+      const useId = forcedFormId || candId;
+      const form = useId ? S.forms.find(f => f.id === useId) : null;
+      if (!form) return { page, decision: decision.decision, formName: '—', fields: [], thumb };
+      /* 表示用の判定ラベル: 手動指定=指定どおり採用 / 自動=本来の判定を踏襲 */
+      const verdict = forcedFormId ? 'accepted' : decision.decision;
+      const res = await Recognizer.runOcr(canvas, form, bestAnchorFor(form, scores), {}, {});
+      if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
+      LineRemovalProcessor.cleanupMats(res.previewMats);
+      const manual = forcedFormId ? true : !(candId === form.id);
+      try { await FormDB.putResult(buildResultRecord(form, decision, res, canvas, manual)); } catch (_) {}
+      const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
+      return { page, decision: verdict, formName: form.name, forced: !!forcedFormId, avgConf: avg, fields: res.fields, thumb };
     } catch (e) {
       return { page, decision: 'error', formName: '—', error: e.message || String(e), thumb };
     }
@@ -780,7 +783,8 @@
         let canvas;
         try { canvas = await src.getPage(p); }
         catch (_) { results.push({ page: p, decision: 'error', formName: '—', error: 'ページ描画に失敗', thumb: '' }); continue; }
-        results.push(await recognizePageQuietly(canvas, p));
+        const forcedFormId = src.formFor ? src.formFor(p) : '';
+        results.push(await recognizePageQuietly(canvas, p, forcedFormId));
       }
     } finally { src.done && src.done(); }
     S.batchResults = results;
@@ -938,8 +942,9 @@
     $('btnSaveForm').addEventListener('click', saveForm);
     $('btnCancelEdit').addEventListener('click', cancelEdit);
 
-    /* OCR工程（画像・PDF 共通の入口。PDFは複数ページの一括OCRも可） */
-    const recogOpts = { onBatch: runBatchPdf, allowBatch: true };
+    /* OCR工程（画像・PDF 共通の入口。PDFは複数ページの一括OCRも可。
+       一括では「ページ範囲ごとに使う帳票」を割り当てられる） */
+    const recogOpts = { onBatch: runBatchPdf, allowBatch: true, getForms: () => S.forms.map(f => ({ id: f.id, name: f.name })) };
     setupDrop('recogDrop', f => acceptFile(f, loadRecogImage, recogOpts), 'recogFileInput');
     $('recogFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) acceptFile(f, loadRecogImage, recogOpts); e.target.value = ''; });
     $('batchClose').addEventListener('click', () => UI.closeBatchModal());
