@@ -321,12 +321,12 @@ const StudioUI = (() => {
   }
 
   /* ── 複数ページ一括OCR モーダル ─────────────────────── */
-  function openBatchModal(numPages) {
+  function openBatchModal(total) {
     $('batchModal').classList.remove('hidden');
     $('batchProgress').classList.remove('hidden');
     $('batchSummary').classList.add('hidden');
     $('batchList').innerHTML = '';
-    updateBatchProgress(`全 ${numPages} ページを認識します…`, 0);
+    updateBatchProgress(`${total} ページを認識します…`, 0);
   }
   function closeBatchModal() { $('batchModal').classList.add('hidden'); }
   function updateBatchProgress(msg, pct) {

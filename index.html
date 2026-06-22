@@ -612,7 +612,15 @@
         <button type="button" id="pdfNext" class="cr-stepper" title="次のページ">▶</button>
       </div>
       <div class="pdf-preview"><canvas id="pdfPreviewCanvas"></canvas></div>
-      <p class="hint-text">DPIが高いほど文字は鮮明になり認識精度が上がりますが、処理は重くなります。迷ったら<b>150（推奨）</b>。</p>
+      <div class="pdf-range" id="pdfBatchRange" style="display:none">
+        <span class="pdf-ctl-lbl"><i class="fas fa-list-ol"></i> 一括OCRの範囲</span>
+        <input type="number" id="pdfRangeFrom" class="pdf-range-input" min="1" value="1"> 〜
+        <input type="number" id="pdfRangeTo" class="pdf-range-input" min="1" value="1">
+        <button type="button" id="pdfRangeAll" class="btn btn-ghost btn-sm">全ページ</button>
+        <button type="button" id="pdfRangeFromCur" class="btn btn-ghost btn-sm" title="プレビュー中のページを開始に">表示中〜</button>
+        <span class="pdf-range-count" id="pdfRangeCount"></span>
+      </div>
+      <p class="hint-text">DPIが高いほど文字は鮮明になり認識精度が上がりますが、処理は重くなります。迷ったら<b>150（推奨）</b>。複数ページは範囲を指定して一括OCRできます。</p>
     </div>
     <div class="cr-ftr">
       <button type="button" id="pdfCancel" class="btn btn-ghost">キャンセル</button>

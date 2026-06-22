@@ -63,6 +63,7 @@ const PdfImport = (() => {
       doc = await window.pdfjsLib.getDocument({ data: buf }).promise;
       numPages = doc.numPages; curPage = 1; fileName = file.name || 'PDF';
       dpi = clampDpi(parseInt(localStorage.getItem(LS_KEY), 10) || DEFAULT_DPI);
+      $('pdfRangeFrom').value = 1; $('pdfRangeTo').value = numPages;   // 既定=全ページ
       $('pdfModal').classList.remove('hidden');
       renderControls();
       await renderPreview();
@@ -84,8 +85,32 @@ const PdfImport = (() => {
     $('pdfPageLabel').textContent = `${curPage} / ${numPages}`;
     $('pdfPrev').disabled = curPage <= 1;
     $('pdfNext').disabled = curPage >= numPages;
-    $('pdfBatchBtn').style.display = (allowBatch && onBatchCb && numPages > 1) ? '' : 'none';
     document.querySelectorAll('#pdfDpiBtns [data-dpi]').forEach(b => b.classList.toggle('is-active', parseInt(b.dataset.dpi, 10) === dpi));
+    syncRange();
+  }
+
+  /* 一括OCRの対象範囲（開始〜終了ページ） */
+  function batchAvailable() { return allowBatch && !!onBatchCb && numPages > 1; }
+  function currentRange() {
+    let from = parseInt($('pdfRangeFrom').value, 10) || 1;
+    let to = parseInt($('pdfRangeTo').value, 10) || numPages;
+    from = Math.max(1, Math.min(numPages, from));
+    to = Math.max(1, Math.min(numPages, to));
+    if (from > to) { const t = from; from = to; to = t; }
+    return { from, to };
+  }
+  function syncRange() {
+    const show = batchAvailable();
+    $('pdfBatchRange').style.display = show ? '' : 'none';
+    $('pdfBatchBtn').style.display = show ? '' : 'none';
+    if (!show) return;
+    $('pdfRangeFrom').max = numPages; $('pdfRangeTo').max = numPages;
+    const r = currentRange();
+    $('pdfRangeFrom').value = r.from; $('pdfRangeTo').value = r.to;
+    const count = r.to - r.from + 1;
+    $('pdfRangeCount').textContent = `（${count}ページ）`;
+    const full = r.from === 1 && r.to === numPages;
+    $('pdfBatchBtn').innerHTML = `<i class="fas fa-layer-group"></i> ${full ? `全ページ（${numPages}枚）を一括OCR` : `P${r.from}–${r.to}（${count}枚）を一括OCR`}`;
   }
 
   async function renderPreview() {
@@ -125,16 +150,20 @@ const PdfImport = (() => {
     }
   }
 
-  /* 全ページ一括: doc を保持したままモーダルを閉じ、ページ供給元を渡す */
+  /* 指定範囲を一括: doc を保持したままモーダルを閉じ、ページ供給元を渡す */
   function loadBatch() {
     if (!doc || busy || !onBatchCb) return;
+    const r = currentRange();
+    const pages = [];
+    for (let n = r.from; n <= r.to; n++) pages.push(n);
+    if (!pages.length) return;
     localStorage.setItem(LS_KEY, String(dpi));
-    const d = doc, np = numPages, dp = dpi, cb = onBatchCb;
+    const d = doc, dp = dpi, cb = onBatchCb, fn = fileName;
     doc = null;                                 // close()/次のopen()で破棄させない（pageSourceが保持）
     onCanvasCb = null; onBatchCb = null;
     $('pdfModal').classList.add('hidden');
     cb({
-      numPages: np, dpi: dp, fileName,
+      pages, total: pages.length, dpi: dp, fileName: fn,
       getPage: n => renderPageToCanvas(d, n, dp),
       done: () => { try { d.destroy(); } catch (_) {} },
     });
@@ -154,6 +183,11 @@ const PdfImport = (() => {
     $('pdfNext').addEventListener('click', () => { if (curPage < numPages) { curPage++; renderControls(); renderPreview(); } });
     $('pdfLoadBtn').addEventListener('click', loadChosen);
     $('pdfBatchBtn').addEventListener('click', loadBatch);
+    /* 一括OCRの範囲指定 */
+    $('pdfRangeFrom').addEventListener('input', syncRange);
+    $('pdfRangeTo').addEventListener('input', syncRange);
+    $('pdfRangeAll').addEventListener('click', () => { $('pdfRangeFrom').value = 1; $('pdfRangeTo').value = numPages; syncRange(); });
+    $('pdfRangeFromCur').addEventListener('click', () => { $('pdfRangeFrom').value = curPage; if (parseInt($('pdfRangeTo').value, 10) < curPage) $('pdfRangeTo').value = numPages; syncRange(); });
   }
 
   return { isPdf, open, init };

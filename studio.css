@@ -417,3 +417,9 @@
 .bf-text { flex: 1; font-family: 'IBM Plex Mono', monospace; color: var(--c-text); word-break: break-all; }
 .bf-conf { font-size: .68rem; font-weight: 700; }
 .batch-none { font-size: .76rem; color: var(--c-text-3); font-style: italic; }
+
+/* PDF 一括OCR 範囲指定 */
+.pdf-range { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 9px 12px; margin-top: 10px; background: var(--c-pri-lt); border: 1px solid var(--c-pri-mid); border-radius: var(--r-sm); }
+.pdf-range-input { width: 60px; height: 30px; text-align: center; font-size: .9rem; font-weight: 700; border: 1px solid var(--c-border-dk); border-radius: var(--r-sm); color: var(--c-text); }
+.pdf-range-input:focus { outline: none; border-color: var(--c-pri); box-shadow: 0 0 0 2px #fff; }
+.pdf-range-count { font-size: .76rem; color: var(--c-pri-dk); font-weight: 700; margin-left: auto; }

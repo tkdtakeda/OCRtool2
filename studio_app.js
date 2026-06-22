@@ -764,15 +764,18 @@
     }
   }
 
-  /* PDF全ページを順に一括OCR（pageSource = { numPages, getPage(n), done() }） */
+  /* 指定範囲のページを順に一括OCR（pageSource = { pages:[n…], total, getPage(n), done() }） */
   async function runBatchPdf(src) {
     if (!S.cvReady) { src.done && src.done(); return UI.toast('OpenCV.js 読み込み中です', 'warning'); }
     if (!S.forms.length) { src.done && src.done(); return UI.toast('先に帳票を登録してください', 'warning'); }
-    UI.openBatchModal(src.numPages);
+    const pages = src.pages || [];
+    const total = src.total || pages.length;
+    UI.openBatchModal(total);
     const results = [];
     try {
-      for (let p = 1; p <= src.numPages; p++) {
-        UI.updateBatchProgress(`ページ ${p}/${src.numPages} を認識中…`, (p - 1) / src.numPages);
+      for (let idx = 0; idx < pages.length; idx++) {
+        const p = pages[idx];
+        UI.updateBatchProgress(`ページ ${p}（${idx + 1}/${total}）を認識中…`, idx / Math.max(1, total));
         await new Promise(r => setTimeout(r, 15));   // 進捗描画の隙間
         let canvas;
         try { canvas = await src.getPage(p); }
@@ -785,7 +788,7 @@
     UI.renderBatchResults(results);
     refreshHistory();
     const ok = results.filter(r => r.decision === 'accepted').length;
-    UI.toast(`一括OCR完了 — ${src.numPages}ページ中 ${ok}件を自動採用し履歴に保存`, 'success', 4500);
+    UI.toast(`一括OCR完了 — ${total}ページ中 ${ok}件を自動採用し履歴に保存`, 'success', 4500);
   }
 
   /* 一括結果を CSV（ページ + 全フィールド）でクリップボードへ */
