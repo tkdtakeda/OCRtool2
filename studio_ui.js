@@ -138,11 +138,16 @@ const StudioUI = (() => {
     const ls = result.legacySignal;
     let reason;
     if (result.decision === 'accepted') {
-      reason = `「${best.formName}」を採用（peak ${best.peak.toFixed(3)}, margin ${result.margin.toFixed(3)}）。`;
+      reason = `「${best.formName}」を採用（peak ${best.peak.toFixed(2)} = アンカー一致度, margin ${result.margin.toFixed(2)} = 2位との差）。`;
     } else if (result.decision === 'review') {
-      reason = `候補は「${best ? best.formName : '—'}」ですが確信度が低めです。帳票を確認のうえ実行してください。`;
+      /* なぜ確信度が低いのかを診断的に説明（peak が低い vs margin が小さい） */
+      if (best && best.peak < 0.7) {
+        reason = `候補「${best.formName}」のアンカー一致度が中程度です（peak ${best.peak.toFixed(2)}）。原因の多くは画像のズレ・サイズ/傾き差・ノイズです。アンカーが入力に鮮明に写っているか、切り取り倍率が大きく違わないか確認を。下の「アンカー別」で低いアンカーが分かります。`;
+      } else {
+        reason = `候補「${best ? best.formName : '—'}」は一致(peak ${best ? best.peak.toFixed(2) : '0'})していますが、他帳票との差が小さく自動確定できません（margin ${result.margin.toFixed(2)}）。より識別的な領域をアンカーに追加すると安定します。「この帳票でOCR」で続行できます。`;
+      }
     } else {
-      reason = `十分に一致する帳票がありません（最良 peak ${best ? best.peak.toFixed(3) : '0'}）。未登録の帳票の可能性があります。`;
+      reason = `十分に一致する帳票がありません（最良 peak ${best ? best.peak.toFixed(2) : '0'}）。未登録の帳票か、アンカーが写っていない可能性があります。`;
     }
     $('dpReason').textContent = reason;
 
@@ -177,6 +182,7 @@ const StudioUI = (() => {
             <span class="rank-chip">裏付け ${row.support}</span>
             <span class="rank-chip"><i class="fas fa-rotate"></i> ${row.angle > 0 ? '+' : ''}${row.angle}°</span>
           </div>
+          ${(row.anchors && row.anchors.length) ? `<div class="rank-anchors"><span class="rank-anchors-lbl">アンカー別:</span>${row.anchors.map(a => `<span class="anchor-chip scv-${scoreClass(a.score)}" title="一致度 ${(a.score).toFixed(2)}">${esc(a.name || 'アンカー')} ${(a.score).toFixed(2)}</span>`).join('')}</div>` : ''}
         </div>`;
       list.appendChild(el);
     });

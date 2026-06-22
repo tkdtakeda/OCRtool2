@@ -25,6 +25,7 @@ const FormVoting = (() => {
   const defaults = () => ({
     acceptFloor:   0.45,  // これ未満の peak は「不一致」（未登録帳票の可能性）
     acceptConf:    0.70,  // これ以上の確信度で「採用」
+    nearExact:     0.90,  // peak がこれ以上なら margin によらず「採用」（ほぼ一致）
     marginMin:     0.06,  // 1位-2位スコア差の最低要件
     corroborateTau:0.40,  // 「裏付けアンカー」とみなすスコア閾値
     corroborateBeta:0.06, // 裏付け1件ごとの peak 加点率（占有バイアス抑制のため小さく）
@@ -92,14 +93,16 @@ const FormVoting = (() => {
     const margin = first ? first.agg - (second ? second.agg : 0) : 0;
 
     /* 3) 確信度（絶対スコア + margin の加重） */
-    const confidence = first
+    let confidence = first
       ? clamp01(p.wAbs * ramp(first.peak, p.confAbsLo, p.confAbsHi)
               + p.wMargin * ramp(margin, 0, p.confMarginHi))
       : 0;
 
-    /* 4) 判定 */
+    /* 4) 判定。peak が極めて高い（ほぼ一致）なら margin によらず採用する
+       ＝同一画像/ほぼ同一画像が「要確認」で止まらないように。確信度も peak に引き上げる。 */
     let decision;
     if (!first || first.peak < p.acceptFloor)          decision = 'rejected';
+    else if (first.peak >= p.nearExact)              { decision = 'accepted'; confidence = Math.max(confidence, first.peak); }
     else if (confidence >= p.acceptConf && margin >= p.marginMin) decision = 'accepted';
     else                                               decision = 'review';
 
