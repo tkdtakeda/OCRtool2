@@ -54,7 +54,7 @@
 <main class="app-main view" id="viewRegister">
 
   <!-- 左: 帳票ライブラリ（IndexedDB に永続化） -->
-  <aside class="library-panel">
+  <aside class="library-panel" id="libraryPanel">
     <div class="lib-hdr">
       <span><i class="fas fa-layer-group"></i> 帳票ライブラリ</span>
       <button id="btnNewForm" class="btn btn-primary btn-sm"><i class="fas fa-plus"></i> 新規</button>
@@ -67,7 +67,7 @@
       <input type="file" id="importFormsInput" accept="application/json,.json" style="display:none">
     </div>
     <div id="formLibList" class="lib-list">
-      <div class="empty-hint"><i class="fas fa-inbox"></i><span>帳票未登録</span></div>
+      <div class="empty-hint"><i class="fas fa-inbox"></i><span>帳票未登録</span><span style="font-size:.7rem">「新規」で作成 / レイアウト設定JSONをここにドロップで読込</span></div>
     </div>
   </aside>
 

@@ -953,6 +953,22 @@
     if (clickFileId) z.addEventListener('click', () => $(clickFileId).click());
   }
 
+  /* レイアウト設定(JSON)のドロップ取り込み。ファイルのドラッグ時のみ反応し、
+     JSON以外がドロップされたら警告する。 */
+  function setupJsonDrop(zoneId, onJsonFile) {
+    const z = $(zoneId); if (!z) return;
+    const isFileDrag = e => Array.from(e.dataTransfer?.types || []).includes('Files');
+    z.addEventListener('dragover', e => { if (!isFileDrag(e)) return; e.preventDefault(); z.classList.add('json-drag'); });
+    z.addEventListener('dragleave', e => { if (e.target === z) z.classList.remove('json-drag'); });
+    z.addEventListener('drop', e => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault(); z.classList.remove('json-drag');
+      const f = e.dataTransfer.files[0]; if (!f) return;
+      if (f.type === 'application/json' || /\.json$/i.test(f.name)) onJsonFile(f);
+      else UI.toast('レイアウト設定の JSON ファイルをドロップしてください', 'warning', 4000);
+    });
+  }
+
   function initAccordions() {
     document.querySelectorAll('.acc-hdr').forEach(hdr => {
       const body = $(hdr.dataset.acc);
@@ -1183,10 +1199,11 @@
     [['setAcceptConf', 'setValAcceptConf', 2], ['setNearExact', 'setValNearExact', 2], ['setAcceptFloor', 'setValAcceptFloor', 2], ['setMarginMin', 'setValMarginMin', 2], ['setAngleRange', 'setValAngle', 0]]
       .forEach(([sl, lb, d]) => $(sl).addEventListener('input', () => { $(lb).textContent = Number($(sl).value).toFixed(d); }));
 
-    /* 帳票インポート/エクスポート */
+    /* 帳票インポート/エクスポート（ボタン＋ライブラリへJSONドロップ） */
     $('btnExportForms').addEventListener('click', exportForms);
     $('btnImportForms').addEventListener('click', () => $('importFormsInput').click());
     $('importFormsInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) importFormsFromFile(f); e.target.value = ''; });
+    setupJsonDrop('libraryPanel', importFormsFromFile);
 
     document.addEventListener('paste', handlePaste);
 

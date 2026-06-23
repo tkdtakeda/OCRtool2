@@ -38,7 +38,7 @@ const StudioUI = (() => {
   /* ── 帳票ライブラリ ─────────────────────────────────── */
   function renderFormLibrary(forms, handlers) {
     const c = $('formLibList'); if (!c) return;
-    if (!forms.length) { c.innerHTML = '<div class="empty-hint"><i class="fas fa-inbox"></i><span>帳票未登録</span></div>'; return; }
+    if (!forms.length) { c.innerHTML = '<div class="empty-hint"><i class="fas fa-inbox"></i><span>帳票未登録</span><span style="font-size:.7rem">「新規」で作成 / レイアウト設定JSONをここにドロップで読込</span></div>'; return; }
     c.innerHTML = '';
     forms.forEach(f => {
       const card = document.createElement('div');
