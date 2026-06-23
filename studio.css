@@ -191,6 +191,11 @@
 .scv-hi { color: var(--c-suc); } .scv-mid { color: var(--c-warn); } .scv-lo { color: var(--c-err); }
 
 /* ── 結果エリア ─────────────────────────────────────── */
+.rr-pagenav { display: flex; align-items: center; gap: 8px; padding: 8px 11px; margin-bottom: 12px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); }
+.rr-pagenav.hidden { display: none; }
+.rr-pagenav-ttl { font-size: .8rem; font-weight: 700; color: var(--c-text-2); }
+.rr-pagenav .rr-page-label { font-family: 'IBM Plex Mono', monospace; font-size: .8rem; font-weight: 700; color: var(--c-pri); min-width: 96px; text-align: center; }
+.rr-pagenav-close { margin-left: auto; }
 .recog-result-area { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .rr-preview, .rr-fields { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r); display: flex; flex-direction: column; overflow: hidden; }
 .rr-hdr { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; border-bottom: 1px solid var(--c-border); font-size: .8rem; font-weight: 700; color: var(--c-text-2); background: var(--c-surface2); }

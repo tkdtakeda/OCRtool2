@@ -28,6 +28,7 @@
     recogFormId: null, recogMatchInfo: null, recogResult: null, rrZoom: 1,
     dbgLoadedFormId: null, patternOverrides: {}, constraintOverrides: {},
     batchResults: null, batchCancel: false,
+    recogPageNum: 1, pageNav: null, navReviewMode: false,
   };
 
   /* PSM 比較用パターン */
@@ -380,9 +381,11 @@
      OCR工程
      ════════════════════════════════════════════════════ */
 
-  function loadRecogImage(canvas) {
+  function loadRecogImage(canvas, keepNav) {
     S.recogCanvas = canvas; S.lastClassify = null;
     S.recogFormId = null; S.recogMatchInfo = null; S.recogResult = null; S.dbgLoadedFormId = null; S.patternOverrides = {}; S.constraintOverrides = {};
+    S.recogPageNum = 1;
+    if (!keepNav) releasePageNav();            // 新規読み込みでは一括結果のページ送りを解除
     $('recogPreview').src = canvas.toDataURL('image/png'); $('recogPreview').style.display = 'block'; $('recogDropHint').style.display = 'none';
     $('btnRunRecognize').disabled = false;
     $('decisionPanel').classList.add('hidden'); $('recogResultArea').classList.add('hidden'); $('debugPanel').classList.add('hidden');
@@ -748,9 +751,10 @@
     };
   }
   async function saveResult(form, result) {
+    if (S.navReviewMode) return;                 // 一括結果の確認のための再実行は保存しない（重複防止）
     const dec = S.lastClassify.decision;
     const manual = !(dec.best && dec.best.formId === form.id);
-    const record = buildResultRecord(form, dec, result, S.recogCanvas, manual, 1);
+    const record = buildResultRecord(form, dec, result, S.recogCanvas, manual, S.recogPageNum || 1);
     try { await FormDB.putResult(record); $('saveStatus').innerHTML = `<i class="fas fa-circle-check"></i> IndexedDB に保存しました（平均信頼度 ${record.overallFieldConfidence}%）`; refreshHistory(); }
     catch (e) { $('saveStatus').textContent = '保存に失敗: ' + e.message; }
   }
@@ -784,7 +788,7 @@
       const manual = forcedFormId ? true : !(candId === form.id);
       try { await FormDB.putResult(buildResultRecord(form, decision, res, canvas, manual, page)); } catch (_) {}
       const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
-      return { page, decision: verdict, formName: form.name, forced: !!forcedFormId, avgConf: avg, fields: res.fields, thumb };
+      return { page, decision: verdict, formName: form.name, formId: form.id, forced: !!forcedFormId, avgConf: avg, fields: res.fields, thumb };
     } catch (e) {
       return { page, decision: 'error', formName: '—', error: e.message || String(e), thumb };
     }
@@ -795,6 +799,7 @@
   async function runBatchPdf(src) {
     if (!S.cvReady) { src.done && src.done(); return UI.toast('OpenCV.js 読み込み中です', 'warning'); }
     if (!S.forms.length) { src.done && src.done(); return UI.toast('先に帳票を登録してください', 'warning'); }
+    releasePageNav();                            // 前回の一括結果ナビゲーションを解放
     const pages = src.pages || [];
     const total = src.total || pages.length;
     UI.openBatchModal(total);
@@ -813,13 +818,70 @@
         const forcedFormId = src.formFor ? src.formFor(p) : '';
         results.push(await recognizePageQuietly(canvas, p, forcedFormId));
       }
-    } finally { src.done && src.done(); }
+    } finally { /* 詳細ペインでのページ送り用に PDF を保持するため、ここでは破棄しない */ }
     S.batchResults = results;
+    /* 処理済みページを詳細ペインで1枚ずつ確認できるよう、PDFソースを保持
+       （次の一括/新規読み込み時に releasePageNav で破棄）。 */
+    if (src.getPage && results.length) {
+      S.pageNav = { pages: results.map(r => r.page), idx: 0, started: false, getPage: src.getPage, done: src.done, fileName: src.fileName };
+      updatePageNavUI();                       // 詳細ペインにページ送りバーを表示（モーダルを閉じても使える）
+    } else if (src.done) { try { src.done(); } catch (_) {} }
     UI.updateBatchProgress('完了', 1);
-    UI.renderBatchResults(results);
+    UI.renderBatchResults(results, { hasNav: !!S.pageNav });
     refreshHistory();
     const ok = results.filter(r => r.decision === 'accepted').length;
     UI.toast(`一括OCR${cancelled ? '中止' : '完了'} — ${results.length}/${total}ページ処理・${ok}件採用、履歴に保存`, cancelled ? 'warning' : 'success', 4500);
+  }
+
+  /* ── 一括OCR結果のページ送り（詳細ペインで1枚ずつ拡大確認） ──
+     保持した PDF から該当ページを都度ラスタライズし、単ページ認識の詳細ビュー
+     （ズーム/OCR領域/フィールド/帳票の選び直し）に読み込む。常に1枚分のみ描画。 */
+  function releasePageNav() {
+    if (S.pageNav && S.pageNav.done) { try { S.pageNav.done(); } catch (_) {} }
+    S.pageNav = null;
+    const bar = $('rrPageNav'); if (bar) bar.classList.add('hidden');
+  }
+  function updatePageNavUI() {
+    const nav = S.pageNav, bar = $('rrPageNav'); if (!bar) return;
+    if (!nav || !nav.pages.length) { bar.classList.add('hidden'); return; }
+    bar.classList.remove('hidden');
+    if (nav.started) {
+      $('rrPageLabel').textContent = `P${nav.pages[nav.idx]}（${nav.idx + 1} / ${nav.pages.length}）`;
+      $('btnRrPrev').disabled = nav.idx <= 0;
+      $('btnRrNext').disabled = nav.idx >= nav.pages.length - 1;
+    } else {
+      $('rrPageLabel').textContent = `全 ${nav.pages.length} ページ`;   // 未読み込み: 「次」で先頭から確認
+      $('btnRrPrev').disabled = true;
+      $('btnRrNext').disabled = false;
+    }
+  }
+  /* 未読み込みなら先頭、読み込み済みなら現在位置からの相対移動 */
+  function navStep(delta) {
+    const nav = S.pageNav; if (!nav) return;
+    navLoadPage(nav.started ? nav.idx + delta : 0);
+  }
+  async function navLoadPage(idx) {
+    const nav = S.pageNav; if (!nav || S.navReviewMode) return;
+    idx = Math.max(0, Math.min(nav.pages.length - 1, idx));
+    nav.idx = idx; nav.started = true;
+    const pageNum = nav.pages[idx];
+    updatePageNavUI();
+    $('btnRrPrev').disabled = $('btnRrNext').disabled = true;   // 読み込み中は連打を防止
+    let canvas;
+    try { canvas = await nav.getPage(pageNum); }
+    catch (_) { updatePageNavUI(); return UI.toast('ページの描画に失敗しました', 'error'); }
+    S.navReviewMode = true;                       // 確認目的の再実行は履歴へ保存しない（重複防止）
+    try {
+      loadRecogImage(canvas, true);
+      S.recogPageNum = pageNum;
+      await runRecognize();
+      /* 一括時に使った帳票が分かるなら、その帳票での結果を再現する */
+      const rec = (S.batchResults || []).find(r => r.page === pageNum);
+      if (rec && rec.formId && S.recogFormId !== rec.formId) await applyForm(rec.formId);
+    } finally {
+      S.navReviewMode = false;
+      updatePageNavUI();
+    }
   }
 
   /* OCR結果を「ページ数, OCR1, OCR2, …」形式の CSV に整形（DB出力フォーマット）。
@@ -1074,6 +1136,7 @@
     $('batchCsv').addEventListener('click', copyBatchCsv);
     $('batchCsvDl').addEventListener('click', downloadBatchCsv);
     $('batchCancel').addEventListener('click', () => { S.batchCancel = true; UI.updateBatchProgress('中止しています…', 1); });
+    $('batchReview').addEventListener('click', () => { if (S.pageNav) { UI.closeBatchModal(); navLoadPage(S.pageNav.idx || 0); } });
     $('btnRecogSample').addEventListener('click', () => loadRecogImage(SampleForms.sampleInputCanvas(0, 1.5)));
     $('btnRunRecognize').addEventListener('click', runRecognize);
     $('btnApplyForm').addEventListener('click', () => applyForm($('dpFormSelect').value));
@@ -1085,6 +1148,11 @@
     $('btnRrZoomIn').addEventListener('click', () => { S.rrZoom = Math.min(8, S.rrZoom * 1.3); renderResultPreview(); });
     $('btnRrZoomOut').addEventListener('click', () => { S.rrZoom = Math.max(0.2, S.rrZoom / 1.3); renderResultPreview(); });
     $('btnRrZoomFit').addEventListener('click', () => { S.rrZoom = 1; renderResultPreview(); });
+
+    /* 一括OCR結果のページ送り（詳細ペインで1枚ずつ確認） */
+    $('btnRrPrev').addEventListener('click', () => navStep(-1));
+    $('btnRrNext').addEventListener('click', () => navStep(1));
+    $('btnRrNavClose').addEventListener('click', () => { releasePageNav(); UI.toast('ページ送りを終了しました', 'info', 2000); });
 
     /* プリセット */
     $('btnApplyPreset').addEventListener('click', applyPreset);

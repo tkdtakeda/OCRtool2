@@ -341,9 +341,10 @@ const StudioUI = (() => {
     $('batchProgressMsg').textContent = msg || '処理中…';
   }
   const BATCH_RENDER_CAP = 200;   // 大量ページでもDOMが重くならないよう表示は上限まで
-  function renderBatchResults(results) {
+  function renderBatchResults(results, opts) {
     $('batchProgress').classList.add('hidden');
     $('batchCancel').style.display = 'none';
+    const review = $('batchReview'); if (review) review.style.display = (opts && opts.hasNav) ? '' : 'none';
     const count = k => results.filter(r => r.decision === k).length;
     const sum = $('batchSummary');
     sum.classList.remove('hidden');
