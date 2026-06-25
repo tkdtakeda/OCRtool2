@@ -155,7 +155,7 @@
     S.drawMode = m; S.pending = null;
     document.querySelectorAll('#drawModeSwitch .dm-btn').forEach(b => b.classList.toggle('is-active', b.dataset.dm === m));
     const c = $('regCanvas'); if (c) c.style.cursor = m === 'pan' ? 'grab' : 'crosshair';
-    if (m !== 'pan') $('rectNameInput').placeholder = m === 'anchor' ? '識別アンカー名（例：タイトル）' : 'OCRフィールド名（例：番号）';
+    if (m !== 'pan') $('rectNameInput').placeholder = m === 'anchor' ? '目印の名前（例：タイトル）' : '読取項目の名前（例：番号）';
     redrawRegCanvas();
   }
 
@@ -1403,6 +1403,11 @@
     $('closeHelpModal').addEventListener('click', () => $('helpModal').classList.add('hidden'));
     $('helpModal').addEventListener('click', e => { if (e.target === $('helpModal')) $('helpModal').classList.add('hidden'); });
     document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => m.classList.add('hidden')); });
+
+    /* はじめての方向けガイド（初回のみ表示・閉じたら記憶） */
+    try { if (!localStorage.getItem('ocrtool_onboard_dismissed')) $('onboardBar').classList.remove('hidden'); } catch (_) {}
+    $('onboardClose').addEventListener('click', () => { $('onboardBar').classList.add('hidden'); try { localStorage.setItem('ocrtool_onboard_dismissed', '1'); } catch (_) {} });
+    $('onboardHelp').addEventListener('click', () => $('helpModal').classList.remove('hidden'));
 
     /* 設定モーダル */
     $('btnSettings').addEventListener('click', openSettings);

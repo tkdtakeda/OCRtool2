@@ -152,7 +152,9 @@ const StudioUI = (() => {
     $('dpReason').textContent = reason;
 
     /* 補助指標（ユーザー提案ルール） */
-    $('dpLegacy').textContent = `補助指標(順位ルール): 上位3に同一${ls.top3SameCount}件 / 上位5に${ls.top5SameCount}件 → ${ls.passesUserRule ? '合致' : '不合致'}`;
+    /* 内部の補助指標は技術的なため、詳細はツールチップに退避（画面はすっきり） */
+    $('dpLegacy').textContent = '';
+    $('dpLegacy').title = `補助指標(順位ルール): 上位3に同一${ls.top3SameCount}件 / 上位5に${ls.top5SameCount}件 → ${ls.passesUserRule ? '合致' : '不合致'}`;
 
     /* 帳票セレクタ */
     const sel = $('dpFormSelect');
@@ -177,12 +179,11 @@ const StudioUI = (() => {
           <div class="rank-name">${esc(row.formName)}</div>
           <div class="rank-bar-track"><div class="rank-bar sc-${cls}" style="width:${pct}%"></div></div>
           <div class="rank-meta">
-            <span class="rank-chip scv-${cls}">peak ${row.peak.toFixed(3)}</span>
-            <span class="rank-chip">集約 ${row.agg.toFixed(3)}</span>
-            <span class="rank-chip">裏付け ${row.support}</span>
-            <span class="rank-chip"><i class="fas fa-rotate"></i> ${row.angle > 0 ? '+' : ''}${row.angle}°</span>
+            <span class="rank-chip scv-${cls}" title="アンカー画像が入力にどれだけ一致したか">一致度 ${pct}%</span>
+            <span class="rank-chip" title="しっかり一致した目印(アンカー)の数">一致した目印 ${row.support}</span>
+            <span class="rank-chip" title="補正した傾き"><i class="fas fa-rotate"></i> ${row.angle > 0 ? '+' : ''}${row.angle}°</span>
           </div>
-          ${(row.anchors && row.anchors.length) ? `<div class="rank-anchors"><span class="rank-anchors-lbl">アンカー別:</span>${row.anchors.map(a => `<span class="anchor-chip scv-${scoreClass(a.score)}" title="一致度 ${(a.score).toFixed(2)}">${esc(a.name || 'アンカー')} ${(a.score).toFixed(2)}</span>`).join('')}</div>` : ''}
+          ${(row.anchors && row.anchors.length) ? `<div class="rank-anchors"><span class="rank-anchors-lbl">目印ごとの一致度:</span>${row.anchors.map(a => `<span class="anchor-chip scv-${scoreClass(a.score)}" title="一致度">${esc(a.name || '目印')} ${Math.round(a.score * 100)}%</span>`).join('')}</div>` : ''}
         </div>`;
       list.appendChild(el);
     });

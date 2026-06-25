@@ -495,3 +495,12 @@
 .rec-summary { font-size: .82rem; color: var(--c-text-2); padding: 8px 11px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); margin-bottom: 10px; }
 .rec-result-tbl td:last-child { text-align: center; font-weight: 700; font-size: .9rem; }
 .rv-ok { color: var(--c-suc); } .rv-no { color: var(--c-err); } .rv-miss { color: var(--c-text-3); }
+
+/* ── はじめての方向けガイド（オンボーディング） ───────── */
+.onboard-bar { display: flex; align-items: center; gap: 10px; padding: 8px 16px; background: linear-gradient(90deg, var(--c-pri-lt), #fff); border-bottom: 1px solid var(--c-pri-mid); font-size: .82rem; color: var(--c-text); }
+.onboard-bar.hidden { display: none; }
+.onboard-icon { color: #E8A317; font-size: 1rem; }
+.onboard-text { flex: 1; line-height: 1.5; }
+.onboard-text b { color: var(--c-pri-dk); }
+.onboard-bar .btn-icon-sm { width: 26px; height: 26px; border-radius: 50%; color: var(--c-text-3); }
+.onboard-bar .btn-icon-sm:hover { background: #fff; color: var(--c-err); }

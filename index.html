@@ -48,6 +48,14 @@
   </nav>
 </header>
 
+<!-- はじめての方向けガイド（初回のみ・閉じると記憶） -->
+<div id="onboardBar" class="onboard-bar hidden">
+  <i class="fas fa-lightbulb onboard-icon"></i>
+  <span class="onboard-text"><b>かんたん2ステップ：</b> ①「レイアウト登録」で帳票の<b>目印</b>と<b>読取枠</b>を決める → ②「OCR実行」で画像／PDFを読み取り。困ったら右上の <i class="fas fa-circle-question"></i> を。</span>
+  <button id="onboardHelp" class="btn btn-ghost btn-sm"><i class="fas fa-book-open"></i> 使い方</button>
+  <button id="onboardClose" class="btn-icon-sm" title="閉じる"><i class="fas fa-xmark"></i></button>
+</div>
+
 <!-- ════════════════════════════════════════════════════
      VIEW A : レイアウト登録工程
      ════════════════════════════════════════════════════ -->
@@ -77,7 +85,7 @@
     <div id="editorEmpty" class="editor-empty">
       <i class="fas fa-pen-ruler"></i>
       <p class="ee-title">帳票レイアウトを登録</p>
-      <p class="ee-sub">「新規」から帳票を登録します。基準画像に<br>識別アンカーとOCR領域を矩形で指定してください。</p>
+      <p class="ee-sub">「新規」から帳票を登録します。基準画像に<br><b>目印（アンカー）</b>と<b>読取枠（OCR領域）</b>を四角で囲むだけ。</p>
       <button id="btnNewForm2" class="btn btn-primary"><i class="fas fa-plus"></i> 新規帳票を作成</button>
     </div>
 
@@ -87,7 +95,7 @@
       <div class="reg-steps" id="regSteps">
         <span class="reg-step" data-k="name"><i class="fas fa-circle-check"></i> 帳票名</span>
         <span class="reg-step" data-k="ref"><i class="fas fa-circle-check"></i> 基準画像</span>
-        <span class="reg-step" data-k="anchor"><i class="fas fa-circle-check"></i> 識別アンカー</span>
+        <span class="reg-step" data-k="anchor"><i class="fas fa-circle-check"></i> 目印</span>
         <span class="reg-step" data-k="ocr"><i class="fas fa-circle-check"></i> OCR領域</span>
         <span class="reg-step" data-k="save"><i class="fas fa-circle-check"></i> 保存</span>
       </div>
@@ -117,7 +125,7 @@
 
           <!-- 別画像から識別アンカーを追加（自動配置） -->
           <div class="form-group">
-            <label class="form-label">識別アンカーを別画像から追加</label>
+            <label class="form-label">目印（アンカー）を別画像から追加</label>
             <div class="modal-drop-zone modal-drop-zone--xs" id="anchorDropZone">
               <div id="anchorDropHint" class="drop-hint-inner">
                 <i class="fas fa-image"></i>
@@ -190,7 +198,7 @@
         <div class="editor-col editor-col--canvas">
           <div class="canvas-toolbar">
             <div class="draw-mode" id="drawModeSwitch">
-              <button class="dm-btn is-active" data-dm="anchor"><span class="dot dot-anchor"></span> 識別アンカー</button>
+              <button class="dm-btn is-active" data-dm="anchor"><span class="dot dot-anchor"></span> 目印（アンカー）</button>
               <button class="dm-btn" data-dm="ocr"><span class="dot dot-ocr"></span> OCR領域</button>
               <button class="dm-btn" data-dm="pan" title="ドラッグで画像を移動"><i class="fas fa-up-down-left-right"></i> 移動</button>
             </div>
@@ -216,7 +224,7 @@
         <!-- 右: 登録済みリスト -->
         <div class="editor-col editor-col--lists">
           <div class="list-block">
-            <div class="list-hdr"><span class="dot dot-anchor"></span> 識別アンカー <span id="anchorCount" class="list-count">0</span></div>
+            <div class="list-hdr"><span class="dot dot-anchor"></span> 目印（アンカー） <span id="anchorCount" class="list-count">0</span></div>
             <div id="anchorList" class="mini-list"><div class="mini-empty">未登録</div></div>
           </div>
           <div class="list-block">
@@ -288,14 +296,14 @@
 
       <!-- ランキング（透明性: なぜその帳票か） -->
       <div class="dp-ranking">
-        <div class="dp-rank-hdr"><i class="fas fa-ranking-star"></i> スコアランキング（帳票ごと集約） <span id="dpLegacy" class="dp-legacy"></span></div>
+        <div class="dp-rank-hdr"><i class="fas fa-ranking-star"></i> 一致度ランキング（どの帳票に近いか） <span id="dpLegacy" class="dp-legacy"></span></div>
         <div id="dpRankList" class="dp-rank-list"></div>
       </div>
     </div>
 
     <!-- デバッグ設定パネル（OCR・罫線除去を再調整して再実行） -->
     <div id="debugPanel" class="debug-panel hidden">
-      <button class="acc-hdr" id="debugToggle"><span><i class="fas fa-flask"></i> 認識設定（デバッグ：数値を変えて再実行）</span><i class="fas fa-chevron-down acc-caret"></i></button>
+      <button class="acc-hdr" id="debugToggle"><span><i class="fas fa-sliders"></i> 認識の詳細調整（うまく読めない時に開く・任意）</span><i class="fas fa-chevron-down acc-caret"></i></button>
       <div class="acc-body debug-body" id="debugBody">
         <div class="preset-bar">
           <span class="preset-lbl"><i class="fas fa-bookmark"></i> プリセット</span>
