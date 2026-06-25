@@ -27,7 +27,7 @@
     recogCanvas: null, lastClassify: null,
     recogFormId: null, recogMatchInfo: null, recogResult: null, rrZoom: 1,
     dbgLoadedFormId: null, patternOverrides: {}, constraintOverrides: {},
-    batchResults: null, batchCancel: false, review: null,
+    batchResults: null, batchCancel: false, review: null, rec: null,
     recogPageNum: 1, pageNav: null, navReviewMode: false,
   };
 
@@ -1162,6 +1162,145 @@
     } catch (e) { UI.toast('読み込みに失敗しました: ' + (e.message || e), 'error', 6000); }
   }
 
+  /* ════════════════════════════════════════════════════
+     照合（OCR結果 × 外部データ）
+     ════════════════════════════════════════════════════ */
+  const recEsc = v => String(v == null ? '' : v);
+  const recHtml = s => recEsc(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  /* 文字コードを意識してデコード（Excel等は Shift-JIS が多い→文字化け対策） */
+  function recDecode(buf, mode) {
+    const u8 = new Uint8Array(buf);
+    const dec = enc => { try { return new TextDecoder(enc, { fatal: false }).decode(u8); } catch (_) { return ''; } };
+    if (mode === 'utf-8') return dec('utf-8');
+    if (mode === 'shift_jis') return dec('shift_jis') || dec('utf-8');
+    const a = dec('utf-8'), b = dec('shift_jis');
+    const bad = s => (s.match(/�/g) || []).length;     // 置換文字が少ない方を採用
+    return bad(b) < bad(a) ? b : a;
+  }
+  function recSplitLine(line, delim) {
+    if (delim === 'comma') {     // 引用符対応の簡易CSV
+      const out = []; let cur = '', q = false;
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i];
+        if (q) { if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
+        else if (c === '"') q = true;
+        else if (c === ',') { out.push(cur); cur = ''; }
+        else cur += c;
+      }
+      out.push(cur); return out.map(s => s.trim());
+    }
+    if (delim === 'space') return line.trim().split(/\s+/);
+    const sep = delim === 'tab' ? '\t' : ';';
+    return line.split(sep).map(s => s.trim());
+  }
+  function recParseText(text, delim) {
+    const lines = text.replace(/\r\n?/g, '\n').split('\n').filter(l => l.trim().length);
+    if (!lines.length) return [];
+    let d = delim;
+    if (d === 'auto') { const f = lines[0]; d = f.includes('\t') ? 'tab' : f.includes(',') ? 'comma' : f.includes(';') ? 'semicolon' : 'space'; }
+    return lines.map(l => recSplitLine(l, d));
+  }
+  function recFill(id, opts) {
+    const s = $(id); s.innerHTML = '';
+    opts.forEach(o => { const op = document.createElement('option'); op.value = o; op.textContent = o; s.appendChild(op); });
+  }
+  async function openReconcile() {
+    let rows = [];
+    try { rows = await FormDB.getAllResults(100000); } catch (_) {}
+    const cols = [];
+    rows.forEach(r => (r.fields || []).forEach(f => { if (f.name && !cols.includes(f.name)) cols.push(f.name); }));
+    if (!rows.length) return UI.toast('照合する認識結果がありません（先にOCRを実行）', 'warning');
+    S.rec = {
+      ocr: rows.map(r => { const values = {}; (r.fields || []).forEach(f => { values[f.name] = f.text || ''; }); return { page: r.page || 1, formName: r.formName || '', values }; }),
+      ocrCols: cols, ext: null, result: null,
+    };
+    const ocrOpts = ['ページ', '帳票', ...cols];
+    recFill('recOcrKey', ocrOpts);
+    recFill('recOcrVal', ['(なし)', ...ocrOpts]);
+    recFill('recExtKey', []); recFill('recExtVal', ['(なし)']);
+    $('recPreview').innerHTML = ''; $('recResult').innerHTML = ''; $('recSummary').classList.add('hidden'); $('recExport').disabled = true;
+    $('reconcileModal').classList.remove('hidden');
+  }
+  function closeReconcile() { $('reconcileModal').classList.add('hidden'); }
+  function recParse() {
+    if (!S.rec) return;
+    const text = $('recPaste').value;
+    if (!text.trim()) return UI.toast('比較データを貼り付けるかファイルを読み込んでください', 'warning');
+    const rows = recParseText(text, $('recDelim').value);
+    if (!rows.length) return UI.toast('データを解析できませんでした', 'warning');
+    const hasHeader = $('recHasHeader').checked;
+    const header = (hasHeader ? rows[0] : rows[0]).map((h, i) => (hasHeader && h) ? h : `列${i + 1}`);
+    const data = hasHeader ? rows.slice(1) : rows;
+    S.rec.ext = { header, rows: data };
+    recFill('recExtKey', header);
+    recFill('recExtVal', ['(なし)', ...header]);
+    renderRecPreview(header, data);
+    UI.toast(`比較データ ${data.length} 行 × ${header.length} 列を読み込みました`, 'success', 2500);
+  }
+  function renderRecPreview(header, data) {
+    const head = '<tr>' + header.map(h => `<th>${recHtml(h)}</th>`).join('') + '</tr>';
+    const body = data.slice(0, 8).map(r => '<tr>' + header.map((_, i) => `<td>${recHtml(r[i] ?? '')}</td>`).join('') + '</tr>').join('');
+    $('recPreview').innerHTML = `<div class="rec-tbl-wrap"><table class="rec-tbl">${head}${body}</table></div>`
+      + (data.length > 8 ? `<div class="rec-more">… 他 ${data.length - 8} 行</div>` : '');
+  }
+  function recReadFile(file) {
+    const r = new FileReader();
+    r.onload = () => { $('recPaste').value = recDecode(r.result, $('recEnc').value); recParse(); };
+    r.onerror = () => UI.toast('ファイルの読み込みに失敗しました', 'error');
+    r.readAsArrayBuffer(file);
+  }
+  function recRun() {
+    if (!S.rec || !S.rec.ext) return UI.toast('先に比較データを読み込んでください', 'warning');
+    const ocrKey = $('recOcrKey').value;
+    const extKeyIdx = S.rec.ext.header.indexOf($('recExtKey').value);
+    const ocrValCol = $('recOcrVal').value, extValName = $('recExtVal').value;
+    const extValIdx = S.rec.ext.header.indexOf(extValName);
+    const numeric = $('recNumeric').checked;
+    const compareVals = ocrValCol !== '(なし)' && extValName !== '(なし)' && extValIdx >= 0;
+    const norm = s => recEsc(s).trim().replace(/\s+/g, '');
+    const numNorm = s => { const n = parseFloat(recEsc(s).replace(/[,\s¥￥$]/g, '')); return isFinite(n) ? n : null; };
+    const getOcr = (r, col) => col === 'ページ' ? r.page : col === '帳票' ? r.formName : (r.values[col] ?? '');
+    const extMap = new Map();
+    S.rec.ext.rows.forEach(row => { const k = norm(row[extKeyIdx]); if (k && !extMap.has(k)) extMap.set(k, row); });
+    let nMatch = 0, nNo = 0, nMiss = 0;
+    const out = S.rec.ocr.map(r => {
+      const keyVal = getOcr(r, ocrKey);
+      const ext = extMap.get(norm(keyVal));
+      let verdict, ocrShown = '', extShown = '';
+      if (!ext) { verdict = '該当なし'; nMiss++; }
+      else if (compareVals) {
+        ocrShown = getOcr(r, ocrValCol); extShown = ext[extValIdx] ?? '';
+        const eq = numeric ? (() => { const a = numNorm(ocrShown), b = numNorm(extShown); return a != null && b != null && a === b; })()
+                           : norm(ocrShown) === norm(extShown);
+        verdict = eq ? '〇' : '×'; eq ? nMatch++ : nNo++;
+      } else { verdict = '〇'; extShown = ext.join(' '); nMatch++; }
+      return { page: r.page, key: keyVal, ocr: ocrShown, ext: extShown, verdict, compareVals };
+    });
+    S.rec.result = out;
+    renderRecResult(out, { nMatch, nNo, nMiss, compareVals });
+    $('recExport').disabled = false;
+  }
+  function renderRecResult(out, st) {
+    const sum = $('recSummary'); sum.classList.remove('hidden');
+    sum.innerHTML = st.compareVals
+      ? `${out.length}件 ・ <span class="bs-ok">一致 ${st.nMatch}</span> / <span class="bs-rj">不一致 ${st.nNo}</span> / <span class="bs-er">該当なし ${st.nMiss}</span>`
+      : `${out.length}件 ・ <span class="bs-ok">キー一致 ${st.nMatch}</span> / <span class="bs-er">該当なし ${st.nMiss}</span>`;
+    const head = `<tr><th>ページ</th><th>キー</th>${st.compareVals ? '<th>OCR値</th><th>外部値</th>' : '<th>外部データ</th>'}<th>判定</th></tr>`;
+    const cls = v => v === '〇' ? 'rv-ok' : v === '×' ? 'rv-no' : 'rv-miss';
+    const body = out.map(r => `<tr><td>${recHtml(r.page)}</td><td>${recHtml(r.key)}</td>`
+      + (st.compareVals ? `<td>${recHtml(r.ocr)}</td><td>${recHtml(r.ext)}</td>` : `<td>${recHtml(r.ext)}</td>`)
+      + `<td class="${cls(r.verdict)}">${r.verdict}</td></tr>`).join('');
+    $('recResult').innerHTML = `<div class="rec-tbl-wrap"><table class="rec-tbl rec-result-tbl">${head}${body}</table></div>`;
+  }
+  function recExport() {
+    const out = S.rec && S.rec.result; if (!out || !out.length) return;
+    const cmp = out[0].compareVals;
+    const esc = v => /[",\n]/.test(v) ? `"${recEsc(v).replace(/"/g, '""')}"` : recEsc(v);
+    const head = ['ページ', 'キー', ...(cmp ? ['OCR値', '外部値'] : ['外部データ']), '判定'];
+    const lines = out.map(r => [r.page, r.key, ...(cmp ? [r.ocr, r.ext] : [r.ext]), r.verdict].map(esc).join(','));
+    downloadCsv([head.map(esc).join(','), ...lines].join('\n'), `reconcile_${Date.now()}.csv`);
+  }
+
   /* ── Init ───────────────────────────────────────────── */
   function init() {
     initAccordions(); initRegSliders(); initRegCanvasEvents(); initDbgControls(); initRrPan();
@@ -1218,6 +1357,22 @@
     $('btnCopyAll').addEventListener('click', copyAllFields);
     $('btnClearHistory').addEventListener('click', clearHistory);
     $('btnExportHistory').addEventListener('click', exportHistoryCsv);
+
+    /* 照合（OCR結果 × 外部データ） */
+    $('btnReconcile').addEventListener('click', openReconcile);
+    $('reconcileClose').addEventListener('click', closeReconcile);
+    $('reconcileCloseBtn').addEventListener('click', closeReconcile);
+    $('reconcileModal').addEventListener('click', e => { if (e.target === $('reconcileModal')) closeReconcile(); });
+    $('recParse').addEventListener('click', recParse);
+    $('recRun').addEventListener('click', recRun);
+    $('recExport').addEventListener('click', recExport);
+    $('recFileBtn').addEventListener('click', () => $('recFileInput').click());
+    $('recFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) recReadFile(f); e.target.value = ''; });
+    /* テキストエリアへファイルをドロップ */
+    const rp = $('recPaste');
+    rp.addEventListener('dragover', e => { if (Array.from(e.dataTransfer?.types || []).includes('Files')) { e.preventDefault(); rp.classList.add('drag-over'); } });
+    rp.addEventListener('dragleave', () => rp.classList.remove('drag-over'));
+    rp.addEventListener('drop', e => { const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) { e.preventDefault(); rp.classList.remove('drag-over'); recReadFile(f); } });
 
     /* 罫線除去結果プレビューのズーム */
     $('btnRrZoomIn').addEventListener('click', () => { S.rrZoom = Math.min(8, S.rrZoom * 1.3); renderResultPreview(); });

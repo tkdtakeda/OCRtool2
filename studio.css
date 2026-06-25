@@ -469,3 +469,29 @@
 .review-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: .76rem; color: var(--c-text-2); }
 .review-ftr { justify-content: space-between; }
 .review-nav { display: flex; gap: 8px; }
+
+/* ── 照合（OCR結果 × 外部データ）─────────────────────── */
+.modal--xl { width: 940px; max-width: 96vw; }
+.rec-step-ttl { font-size: .82rem; font-weight: 700; color: var(--c-text-2); margin: 4px 0 8px; padding-bottom: 4px; border-bottom: 1px dashed var(--c-border); }
+.rec-input-row { display: grid; grid-template-columns: 1fr 240px; gap: 10px; margin-bottom: 10px; }
+.rec-paste { width: 100%; min-height: 96px; resize: vertical; padding: 8px 10px; border: 1px solid var(--c-border-dk); border-radius: var(--r-sm); font-family: 'IBM Plex Mono', monospace; font-size: .76rem; color: var(--c-text); }
+.rec-paste:focus { outline: none; border-color: var(--c-pri); box-shadow: 0 0 0 2px var(--c-pri-lt); }
+.rec-paste.drag-over { border-color: var(--c-pri); background: var(--c-pri-lt); }
+.rec-input-side { display: flex; flex-direction: column; gap: 6px; }
+.rec-opt { display: flex; flex-direction: column; gap: 3px; font-size: .72rem; color: var(--c-text-2); }
+.rec-check { display: flex; align-items: center; gap: 6px; font-size: .74rem; color: var(--c-text-2); cursor: pointer; }
+.rec-check input { width: 15px; height: 15px; accent-color: var(--c-pri); }
+.rec-preview { margin-bottom: 12px; }
+.rec-tbl-wrap { overflow: auto; max-height: 200px; border: 1px solid var(--c-border); border-radius: var(--r-sm); }
+.rec-tbl { border-collapse: collapse; font-size: .74rem; width: 100%; }
+.rec-tbl th, .rec-tbl td { border: 1px solid var(--c-border); padding: 3px 8px; text-align: left; white-space: nowrap; }
+.rec-tbl th { background: var(--c-surface2); position: sticky; top: 0; font-weight: 700; color: var(--c-text-2); }
+.rec-tbl td { font-family: 'IBM Plex Mono', monospace; color: var(--c-text); }
+.rec-more { font-size: .7rem; color: var(--c-text-3); padding: 4px 2px; }
+.rec-map { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.rec-map label { display: flex; flex-direction: column; gap: 3px; font-size: .72rem; font-weight: 700; color: var(--c-text-2); }
+.rec-map .pselect { min-width: 110px; }
+.rec-sep { font-size: .74rem; color: var(--c-text-3); align-self: center; }
+.rec-summary { font-size: .82rem; color: var(--c-text-2); padding: 8px 11px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); margin-bottom: 10px; }
+.rec-result-tbl td:last-child { text-align: center; font-weight: 700; font-size: .9rem; }
+.rv-ok { color: var(--c-suc); } .rv-no { color: var(--c-err); } .rv-miss { color: var(--c-text-3); }
