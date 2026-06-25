@@ -41,6 +41,23 @@
 
   function canvasFromImg(img) { const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d').drawImage(img, 0, 0); return c; }
   function thumbURL(canvas, w = 90) { const s = Math.min(1, w / canvas.width); const c = document.createElement('canvas'); c.width = Math.round(canvas.width * s); c.height = Math.round(canvas.height * s); c.getContext('2d').drawImage(canvas, 0, 0, c.width, c.height); return c.toDataURL('image/png'); }
+  /* 切り出し画像（PNG dataURL）を保存用に縮小＋JPEG化して容量を抑える。照合での見比べ用。 */
+  function shrinkDataURL(dataURL, maxW = 260, quality = 0.72) {
+    return new Promise(resolve => {
+      if (!dataURL) return resolve('');
+      const img = new Image();
+      img.onload = () => {
+        const s = Math.min(1, maxW / img.naturalWidth);
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(img.naturalWidth * s));
+        c.height = Math.max(1, Math.round(img.naturalHeight * s));
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => resolve('');
+      img.src = dataURL;
+    });
+  }
 
   /* ── 設定（判定しきい値・マッチング探索）。localStorage 永続化 ── */
   const SETTINGS_KEY = 'ocrtool_settings';
@@ -790,11 +807,16 @@
 
   /* 認識結果を履歴レコードへ整形（単一ページ・一括の共通処理）。
      DB出力用に page（ページ数）と ocrValues（OCR1, OCR2,… の番号付き値）も保持する。 */
-  function buildResultRecord(form, dec, result, srcCanvas, manual, page) {
+  async function buildResultRecord(form, dec, result, srcCanvas, manual, page) {
     const avgConf = result.fields.length ? Math.round(result.fields.reduce((s, f) => s + (f.confidence || 0), 0) / result.fields.length) : 0;
     /* OCRエリア名 → 値（DB出力・照合用）。名前が無い場合のみ OCRn で補完 */
     const ocrValues = {};
     result.fields.forEach((f, i) => { ocrValues[f.name || ('OCR' + (i + 1))] = f.text || ''; });
+    /* 各フィールドの切り出し画像を縮小JPEGで保持（照合での見比べ用）。OCR時に生成済みなので再計算は不要 */
+    const fields = await Promise.all(result.fields.map(async f => ({
+      name: f.name, text: f.text, confidence: f.confidence, error: f.error || null,
+      crop: await shrinkDataURL(f.cropDataURL),
+    })));
     return {
       id: uid(),
       formId: form.id, formName: form.name,
@@ -808,14 +830,14 @@
       ocrValues,                                   // { OCR1:'…', OCR2:'…' }（DB出力用）
       voting: { margin: dec.margin, legacySignal: dec.legacySignal, ranking: (dec.ranking || []).map(r => ({ formName: r.formName, peak: r.peak, agg: r.agg, support: r.support })) },
       settings: { ocr: form.ocrSettings, lineRemoval: form.lineRemoval },
-      fields: result.fields.map(f => ({ name: f.name, text: f.text, confidence: f.confidence, error: f.error || null })),
+      fields,
     };
   }
   async function saveResult(form, result) {
     if (S.navReviewMode) return;                 // 一括結果の確認のための再実行は保存しない（重複防止）
     const dec = S.lastClassify.decision;
     const manual = !(dec.best && dec.best.formId === form.id);
-    const record = buildResultRecord(form, dec, result, S.recogCanvas, manual, S.recogPageNum || 1);
+    const record = await buildResultRecord(form, dec, result, S.recogCanvas, manual, S.recogPageNum || 1);
     try { await FormDB.putResult(record); $('saveStatus').innerHTML = `<i class="fas fa-circle-check"></i> IndexedDB に保存しました（平均信頼度 ${record.overallFieldConfidence}%）`; refreshHistory(); }
     catch (e) { $('saveStatus').textContent = '保存に失敗: ' + e.message; }
   }
@@ -847,7 +869,7 @@
       if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
       LineRemovalProcessor.cleanupMats(res.previewMats);
       const manual = forcedFormId ? true : !(candId === form.id);
-      try { await FormDB.putResult(buildResultRecord(form, decision, res, canvas, manual, page)); } catch (_) {}
+      try { await FormDB.putResult(await buildResultRecord(form, decision, res, canvas, manual, page)); } catch (_) {}
       const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
       return { page, decision: verdict, formName: form.name, formId: form.id, forced: !!forcedFormId, avgConf: avg, fields: res.fields, thumb };
     } catch (e) {
@@ -1211,7 +1233,7 @@
     rows.forEach(r => (r.fields || []).forEach(f => { if (f.name && !cols.includes(f.name)) cols.push(f.name); }));
     if (!rows.length) return UI.toast('照合する認識結果がありません（先にOCRを実行）', 'warning');
     S.rec = {
-      ocr: rows.map(r => { const values = {}; (r.fields || []).forEach(f => { values[f.name] = f.text || ''; }); return { page: r.page || 1, formName: r.formName || '', values }; }),
+      ocr: rows.map(r => { const values = {}, crops = {}; (r.fields || []).forEach(f => { values[f.name] = f.text || ''; if (f.crop) crops[f.name] = f.crop; }); return { page: r.page || 1, formName: r.formName || '', values, crops }; }),
       ocrCols: cols, ext: null, result: null,
     };
     const ocrOpts = ['ページ', '帳票', ...cols];
@@ -1260,6 +1282,8 @@
     const norm = s => recEsc(s).trim().replace(/\s+/g, '');
     const numNorm = s => { const n = parseFloat(recEsc(s).replace(/[,\s¥￥$]/g, '')); return isFinite(n) ? n : null; };
     const getOcr = (r, col) => col === 'ページ' ? r.page : col === '帳票' ? r.formName : (r.values[col] ?? '');
+    /* 行ごとの見比べ画像: 値比較時はOCR値フィールド、それ以外はキーのフィールドの切り出しを使う */
+    const getCrop = (r, col) => (col && col !== 'ページ' && col !== '帳票' && r.crops) ? (r.crops[col] || '') : '';
     const extMap = new Map();
     S.rec.ext.rows.forEach(row => { const k = norm(row[extKeyIdx]); if (k && !extMap.has(k)) extMap.set(k, row); });
     let nMatch = 0, nNo = 0, nMiss = 0;
@@ -1274,7 +1298,8 @@
                            : norm(ocrShown) === norm(extShown);
         verdict = eq ? '〇' : '×'; eq ? nMatch++ : nNo++;
       } else { verdict = '〇'; extShown = ext.join(' '); nMatch++; }
-      return { page: r.page, key: keyVal, ocr: ocrShown, ext: extShown, verdict, compareVals };
+      const crop = getCrop(r, (compareVals && ext) ? ocrValCol : ocrKey);
+      return { page: r.page, key: keyVal, ocr: ocrShown, ext: extShown, verdict, compareVals, crop };
     });
     S.rec.result = out;
     renderRecResult(out, { nMatch, nNo, nMiss, compareVals });
@@ -1285,12 +1310,14 @@
     sum.innerHTML = st.compareVals
       ? `${out.length}件 ・ <span class="bs-ok">一致 ${st.nMatch}</span> / <span class="bs-rj">不一致 ${st.nNo}</span> / <span class="bs-er">該当なし ${st.nMiss}</span>`
       : `${out.length}件 ・ <span class="bs-ok">キー一致 ${st.nMatch}</span> / <span class="bs-er">該当なし ${st.nMiss}</span>`;
-    const head = `<tr><th>ページ</th><th>キー</th>${st.compareVals ? '<th>OCR値</th><th>外部値</th>' : '<th>外部データ</th>'}<th>判定</th></tr>`;
+    const hasCrop = out.some(r => r.crop);   // 旧データ（切り出し未保存）では画像列を出さない
+    const head = `<tr><th>ページ</th><th>キー</th>${st.compareVals ? '<th>OCR値</th><th>外部値</th>' : '<th>外部データ</th>'}${hasCrop ? '<th>切り出し画像</th>' : ''}<th>判定</th></tr>`;
     const cls = v => v === '〇' ? 'rv-ok' : v === '×' ? 'rv-no' : 'rv-miss';
     const body = out.map(r => `<tr><td>${recHtml(r.page)}</td><td>${recHtml(r.key)}</td>`
       + (st.compareVals ? `<td>${recHtml(r.ocr)}</td><td>${recHtml(r.ext)}</td>` : `<td>${recHtml(r.ext)}</td>`)
+      + (hasCrop ? `<td class="rec-crop-cell">${r.crop ? `<img class="rec-crop" src="${r.crop}" alt="切り出し" loading="lazy">` : ''}</td>` : '')
       + `<td class="${cls(r.verdict)}">${r.verdict}</td></tr>`).join('');
-    $('recResult').innerHTML = `<div class="rec-tbl-wrap"><table class="rec-tbl rec-result-tbl">${head}${body}</table></div>`;
+    $('recResult').innerHTML = `<div class="rec-tbl-wrap rec-result-wrap"><table class="rec-tbl rec-result-tbl">${head}${body}</table></div>`;
   }
   function recExport() {
     const out = S.rec && S.rec.result; if (!out || !out.length) return;
