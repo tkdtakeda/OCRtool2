@@ -595,3 +595,8 @@
 @media (max-width: 720px) {
   .pr-card { grid-template-columns: 1fr; }
 }
+
+/* ── テーブル逐次表示の進捗（処理中も完了分を確認できる） ── */
+.rtbl-progress { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); }
+.rtbl-progress .ocr-progress-track { flex: 1; }
+.rtbl-progress .ocr-progress-msg { font-size: .76rem; color: var(--c-text-2); white-space: nowrap; }

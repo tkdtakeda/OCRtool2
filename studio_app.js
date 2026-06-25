@@ -30,7 +30,7 @@
     batchResults: null, batchCancel: false, review: null, rec: null,
     recogPageNum: 1, pageNav: null, navReviewMode: false,
     /* 複数ページ結果のテーブル / 突き合わせ / ページ確認カルーセル */
-    table: null, tj: null, pr: null,
+    table: null, tj: null, pr: null, tableProcessing: false,
   };
 
   /* PSM 比較用パターン */
@@ -930,47 +930,57 @@
     }
   }
 
+  /* PDFラスタライズ(getPage)を直列化。一括処理と「1ページずつ確認」が
+     同じ pdf.js ドキュメントへ同時に描画要求して衝突するのを防ぐ。 */
+  function makeSerialGetPage(fn) {
+    let chain = Promise.resolve();
+    return n => { const run = chain.then(() => fn(n)); chain = run.then(() => {}, () => {}); return run; };
+  }
+
   /* 指定範囲のページを順に一括OCR（pageSource = { pages:[n…], total, getPage(n), done() }）。
-     大量ページでも 1枚ずつ描画→OCR→破棄するためメモリは一定。中止可能。 */
+     大量ページでも 1枚ずつ描画→OCR→破棄するためメモリは一定。中止可能。
+     ★処理はノンブロッキングで進め、完了ページを逐次テーブルへ追記する。
+       ユーザーは処理中も「テーブル」タブで完了分を確認・編集・1ページ送り確認できる。 */
   async function runBatchPdf(src) {
     if (!S.cvReady) { src.done && src.done(); return UI.toast('OpenCV.js 読み込み中です', 'warning'); }
     if (!S.forms.length) { src.done && src.done(); return UI.toast('先に帳票を登録してください', 'warning'); }
     releasePageNav();                            // 前回の一括結果ナビゲーションを解放
     const pages = src.pages || [];
     const total = src.total || pages.length;
-    UI.openBatchModal(total);
     S.batchCancel = false;
     const results = [];
-    let cancelled = false;
-    try {
-      for (let idx = 0; idx < pages.length; idx++) {
-        if (S.batchCancel) { cancelled = true; break; }
-        const p = pages[idx];
-        UI.updateBatchProgress(`ページ ${p}（${idx + 1}/${total}）を認識中…`, idx / Math.max(1, total));
-        await new Promise(r => setTimeout(r, 5));   // 進捗描画・中止受付の隙間
-        let canvas;
-        try { canvas = await src.getPage(p); }
-        catch (_) { results.push({ page: p, decision: 'error', formName: '—', error: 'ページ描画に失敗', thumb: '' }); continue; }
-        const forcedFormId = src.formFor ? src.formFor(p) : '';
-        results.push(await recognizePageQuietly(canvas, p, forcedFormId));
-      }
-    } finally { /* 詳細ペインでのページ送り用に PDF を保持するため、ここでは破棄しない */ }
     S.batchResults = results;
-    /* 処理済みページを詳細ペインで1枚ずつ確認できるよう、PDFソースを保持
-       （次の一括/新規読み込み時に releasePageNav で破棄）。 */
-    if (src.getPage && results.length) {
-      S.pageNav = { pages: results.map(r => r.page), idx: 0, started: false, getPage: src.getPage, done: src.done, fileName: src.fileName };
-      updatePageNavUI();                       // 詳細ペインにページ送りバーを表示（モーダルを閉じても使える）
-    } else if (src.done) { try { src.done(); } catch (_) {} }
-    UI.updateBatchProgress('完了', 1);
-    UI.renderBatchResults(results, { hasNav: !!S.pageNav });
-    refreshHistory();
-    /* 結果を1つのデータテーブルにまとめ、テーブルタブへ自動遷移（要望の主表示） */
-    buildTableFromBatch();
-    renderTable();
+    const serialGetPage = src.getPage ? makeSerialGetPage(src.getPage) : null;
+    /* 空のテーブルを用意してテーブルタブを表示 → 完了ページを逐次追記（処理中も確認可能） */
+    S.table = { rows: [], fieldNames: [], extCols: [], getPage: serialGetPage };
+    S.tableProcessing = true;
     markRecogTab('table', true);
     switchRecogTab('table');
-    UI.closeBatchModal();
+    renderTable();
+    tableProgressShow(true);
+    tableProgressUpdate(`一括OCR開始 … 全 ${total} ページ`, 0);
+    let cancelled = false;
+    for (let idx = 0; idx < pages.length; idx++) {
+      if (S.batchCancel) { cancelled = true; break; }
+      const p = pages[idx];
+      tableProgressUpdate(`ページ ${p}（${idx + 1}/${total}）を認識中… 完了分はこの表で確認できます`, idx / Math.max(1, total));
+      await new Promise(r => setTimeout(r, 5));   // 進捗描画・操作受付の隙間
+      let r;
+      try { const canvas = await serialGetPage(p); r = await recognizePageQuietly(canvas, p, src.formFor ? src.formFor(p) : ''); }
+      catch (_) { r = { page: p, decision: 'error', formName: '—', error: 'ページ描画に失敗', thumb: '', record: null }; }
+      results.push(r);
+      appendTableRow(r);                          // 完了ページを即追記＆再描画（並行確認のため）
+      refreshHistory();
+    }
+    S.tableProcessing = false;
+    /* 処理済みページを「1ページずつ確認」で再ラスタライズできるよう PDF を保持
+       （次の一括/新規読み込み時に releasePageNav で破棄）。 */
+    if (src.getPage && results.length) {
+      S.pageNav = { pages: results.map(r => r.page), idx: 0, started: false, getPage: serialGetPage, done: src.done, fileName: src.fileName };
+    } else if (src.done) { try { src.done(); } catch (_) {} }
+    tableProgressUpdate('完了', 1);
+    tableProgressShow(false);
+    renderTable();
     const ok = results.filter(r => r.decision === 'accepted').length;
     UI.toast(`一括OCR${cancelled ? '中止' : '完了'} — ${results.length}/${total}ページ処理・${ok}件採用。テーブルで確認・編集できます`, cancelled ? 'warning' : 'success', 4800);
   }
@@ -1390,23 +1400,30 @@
     (S.table.rows || []).forEach(r => (r.fields || []).forEach(f => { if (f.name && !names.includes(f.name)) names.push(f.name); }));
     S.table.fieldNames = names;
   }
-  /* 一括OCR結果（S.batchResults）を1つの表へ。record を保持し編集をDBへ再保存できる。 */
-  function buildTableFromBatch() {
-    const results = S.batchResults || [];
-    S.table = {
-      rows: results.map(r => ({
-        id: r.record ? r.record.id : null,
-        page: r.page, formName: r.formName, decision: r.decision,
-        avgConf: (r.avgConf != null) ? r.avgConf : (r.record ? r.record.overallFieldConfidence : null),
-        error: r.error || null,
-        fields: r.record ? r.record.fields : (r.fields || []),   // record.fields と同一参照で編集を共有
-        thumb: r.thumb || (r.record ? r.record.sourceThumb : ''),
-        record: r.record || null, ext: {}, extMatched: undefined,
-      })),
-      extCols: [],
-      getPage: S.pageNav ? S.pageNav.getPage : null,   // 保持PDFから各ページを再ラスタライズ
+  /* 一括OCRの1ページ結果 → テーブル行（record を保持し編集をDBへ再保存できる） */
+  function batchResultToRow(r) {
+    return {
+      id: r.record ? r.record.id : null,
+      page: r.page, formName: r.formName, decision: r.decision,
+      avgConf: (r.avgConf != null) ? r.avgConf : (r.record ? r.record.overallFieldConfidence : null),
+      error: r.error || null,
+      fields: r.record ? r.record.fields : (r.fields || []),   // record.fields と同一参照で編集を共有
+      thumb: r.thumb || (r.record ? r.record.sourceThumb : ''),
+      record: r.record || null, ext: {}, extMatched: undefined,
     };
+  }
+  /* 完了ページを1件テーブルへ追記し、列名を更新して再描画（処理中の逐次表示） */
+  function appendTableRow(r) {
+    if (!S.table) return;
+    S.table.rows.push(batchResultToRow(r));
     computeTableFieldNames();
+    renderTable();
+  }
+  /* 逐次表示中の進捗バー（テーブルツールバー内） */
+  function tableProgressShow(show) { const el = $('rtblProgress'); if (el) el.classList.toggle('hidden', !show); }
+  function tableProgressUpdate(msg, pct) {
+    const f = $('rtblProgressFill'); if (f) f.style.width = `${Math.round((pct || 0) * 100)}%`;
+    const m = $('rtblProgressMsg'); if (m) m.textContent = msg || '処理中…';
   }
   /* 履歴(IndexedDB)からテーブルを構成（単ページOCRの蓄積も表で確認できる） */
   async function buildTableFromHistory() {
@@ -1426,10 +1443,10 @@
     UI.toast(`履歴 ${rows.length} 件をテーブルに読み込みました`, 'success', 2500);
   }
   function showTableArea() {
-    const has = !!(S.table && S.table.rows && S.table.rows.length);
+    const show = !!(S.table && ((S.table.rows && S.table.rows.length) || S.tableProcessing));
     const e = $('emptyTable'), a = $('tableArea');
-    if (e) e.classList.toggle('hidden', has);
-    if (a) a.classList.toggle('hidden', !has);
+    if (e) e.classList.toggle('hidden', show);
+    if (a) a.classList.toggle('hidden', !show);
   }
   function tableSummary() {
     const rows = (S.table && S.table.rows) || [];
@@ -1444,9 +1461,23 @@
   }
   function renderTable() {
     showTableArea();
-    if (!S.table || !S.table.rows.length) return;
-    $('rtblSummary').textContent = tableSummary();
+    if (!S.table) return;
+    $('rtblSummary').textContent = S.tableProcessing ? `処理中 … ${S.table.rows.length} ページ完了（下の表で確認できます）` : tableSummary();
+    /* 突き合わせは処理完了後のみ（行が増える途中は不整合になるため） */
+    const join = $('btnTableJoin'); if (join) join.disabled = !!S.tableProcessing;
+    /* 編集中のセルがあれば再描画後にフォーカス・カーソル位置を復元（逐次表示で入力が途切れない） */
+    const ae = document.activeElement;
+    let focus = null;
+    if (ae && ae.classList && ae.classList.contains('rtbl-input')) {
+      focus = { row: ae.dataset.row, field: ae.dataset.field, start: ae.selectionStart, end: ae.selectionEnd };
+    }
     UI.renderResultTable(S.table, { onEdit: onTableEdit, onReview: openPageReview });
+    if (focus) {
+      try {
+        const el = document.querySelector(`#resultTableWrap .rtbl-input[data-row="${focus.row}"][data-field="${(window.CSS && CSS.escape) ? CSS.escape(focus.field) : focus.field}"]`);
+        if (el) { el.focus(); el.setSelectionRange(focus.start, focus.end); }
+      } catch (_) {}
+    }
   }
   function tableGetVal(row, col) {
     if (col === 'ページ') return row.page;
@@ -1665,6 +1696,7 @@
     $('btnTableCsvDl').addEventListener('click', downloadTableCsv);
     $('btnTableCsvCopy').addEventListener('click', copyTableCsv);
     $('btnTableClearJoin').addEventListener('click', clearTableJoin);
+    $('rtblCancel').addEventListener('click', () => { S.batchCancel = true; tableProgressUpdate('中止しています…（ここまでを保存）', 1); });
     /* 1ページずつ確認カルーセル */
     $('prPrev').addEventListener('click', () => pageReviewGo(-1));
     $('prNext').addEventListener('click', () => pageReviewGo(1));
