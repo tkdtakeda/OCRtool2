@@ -69,9 +69,15 @@
     </div>
     <div class="lib-sub">
       <button id="btnLoadSampleForms" class="btn btn-ghost btn-sm"><i class="fas fa-database"></i> サンプル登録</button>
-      <button id="btnExportForms" class="btn btn-ghost btn-sm" title="登録帳票をJSONで書き出し"><i class="fas fa-file-export"></i> 書出</button>
-      <button id="btnImportForms" class="btn btn-ghost btn-sm" title="JSONから帳票を読み込み"><i class="fas fa-file-import"></i> 読込</button>
-      <button id="btnClearForms" class="btn btn-ghost btn-sm"><i class="fas fa-trash-can"></i> 全削除</button>
+      <!-- 副次操作は「…」に集約して選択肢を減らす（Hickの法則） -->
+      <div class="ovf ovf--right" style="margin-left:auto">
+        <button class="btn btn-ghost btn-sm ovf-btn" title="その他の操作"><i class="fas fa-ellipsis"></i></button>
+        <div class="ovf-pop">
+          <button id="btnImportForms" class="btn btn-ghost btn-sm" title="JSONから帳票を読み込み"><i class="fas fa-file-import"></i> 読み込み（JSON）</button>
+          <button id="btnExportForms" class="btn btn-ghost btn-sm" title="登録帳票をJSONで書き出し"><i class="fas fa-file-export"></i> 書き出し（JSON）</button>
+          <button id="btnClearForms" class="btn btn-ghost btn-sm"><i class="fas fa-trash-can"></i> 全削除</button>
+        </div>
+      </div>
       <input type="file" id="importFormsInput" accept="application/json,.json" style="display:none">
     </div>
     <div id="formLibList" class="lib-list">
@@ -135,9 +141,9 @@
             <input type="file" id="anchorFileInput" accept="image/*,application/pdf" style="display:none">
           </div>
 
-          <!-- OCR設定 -->
+          <!-- 文字の読み取り設定 -->
           <div class="acc">
-            <button class="acc-hdr" data-acc="accOcr"><span><i class="fas fa-spell-check"></i> OCR設定</span><i class="fas fa-chevron-down acc-caret"></i></button>
+            <button class="acc-hdr" data-acc="accOcr"><span><i class="fas fa-spell-check"></i> 文字の読み取り設定</span><i class="fas fa-chevron-down acc-caret"></i></button>
             <div class="acc-body" id="accOcr">
               <div class="prow"><label class="plabel">言語</label>
                 <select id="regLang" class="pselect">
@@ -146,14 +152,14 @@
                   <option value="jpn">日本語</option>
                 </select>
               </div>
-              <div class="prow"><label class="plabel">解析モード(PSM)</label>
+              <div class="prow"><label class="plabel">読み取り方</label>
                 <select id="regPsm" class="pselect">
-                  <option value="3">自動</option>
-                  <option value="6">単一ブロック</option>
-                  <option value="4">縦長テキスト</option>
-                  <option value="7" selected>単一行</option>
-                  <option value="8">単一単語</option>
-                  <option value="13">1行(生)</option>
+                  <option value="3">自動（おまかせ）</option>
+                  <option value="6">文章のかたまり</option>
+                  <option value="4">縦に長い列</option>
+                  <option value="7" selected>1行だけ</option>
+                  <option value="8">単語だけ</option>
+                  <option value="13">1行（そのまま）</option>
                 </select>
               </div>
               <div class="prow"><label class="plabel">文字ホワイトリスト</label><input type="text" id="regWhitelist" class="pinput" placeholder="空=制限なし 例:0123456789" autocomplete="off"></div>
@@ -163,12 +169,12 @@
             </div>
           </div>
 
-          <!-- 罫線除去設定（リポジトリ既定値を引き継ぎ） -->
+          <!-- 枠線・罫線を消す（リポジトリ既定値を引き継ぎ） -->
           <div class="acc">
-            <button class="acc-hdr" data-acc="accLine"><span><i class="fas fa-eraser"></i> 罫線除去設定</span><i class="fas fa-chevron-down acc-caret"></i></button>
+            <button class="acc-hdr" data-acc="accLine"><span><i class="fas fa-eraser"></i> 枠線・罫線を消す</span><i class="fas fa-chevron-down acc-caret"></i></button>
             <div class="acc-body is-collapsed" id="accLine">
-              <p class="hint-text">既定値は罫線除去ツールの設定を引き継いでいます。</p>
-              <div class="prow"><label class="plabel">二値化方式</label>
+              <p class="hint-text">表のマス目や下線など、文字に重なる線を消して読みやすくします。既定値のままでも動きます。</p>
+              <div class="prow"><label class="plabel">白黒のくっきり化</label>
                 <select id="regBinaryMethod" class="pselect">
                   <option value="otsu">Otsu 自動</option><option value="adaptive" selected>適応的</option><option value="manual">手動</option>
                 </select>
@@ -276,8 +282,19 @@
       </div>
     </div>
 
-    <!-- 判定結果パネル -->
-    <div id="decisionPanel" class="decision-panel hidden">
+    <!-- 段組みをタブ化：判定→結果→詳細→履歴 を1画面ずつ表示して縦長を解消 -->
+    <div class="recog-tabs" id="recogTabs" role="tablist">
+      <button class="recog-tab is-active" role="tab" data-tab="decide"><i class="fas fa-scale-balanced"></i> 判定</button>
+      <button class="recog-tab" role="tab" data-tab="result"><i class="fas fa-list-check"></i> 結果</button>
+      <button class="recog-tab" role="tab" data-tab="detail"><i class="fas fa-sliders"></i> 詳細調整</button>
+      <button class="recog-tab" role="tab" data-tab="history"><i class="fas fa-clock-rotate-left"></i> 履歴</button>
+    </div>
+
+    <!-- TAB: 判定 ───────────────────────────────────── -->
+    <div class="recog-tabpanel" data-tab="decide">
+      <div class="recog-empty" id="emptyDecide"><i class="fas fa-scale-balanced"></i><span>画像／PDF を読み込み「認識を実行」すると、ここに帳票の判定結果が表示されます。</span></div>
+      <!-- 判定結果パネル -->
+      <div id="decisionPanel" class="decision-panel hidden">
       <div class="dp-verdict" id="dpVerdict">
         <div class="dp-badge" id="dpBadge">—</div>
         <div class="dp-gauge">
@@ -301,22 +318,37 @@
       </div>
     </div>
 
-    <!-- デバッグ設定パネル（OCR・罫線除去を再調整して再実行） -->
-    <div id="debugPanel" class="debug-panel hidden">
-      <button class="acc-hdr" id="debugToggle"><span><i class="fas fa-sliders"></i> 認識の詳細調整（うまく読めない時に開く・任意）</span><i class="fas fa-chevron-down acc-caret"></i></button>
+    </div><!-- /TAB 判定 -->
+
+    <!-- TAB: 詳細調整 ─────────────────────────────────── -->
+    <div class="recog-tabpanel hidden" data-tab="detail">
+      <div class="recog-empty" id="emptyDetail"><i class="fas fa-sliders"></i><span>「認識を実行」した後、ここで読み取り方や仕上げを調整して再実行できます。<br>迷ったら下の「かんたん調整」を選ぶだけでOKです。</span></div>
+      <!-- 詳細調整パネル（読み取り方・仕上げを再調整して再実行） -->
+      <div id="debugPanel" class="debug-panel hidden">
+      <button class="acc-hdr" id="debugToggle"><span><i class="fas fa-sliders"></i> 認識の詳細調整</span><i class="fas fa-chevron-down acc-caret"></i></button>
       <div class="acc-body debug-body" id="debugBody">
+        <!-- かんたん調整：専門用語の代わりに「数字をくっきり」等のプリセット名で選ぶ -->
+        <div class="preset-quick">
+          <span class="preset-lbl"><i class="fas fa-wand-magic-sparkles"></i> かんたん調整</span>
+          <div class="preset-chips" id="presetChips"></div>
+        </div>
         <div class="preset-bar">
-          <span class="preset-lbl"><i class="fas fa-bookmark"></i> プリセット</span>
-          <select id="presetSelect" class="pselect"><option value="">（プリセットを選択）</option></select>
-          <button id="btnApplyPreset" class="btn btn-ghost btn-sm" title="選択中のプリセットを反映"><i class="fas fa-arrow-down"></i> 適用</button>
-          <button id="btnSavePreset" class="btn btn-outline btn-sm" title="現在の設定をプリセットとして保存"><i class="fas fa-plus"></i> 現在値を保存</button>
-          <button id="btnDeletePreset" class="btn btn-ghost btn-sm" title="選択中のプリセットを削除"><i class="fas fa-trash-can"></i></button>
+          <span class="preset-lbl"><i class="fas fa-bookmark"></i> マイ設定</span>
+          <select id="presetSelect" class="pselect"><option value="">（保存した設定を選択）</option></select>
+          <button id="btnApplyPreset" class="btn btn-ghost btn-sm" title="選択中の設定を反映"><i class="fas fa-arrow-down"></i> 適用</button>
+          <div class="ovf ovf--right">
+            <button class="btn btn-ghost btn-sm ovf-btn" title="その他"><i class="fas fa-ellipsis"></i></button>
+            <div class="ovf-pop">
+              <button id="btnSavePreset" class="btn btn-ghost btn-sm" title="現在の設定を保存"><i class="fas fa-plus"></i> 現在値を保存</button>
+              <button id="btnDeletePreset" class="btn btn-ghost btn-sm" title="選択中の設定を削除"><i class="fas fa-trash-can"></i> 選択中を削除</button>
+            </div>
+          </div>
         </div>
         <div class="debug-grid">
           <div class="debug-sec">
-            <div class="debug-sec-ttl"><i class="fas fa-spell-check"></i> OCR</div>
+            <div class="debug-sec-ttl"><i class="fas fa-spell-check"></i> 文字の読み取り</div>
             <div class="prow"><label class="plabel">言語</label><select id="dbgLang" class="pselect"><option value="eng">英語</option><option value="jpn+eng">日本語＋英語</option><option value="jpn">日本語</option></select></div>
-            <div class="prow"><label class="plabel">PSM</label><select id="dbgPsm" class="pselect"><option value="3">自動</option><option value="6">単一ブロック</option><option value="4">縦長</option><option value="7">単一行</option><option value="8">単一単語</option><option value="10">単一文字</option><option value="11">疎</option><option value="13">1行(生)</option></select></div>
+            <div class="prow"><label class="plabel">読み取り方</label><select id="dbgPsm" class="pselect"><option value="3">自動（おまかせ）</option><option value="6">文章のかたまり</option><option value="4">縦に長い列</option><option value="7">1行だけ</option><option value="8">単語だけ</option><option value="10">1文字だけ</option><option value="11">まばらな文字</option><option value="13">1行（そのまま）</option></select></div>
             <div class="prow"><label class="plabel">文字ホワイトリスト</label><input type="text" id="dbgWhitelist" class="pinput" placeholder="空=制限なし" autocomplete="off"></div>
             <div class="wl-quick" id="dbgWlQuick">
               <button type="button" class="btn btn-ghost btn-sm" data-wl="0123456789">数字</button>
@@ -352,43 +384,52 @@
             <p class="hint-text"><b>抽出パターンは通常は不要です</b>。OCR領域に値だけが入るよう範囲を取れば、上の文字制約だけで十分です。複雑な書式から一部だけ取り出したい上級者向けに、正規表現も使えます（例 <code>[A-Z]{2}\d{4}</code>）。</p>
           </div>
           <div class="debug-sec">
-            <div class="debug-sec-ttl"><i class="fas fa-sliders"></i> 二値化</div>
+            <div class="debug-sec-ttl"><i class="fas fa-sliders"></i> 白黒のくっきり化</div>
             <div class="prow"><label class="plabel">方式</label><select id="dbgBinaryMethod" class="pselect"><option value="otsu">Otsu</option><option value="adaptive">適応的</option><option value="manual">手動</option></select></div>
             <div class="prow" id="dbgRowBlock"><label class="plabel">ブロック <b id="dbgValBlock" class="pval">51</b></label><input type="range" id="dbgAdaptiveBlock" class="pslider" min="3" max="51" step="2" value="51"></div>
             <div class="prow" id="dbgRowC"><label class="plabel">定数C <b id="dbgValC" class="pval">-5</b></label><input type="range" id="dbgAdaptiveC" class="pslider" min="-20" max="20" value="-5"></div>
             <div class="prow hidden" id="dbgRowThresh"><label class="plabel">閾値 <b id="dbgValThresh" class="pval">128</b></label><input type="range" id="dbgManualThresh" class="pslider" min="0" max="255" value="128"></div>
           </div>
           <div class="debug-sec">
-            <div class="debug-sec-ttl"><i class="fas fa-grip-lines"></i> 水平罫線</div>
+            <div class="debug-sec-ttl"><i class="fas fa-grip-lines"></i> 横線を消す</div>
             <div class="prow"><label class="plabel">検出</label><label class="ptoggle"><input type="checkbox" id="dbgEnableHoriz" checked><span class="ptoggle-track"></span></label></div>
             <div class="prow"><label class="plabel">最小線長 <b id="dbgValHLen" class="pval">5</b>%</label><input type="range" id="dbgHorizLen" class="pslider" min="1" max="80" value="5"></div>
             <div class="prow"><label class="plabel">線の太さ <b id="dbgValHThick" class="pval">1</b>px</label><input type="range" id="dbgHorizThick" class="pslider" min="1" max="10" value="1"></div>
             <div class="prow"><label class="plabel">膨張 <b id="dbgValHDil" class="pval">2</b>回</label><input type="range" id="dbgHorizDilate" class="pslider" min="0" max="5" value="2"></div>
           </div>
           <div class="debug-sec">
-            <div class="debug-sec-ttl"><i class="fas fa-grip-lines-vertical"></i> 垂直罫線</div>
+            <div class="debug-sec-ttl"><i class="fas fa-grip-lines-vertical"></i> 縦線を消す</div>
             <div class="prow"><label class="plabel">検出</label><label class="ptoggle"><input type="checkbox" id="dbgEnableVert" checked><span class="ptoggle-track"></span></label></div>
             <div class="prow"><label class="plabel">最小線長 <b id="dbgValVLen" class="pval">5</b>%</label><input type="range" id="dbgVertLen" class="pslider" min="1" max="80" value="5"></div>
             <div class="prow"><label class="plabel">線の幅 <b id="dbgValVThick" class="pval">1</b>px</label><input type="range" id="dbgVertThick" class="pslider" min="1" max="10" value="1"></div>
             <div class="prow"><label class="plabel">膨張 <b id="dbgValVDil" class="pval">2</b>回</label><input type="range" id="dbgVertDilate" class="pslider" min="0" max="5" value="2"></div>
           </div>
           <div class="debug-sec">
-            <div class="debug-sec-ttl"><i class="fas fa-wand-magic-sparkles"></i> 後処理</div>
+            <div class="debug-sec-ttl"><i class="fas fa-wand-magic-sparkles"></i> 仕上げ</div>
             <div class="prow"><label class="plabel">マスク膨張 <b id="dbgValMaskDil" class="pval">0</b>px</label><input type="range" id="dbgMaskDilate" class="pslider" min="0" max="5" value="0"></div>
             <div class="prow"><label class="plabel">出力ベース</label><select id="dbgOutputBase" class="pselect"><option value="original">カラー原画像</option><option value="gray">グレースケール</option><option value="binary">二値化</option></select></div>
           </div>
         </div>
         <div class="debug-acts">
           <button id="btnRerun" class="btn btn-primary btn-sm"><i class="fas fa-rotate"></i> この設定で再実行</button>
-          <button id="btnPsmCompare" class="btn btn-outline btn-sm"><i class="fas fa-table-list"></i> 全PSM比較</button>
-          <button id="btnSaveSettingsToForm" class="btn btn-ghost btn-sm"><i class="fas fa-floppy-disk"></i> 設定を帳票に保存</button>
-          <span class="hint-text">数値を調整 → 「再実行」。最適値は「現在値を保存」でプリセット化できます</span>
+          <div class="ovf ovf--up">
+            <button class="btn btn-ghost btn-sm ovf-btn" title="その他の操作"><i class="fas fa-ellipsis"></i> その他</button>
+            <div class="ovf-pop">
+              <button id="btnPsmCompare" class="btn btn-ghost btn-sm"><i class="fas fa-table-list"></i> 読み取り方をくらべる</button>
+              <button id="btnSaveSettingsToForm" class="btn btn-ghost btn-sm"><i class="fas fa-floppy-disk"></i> この設定を帳票に保存</button>
+            </div>
+          </div>
+          <span class="hint-text">迷ったら上の「かんたん調整」を選ぶだけ。細かく直したら「再実行」で確認できます</span>
         </div>
       </div>
     </div>
+    </div><!-- /TAB 詳細調整 -->
 
-    <!-- 一括OCR結果のページ送り（詳細ペインで1枚ずつ確認） -->
-    <div id="rrPageNav" class="rr-pagenav hidden">
+    <!-- TAB: 結果 ─────────────────────────────────────── -->
+    <div class="recog-tabpanel hidden" data-tab="result">
+      <div class="recog-empty" id="emptyResult"><i class="fas fa-list-check"></i><span>帳票を判定・適用すると、ここに切り出し画像とOCR結果が表示されます。</span></div>
+      <!-- 一括OCR結果のページ送り（詳細ペインで1枚ずつ確認） -->
+      <div id="rrPageNav" class="rr-pagenav hidden">
       <span class="rr-pagenav-ttl"><i class="fas fa-layer-group"></i> 一括結果の確認</span>
       <button id="btnRrPrev" class="btn btn-ghost btn-sm" title="前のページ"><i class="fas fa-chevron-left"></i> 前</button>
       <span id="rrPageLabel" class="rr-page-label">—</span>
@@ -426,19 +467,29 @@
         <div id="saveStatus" class="save-status"></div>
       </div>
     </div>
+    </div><!-- /TAB 結果 -->
 
-    <!-- 履歴（IndexedDB） -->
-    <div class="recog-history">
-      <div class="rh-hdr">
-        <span><i class="fas fa-clock-rotate-left"></i> 認識履歴（IndexedDB・信頼度つき）</span>
-        <span class="rh-acts">
-          <button id="btnReconcile" class="btn btn-outline btn-sm" title="OCR結果を外部データ(CSV/貼付)と照合"><i class="fas fa-code-compare"></i> 照合</button>
-          <button id="btnExportHistory" class="btn btn-outline btn-sm" title="ページ数・エリア名の列でCSV出力"><i class="fas fa-file-csv"></i> CSV出力</button>
-          <button id="btnClearHistory" class="btn btn-ghost btn-sm"><i class="fas fa-trash-can"></i> 履歴削除</button>
-        </span>
+    <!-- TAB: 履歴 ─────────────────────────────────────── -->
+    <div class="recog-tabpanel hidden" data-tab="history">
+      <!-- 履歴（IndexedDB） -->
+      <div class="recog-history">
+        <div class="rh-hdr">
+          <span><i class="fas fa-clock-rotate-left"></i> 認識履歴（IndexedDB・信頼度つき）</span>
+          <span class="rh-acts">
+            <button id="btnReconcile" class="btn btn-outline btn-sm" title="OCR結果を外部データ(CSV/貼付)と照合"><i class="fas fa-code-compare"></i> 照合</button>
+            <!-- 副次操作は「…」に集約して選択肢を減らす -->
+            <div class="ovf ovf--right">
+              <button class="btn btn-ghost btn-sm ovf-btn" title="その他の操作"><i class="fas fa-ellipsis"></i></button>
+              <div class="ovf-pop">
+                <button id="btnExportHistory" class="btn btn-ghost btn-sm" title="ページ数・エリア名の列でCSV出力"><i class="fas fa-file-csv"></i> CSV出力</button>
+                <button id="btnClearHistory" class="btn btn-ghost btn-sm"><i class="fas fa-trash-can"></i> 履歴削除</button>
+              </div>
+            </div>
+          </span>
+        </div>
+        <div id="historyList" class="history-list"><div class="empty-hint"><i class="fas fa-inbox"></i><span>履歴なし</span></div></div>
       </div>
-      <div id="historyList" class="history-list"><div class="empty-hint"><i class="fas fa-inbox"></i><span>履歴なし</span></div></div>
-    </div>
+    </div><!-- /TAB 履歴 -->
   </section>
 </main>
 
@@ -452,18 +503,18 @@
   </div>
 </div>
 
-<!-- PSM 全パターン比較モーダル -->
+<!-- 読み取り方をくらべる（旧・PSM全パターン比較）モーダル -->
 <div class="modal-overlay hidden" id="psmModal">
   <div class="modal modal--lg">
-    <div class="modal-hdr"><h2><i class="fas fa-table-list"></i> PSM 全パターン比較</h2>
+    <div class="modal-hdr"><h2><i class="fas fa-table-list"></i> 読み取り方をくらべる</h2>
       <button class="modal-close" id="closePsmModal"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="modal-bdy">
-      <p class="hint-text">同じ罫線除去結果に対して、各 PSM（ページ分割モード）でどう読み取れるかを比較します。現在のデバッグ設定の罫線除去・言語を使用します。</p>
+      <p class="hint-text">同じ前処理の結果に対して、いろいろな<b>読み取り方</b>でどう読めるかを一覧で比べます。いちばん良い結果を「採用」できます（現在の言語・くっきり化の設定を使用）。</p>
       <div class="psm-ctl">
         <label class="plabel">対象領域</label>
         <select id="psmRegionSelect" class="pselect"></select>
-        <button id="btnPsmRun" class="btn btn-primary btn-sm"><i class="fas fa-play"></i> 全PSMで認識</button>
+        <button id="btnPsmRun" class="btn btn-primary btn-sm"><i class="fas fa-play"></i> ぜんぶ試す</button>
       </div>
       <div id="psmProgress" class="recog-progress hidden">
         <div class="ocr-progress-track"><div id="psmProgressFill" class="ocr-progress-fill"></div></div>
@@ -506,9 +557,9 @@
       <div class="help-sec">
         <h3><i class="fas fa-flask"></i> 認識設定の調整（デバッグ）と日本語OCR</h3>
         <ul>
-          <li>OCR実行画面の「認識設定（デバッグ）」で <b>OCR言語・PSM・罫線除去パラメータ</b>（膨張含む）を表示・変更し、「再実行」で再マッチング無しに即試行できます</li>
-          <li>良い値が決まったら<b>「現在値を保存」でプリセット化</b>（IndexedDB保存）。以後はプリセットを選んで「適用」→「再実行」で素早く切替できます。「設定を帳票に保存」で帳票自体にも反映可能</li>
-          <li><b>「全PSM比較」</b>: 同じ罫線除去結果に対し各PSMの読み取り結果を一覧表示。最良を「採用」して即反映できます</li>
+          <li>OCR実行画面の「<b>詳細調整</b>」タブで <b>言語・読み取り方(PSM)・くっきり化(二値化)・枠線/罫線の除去</b>（膨張含む）を表示・変更し、「再実行」で再マッチング無しに即試行できます</li>
+          <li>まずは「<b>かんたん調整</b>」の<b>「数字をくっきり」</b>などの名前で選ぶだけでOK（PSM等の専門用語を意識せず最適設定を反映）。良い値が決まったら<b>「現在値を保存」</b>で<b>マイ設定</b>として保存（IndexedDB）。以後は選んで「適用」→「再実行」で素早く切替、「設定を帳票に保存」で帳票自体にも反映できます</li>
+          <li><b>「読み取り方をくらべる」</b>（旧・全PSM比較）: 同じ前処理結果に対し各読み取り方(PSM)の結果を一覧表示。最良を「採用」して即反映できます</li>
           <li><b>言語</b>：既定は英語。日本語ラベルを含む領域は <b>「日本語＋英語」</b>を選択してください（初回は言語データのDLに時間がかかります）</li>
           <li>数字が<b>丸数字（①②⑨）</b>になるのは、セル枠＋日本語モデルが原因。対策は <b>文字ホワイトリスト</b>（例 <code>0123456789</code>）で字種を限定 ＋ <b>正規化</b>（①→1・全角→半角）をON。さらに ①OCR領域から「注文No」など<b>日本語ラベルを除外</b>、②セル区切りの<b>縦罫線を除去</b>、③PSMを「単一行/単一単語」に、④数字欄は言語を<b>英語</b>に、も有効</li>
           <li><b>抽出パターン（正規表現）</b>：各OCR領域に書式を指定すると、はみ出した文字を無視して該当部分だけ取り出せます。例 <code>[A-Z]{2}\d{4}</code> なら「注文No AK1029 控」→「AK1029」。固定接頭辞＋固定桁数の番号欄に最適（登録画面のOCR領域リストで設定）</li>
@@ -532,12 +583,13 @@
       <div class="help-sec">
         <h3><i class="fas fa-brain"></i> 認知心理学に基づく設計</h3>
         <ul>
-          <li><b>Hickの法則</b>：上位操作を「登録／OCR」の2モードに限定し選択負荷を低減</li>
-          <li><b>認識 > 想起</b>：帳票・領域はサムネイルと色で提示。座標や名称を記憶させない</li>
+          <li><b>Hickの法則</b>：上位操作を「登録／OCR」の2モードに限定。さらに副次操作（書出/読込/CSV/削除など）は<b>「…（その他）」メニュー</b>に畳んで、画面の選択肢を絞っています</li>
+          <li><b>認識 > 想起</b>：帳票・領域はサムネイルと色で提示。座標や名称を記憶させない。専門用語（PSM/二値化/罫線除去）は<b>「数字をくっきり」等の名前（かんたん調整）</b>で選べます</li>
+          <li><b>チャンク化</b>：OCR実行画面は<b>判定／結果／詳細調整／履歴</b>の<b>タブ</b>に分割し、1画面の情報量を抑制（縦長を解消）</li>
           <li><b>システム状態の可視化</b>：マッチング→判定→補正→除去→OCR の進捗を常時表示</li>
           <li><b>直接操作</b>：OCR領域は画像上に直接描画。結果も同じ座標系で重畳表示</li>
           <li><b>一貫した色分け</b>（Von Restorff）：領域色を登録・プレビュー・結果で統一</li>
-          <li><b>段階的開示</b>：罫線除去など詳細設定はアコーディオンに格納</li>
+          <li><b>段階的開示</b>：枠線・罫線の除去など詳細設定はアコーディオン／タブに格納</li>
           <li><b>クローズ欲求（Zeigarnik）</b>：登録の完了チェックリストで未完了を可視化</li>
           <li><b>信頼の較正</b>：確信度と根拠を提示し、低確信時は人間に判断を委ねる</li>
         </ul>

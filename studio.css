@@ -281,6 +281,41 @@
 .hist-field .hf-conf { font-family: 'IBM Plex Mono', monospace; font-size: .68rem; flex-shrink: 0; }
 .hint-text { font-size: .7rem; color: var(--c-text-3); line-height: 1.5; }
 
+/* ── オーバーフローメニュー（…その他）：関連操作を畳んで選択肢を減らす ── */
+.ovf { position: relative; display: inline-flex; }
+.ovf-btn { color: var(--c-text-3); }
+.ovf.is-open .ovf-btn { background: var(--c-bg); color: var(--c-pri); border-color: var(--c-pri-mid); }
+.ovf-pop { position: absolute; top: calc(100% + 5px); left: 0; z-index: 60; min-width: 188px;
+  background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-sm);
+  box-shadow: 0 8px 24px rgba(15,25,40,.16); padding: 5px; display: none; flex-direction: column; gap: 2px; }
+.ovf.is-open .ovf-pop { display: flex; }
+.ovf--right .ovf-pop { left: auto; right: 0; }
+.ovf--up .ovf-pop { top: auto; bottom: calc(100% + 5px); }
+.ovf-pop .btn { width: 100%; justify-content: flex-start; border: none; background: transparent; padding: 7px 10px; border-radius: var(--r-sm); color: var(--c-text-2); font-size: 12.5px; }
+.ovf-pop .btn:hover { background: var(--c-bg); color: var(--c-text); }
+
+/* ── OCR実行ビューのタブ（判定→結果→詳細→履歴の段組みを1画面ずつに） ── */
+.recog-tabs { display: flex; gap: 2px; border-bottom: 2px solid var(--c-border); flex-wrap: wrap; }
+.recog-tab { display: inline-flex; align-items: center; gap: 7px; padding: 9px 18px; font-size: .82rem; font-weight: 700;
+  color: var(--c-text-3); border-bottom: 2px solid transparent; margin-bottom: -2px; border-radius: 6px 6px 0 0;
+  transition: color var(--ease), background var(--ease); }
+.recog-tab:hover { color: var(--c-pri); background: var(--c-surface2); }
+.recog-tab.is-active { color: var(--c-pri); border-bottom-color: var(--c-pri); background: var(--c-surface); }
+.recog-tab.has-content::after { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--c-suc); display: inline-block; }
+.recog-tabpanel { display: flex; flex-direction: column; gap: 14px; }
+.recog-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 44px 18px; text-align: center;
+  color: var(--c-text-3); font-size: .82rem; line-height: 1.6; background: var(--c-surface); border: 1px dashed var(--c-border-dk); border-radius: var(--r); }
+.recog-empty i { font-size: 26px; color: var(--c-border-dk); }
+
+/* ── かんたん調整（おすすめプリセット）：専門用語の代わりに名前で選ぶ ── */
+.preset-quick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; margin-bottom: 8px;
+  background: var(--c-ocr2-lt); border: 1px solid #ddd6fe; border-radius: var(--r-sm); }
+.preset-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.preset-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: .76rem; font-weight: 700;
+  color: var(--c-ocr2); background: #fff; border: 1px solid #ddd6fe; border-radius: 999px; transition: all var(--ease); }
+.preset-chip:hover { background: var(--c-ocr2); color: #fff; border-color: var(--c-ocr2); }
+.preset-chip.is-active { background: var(--c-ocr2); color: #fff; border-color: var(--c-ocr2); box-shadow: 0 0 0 2px var(--c-ocr2-lt); }
+
 @media (max-width: 1100px) {
   .recog-top { grid-template-columns: 1fr; }
   .recog-result-area { grid-template-columns: 1fr; }

@@ -33,7 +33,7 @@
 
   /* PSM 比較用パターン */
   const PSM_LIST = [3, 4, 6, 7, 8, 10, 11, 13];
-  const PSM_DESC = { 3: '自動', 4: '縦列(複数行)', 6: '単一ブロック', 7: '単一行', 8: '単一単語', 10: '単一文字', 11: '疎なテキスト', 13: '生の1行' };
+  const PSM_DESC = { 3: '自動（おまかせ）', 4: '縦に長い列', 6: '文章のかたまり', 7: '1行だけ', 8: '単語だけ', 10: '1文字だけ', 11: 'まばらな文字', 13: '1行（そのまま）' };
 
   const uid = () => Math.random().toString(36).slice(2, 11);
   const dataURLtoImg = url => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('load fail')); i.src = url; });
@@ -389,6 +389,8 @@
     $('recogPreview').src = canvas.toDataURL('image/png'); $('recogPreview').style.display = 'block'; $('recogDropHint').style.display = 'none';
     $('btnRunRecognize').disabled = false;
     $('decisionPanel').classList.add('hidden'); $('recogResultArea').classList.add('hidden'); $('debugPanel').classList.add('hidden');
+    markRecogTab('decide', false); markRecogTab('result', false); markRecogTab('detail', false);
+    switchRecogTab('decide');
     UI.resetPipeline();
   }
 
@@ -421,10 +423,12 @@
       S.lastClassify = { decision, scores };
       UI.setPipeline('decide', ['match']);
       UI.renderDecision(decision, S.forms, {});
+      markRecogTab('decide', true); switchRecogTab('decide');
       /* 設定パネルを表示し、候補帳票の設定を反映（数値調整・再実行の起点） */
       const candId = (decision.best && decision.best.formId) || (decision.ranking[0] && decision.ranking[0].formId);
       if (candId) { const f = S.forms.find(x => x.id === candId); if (f) loadFormIntoDebug(f); }
       $('debugPanel').classList.remove('hidden');
+      markRecogTab('detail', true);
       /* 採用なら自動で OCR まで進める（要確認/不一致は手動確認） */
       if (decision.decision === 'accepted' && decision.best) {
         await applyForm(decision.best.formId);
@@ -468,6 +472,7 @@
   async function doRecognitionRun(form) {
     const mi = S.recogMatchInfo;
     $('recogResultArea').classList.remove('hidden');
+    markRecogTab('result', true); switchRecogTab('result');
     UI.showRecogProgress(true); UI.updateRecogProgress('初期化中…', 0);
     $('fieldResults').innerHTML = ''; $('saveStatus').textContent = '';
     $('btnRerun').disabled = true;
@@ -674,6 +679,72 @@
     catch (e) { UI.toast('保存に失敗しました: ' + e.message, 'error'); }
   }
 
+  /* ── かんたん調整プリセット ───────────────────────────
+     PSM・二値化・罫線除去という専門用語を、用途の名前（「数字をくっきり」等）に置換。
+     ひとまとめの設定を applyDbgToUI へ流し込み、ワンクリックで読み取り方を切り替える。 */
+  function builtinPresets() {
+    const lr = over => Object.assign(LineRemovalProcessor.defaultParams(), over || {});
+    return [
+      { key: 'num',   name: '数字をくっきり',   icon: 'fa-hashtag',
+        ocrSettings: { psm: 7, lang: 'eng', whitelist: '0123456789', normalize: true, normalizeKanji: false }, lineRemoval: lr() },
+      { key: 'code',  name: 'コード・記号',     icon: 'fa-barcode',
+        ocrSettings: { psm: 7, lang: 'eng', whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-/.', normalize: true, normalizeKanji: false }, lineRemoval: lr() },
+      { key: 'jp',    name: '日本語をくっきり', icon: 'fa-language',
+        ocrSettings: { psm: 7, lang: 'jpn+eng', whitelist: '', normalize: true, normalizeKanji: false }, lineRemoval: lr() },
+      { key: 'cell',  name: '表のセルを読む',   icon: 'fa-table-cells',
+        ocrSettings: { psm: 6, lang: 'jpn+eng', whitelist: '', normalize: true, normalizeKanji: false }, lineRemoval: lr({ horizDilate: 3, vertDilate: 3 }) },
+      { key: 'keep',  name: '枠線を消さない',   icon: 'fa-border-none',
+        ocrSettings: { psm: 7, lang: 'eng', whitelist: '', normalize: true, normalizeKanji: false }, lineRemoval: lr({ enableHoriz: false, enableVert: false }) },
+      { key: 'plain', name: 'そのまま（無調整）', icon: 'fa-circle-dot',
+        ocrSettings: { psm: 3, lang: 'eng', whitelist: '', normalize: false, normalizeKanji: false }, lineRemoval: lr({ enableHoriz: false, enableVert: false }) },
+    ];
+  }
+  function buildPresetChips() {
+    const c = $('presetChips'); if (!c) return; c.innerHTML = '';
+    builtinPresets().forEach(p => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'preset-chip'; b.dataset.key = p.key;
+      b.innerHTML = `<i class="fas ${p.icon}"></i> ${UI.esc(p.name)}`;
+      b.title = `「${p.name}」向けの設定を反映します`;
+      b.addEventListener('click', () => applyBuiltinPreset(p.key));
+      c.appendChild(b);
+    });
+  }
+  function applyBuiltinPreset(key) {
+    const p = builtinPresets().find(x => x.key === key); if (!p) return;
+    applyDbgToUI({ ocrSettings: p.ocrSettings, lineRemoval: p.lineRemoval });
+    document.querySelectorAll('#presetChips .preset-chip').forEach(el => el.classList.toggle('is-active', el.dataset.key === key));
+    UI.toast(`「${p.name}」を反映しました。「再実行」で試せます`, 'info', 3200);
+  }
+
+  /* ── オーバーフローメニュー（…その他）：選択肢を畳んで Hick 負荷を下げる ── */
+  function initOverflowMenus() {
+    document.addEventListener('click', e => {
+      const trigger = e.target.closest('.ovf-btn');
+      const open = document.querySelectorAll('.ovf.is-open');
+      if (trigger) {
+        e.stopPropagation();
+        const ovf = trigger.closest('.ovf');
+        const was = ovf.classList.contains('is-open');
+        open.forEach(m => { if (m !== ovf) m.classList.remove('is-open'); });
+        ovf.classList.toggle('is-open', !was);
+        return;
+      }
+      open.forEach(m => m.classList.remove('is-open'));   // 項目クリック後／外側クリックで閉じる
+    });
+  }
+
+  /* ── OCR実行ビューのタブ（判定→結果→詳細→履歴を1画面ずつ表示） ── */
+  function switchRecogTab(key) {
+    document.querySelectorAll('.recog-tab').forEach(t => t.classList.toggle('is-active', t.dataset.tab === key));
+    document.querySelectorAll('.recog-tabpanel').forEach(p => p.classList.toggle('hidden', p.dataset.tab !== key));
+  }
+  const RECOG_TAB_EMPTY = { decide: 'emptyDecide', result: 'emptyResult', detail: 'emptyDetail' };
+  function markRecogTab(key, has) {
+    const t = document.querySelector(`.recog-tab[data-tab="${key}"]`); if (t) t.classList.toggle('has-content', !!has);
+    const ph = RECOG_TAB_EMPTY[key]; if (ph) { const el = $(ph); if (el) el.classList.toggle('hidden', !!has); }
+  }
+
   /* ── プリセット（OCR/罫線除去設定の保存・呼び出し） ── */
   async function loadPresets() {
     let presets = [];
@@ -750,7 +821,7 @@
       if (crop) { $('psmCropImg').src = crop.toDataURL('image/png'); $('psmCrop').classList.remove('hidden'); }
       const results = await Recognizer.comparePsm(prep.resultCanvas, prep.transform, region, PSM_LIST,
         { lang: form.ocrSettings.lang || 'eng', whitelist: form.ocrSettings.whitelist || '', normalize: form.ocrSettings.normalize !== false, kanji: !!form.ocrSettings.normalizeKanji },
-        (i, total, psm) => setProg(`PSM ${psm} を認識中… (${i + 1}/${total})`, (i + 1) / total));
+        (i, total, psm) => setProg(`${PSM_DESC[psm] || ('PSM ' + psm)} で読み取り中… (${i + 1}/${total})`, (i + 1) / total));
       LineRemovalProcessor.cleanupMats(prep.previewMats);
       $('psmProgress').classList.add('hidden');
       renderPsmResults(results);
@@ -766,7 +837,7 @@
       const row = document.createElement('div'); row.className = 'psm-row' + (isBest ? ' is-best' : '');
       const txt = r.error ? `[エラー: ${r.error}]` : (r.text || '（空）');
       row.innerHTML = `
-        <span class="psm-tag">PSM ${r.psm}<small>${PSM_DESC[r.psm] || ''}</small></span>
+        <span class="psm-tag">${PSM_DESC[r.psm] || ('PSM ' + r.psm)}<small>PSM ${r.psm}</small></span>
         <span class="psm-text ${r.text ? '' : 'empty'}"></span>
         <span class="psm-conf ${cls}">${r.confidence}%</span>
         <button class="btn btn-ghost btn-sm" data-psm="${r.psm}">採用</button>`;
@@ -1402,7 +1473,16 @@
     $('btnHelp').addEventListener('click', () => $('helpModal').classList.remove('hidden'));
     $('closeHelpModal').addEventListener('click', () => $('helpModal').classList.add('hidden'));
     $('helpModal').addEventListener('click', e => { if (e.target === $('helpModal')) $('helpModal').classList.add('hidden'); });
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => m.classList.add('hidden')); });
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => m.classList.add('hidden'));
+      document.querySelectorAll('.ovf.is-open').forEach(m => m.classList.remove('is-open'));
+    });
+
+    /* OCR実行ビューのタブ切替・「…」メニュー・かんたん調整チップ */
+    document.querySelectorAll('.recog-tab').forEach(t => t.addEventListener('click', () => switchRecogTab(t.dataset.tab)));
+    initOverflowMenus();
+    buildPresetChips();
 
     /* はじめての方向けガイド（初回のみ表示・閉じたら記憶） */
     try { if (!localStorage.getItem('ocrtool_onboard_dismissed')) $('onboardBar').classList.remove('hidden'); } catch (_) {}
