@@ -539,3 +539,59 @@
 .onboard-text b { color: var(--c-pri-dk); }
 .onboard-bar .btn-icon-sm { width: 26px; height: 26px; border-radius: 50%; color: var(--c-text-3); }
 .onboard-bar .btn-icon-sm:hover { background: #fff; color: var(--c-err); }
+
+/* ════════════════════════════════════════════════════════
+   結果データテーブル（複数ページを1つの表に・編集/突き合わせ）
+   ════════════════════════════════════════════════════════ */
+.rtbl-area { display: flex; flex-direction: column; gap: 10px; }
+.rtbl-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.rtbl-summary { font-size: .8rem; font-weight: 700; color: var(--c-text-2); }
+.rtbl-acts { display: flex; align-items: center; gap: 6px; }
+.rtbl-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--c-border); border-radius: var(--r-sm); background: var(--c-surface); }
+.rtbl { border-collapse: collapse; font-size: .76rem; width: 100%; }
+.rtbl th, .rtbl td { border: 1px solid var(--c-border); padding: 0; text-align: left; white-space: nowrap; vertical-align: middle; }
+.rtbl th { background: var(--c-surface2); position: sticky; top: 0; z-index: 2; font-weight: 700; color: var(--c-text-2); padding: 6px 8px; }
+.rtbl th.rtbl-ext-h { background: var(--c-ocr2-lt); color: var(--c-ocr2); }
+.rtbl-c-idx { width: 34px; text-align: center; }
+.rtbl-c-page { font-family: 'IBM Plex Mono', monospace; font-weight: 700; color: var(--c-pri); padding: 4px 8px; text-align: center; }
+.rtbl-c-thumb { width: 52px; text-align: center; }
+.rtbl-c-thumb img { width: 40px; height: 50px; object-fit: contain; background: #fff; border: 1px solid var(--c-border); border-radius: 3px; cursor: zoom-in; vertical-align: middle; }
+.rtbl-form { padding: 4px 8px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.rtbl td .hist-verdict { margin: 4px 6px; display: inline-block; }
+.rtbl-review { width: 26px; height: 26px; border-radius: 50%; color: var(--c-text-3); display: inline-flex; align-items: center; justify-content: center; }
+.rtbl-review:hover { background: var(--c-pri-lt); color: var(--c-pri); }
+.rtbl-fcell { border-left: 3px solid transparent; }
+.rtbl-fcell.hi { border-left-color: var(--c-suc); }
+.rtbl-fcell.mid { border-left-color: var(--c-warn); }
+.rtbl-fcell.lo { border-left-color: var(--c-err); }
+.rtbl-input { width: 100%; min-width: 90px; border: none; background: transparent; padding: 6px 8px; font-family: 'IBM Plex Mono', monospace; font-size: .78rem; color: var(--c-text); }
+.rtbl-input:focus { outline: none; background: var(--c-pri-lt); box-shadow: inset 0 0 0 1px var(--c-pri); }
+.rtbl-input[readonly] { color: var(--c-text-3); background: var(--c-surface2); }
+.rtbl-ext { padding: 6px 8px; font-family: 'IBM Plex Mono', monospace; color: var(--c-ocr2); background: var(--c-ocr2-lt); }
+.rtbl-ext-miss { color: var(--c-err); background: #FDEDEA; }
+
+/* ── 1ページずつ確認（ページ単位カルーセル） ─────────── */
+.pr-card { display: grid; grid-template-columns: 1fr 280px; gap: 14px; align-items: start; }
+.pr-img-wrap { position: relative; background: repeating-conic-gradient(#dde5ef 0% 25%, transparent 0% 50%) 0 0 / 14px 14px; border: 1px solid var(--c-border); border-radius: var(--r-sm); min-height: 260px; max-height: 56vh; overflow: auto; display: flex; align-items: center; justify-content: center; }
+.pr-img { max-width: 100%; display: block; background: #fff; box-shadow: var(--sh-sm); }
+.pr-meta { position: absolute; top: 6px; left: 6px; background: rgba(15,25,40,.72); color: #fff; font-size: .72rem; font-weight: 700; padding: 3px 9px; border-radius: 9px; }
+.pr-fields-col { display: flex; flex-direction: column; gap: 8px; max-height: 56vh; overflow-y: auto; }
+.pr-fields-hdr { font-size: .78rem; font-weight: 700; color: var(--c-text-2); display: flex; align-items: center; gap: 6px; }
+.pr-fields { display: flex; flex-direction: column; gap: 8px; }
+.pr-field { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "name name" "input conf"; gap: 3px 6px; align-items: center; }
+.pr-field-name { grid-area: name; font-size: .72rem; font-weight: 700; color: var(--c-text-2); }
+.pr-field-input { grid-area: input; width: 100%; padding: 6px 8px; border: 1px solid var(--c-border-dk); border-radius: var(--r-sm); font-family: 'IBM Plex Mono', monospace; font-size: .82rem; color: var(--c-text); }
+.pr-field-input:focus { outline: none; border-color: var(--c-pri); box-shadow: 0 0 0 2px var(--c-pri-lt); }
+.pr-field-input[readonly] { background: var(--c-surface2); color: var(--c-text-3); }
+.pr-field .conf-badge { grid-area: conf; }
+.pr-empty { font-size: .8rem; color: var(--c-text-3); padding: 20px 4px; text-align: center; }
+
+/* ── 突き合わせ列の追加（追加列チェック） ───────────── */
+.tj-cols { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.tj-cols-list { display: flex; gap: 6px 14px; flex-wrap: wrap; }
+.tj-col-chk { display: inline-flex; align-items: center; gap: 5px; font-size: .76rem; color: var(--c-text-2); }
+.tj-col-chk input { width: 15px; height: 15px; accent-color: var(--c-ocr2); }
+
+@media (max-width: 720px) {
+  .pr-card { grid-template-columns: 1fr; }
+}

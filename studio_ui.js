@@ -377,8 +377,45 @@ const StudioUI = (() => {
     }
   }
 
+  /* ── 結果データテーブル（複数ページを1つの表に・編集/突き合わせ） ── */
+  const TBL_VERDICT = { accepted: '採用', review: '要確認', rejected: '不一致', error: 'エラー' };
+  function renderResultTable(table, handlers) {
+    const wrap = $('resultTableWrap'); if (!wrap) return;
+    const rows = table.rows || [], fnames = table.fieldNames || [], ext = table.extCols || [];
+    let h = '<table class="rtbl"><thead><tr>';
+    h += '<th class="rtbl-c-idx">#</th><th class="rtbl-c-page">ページ</th><th class="rtbl-c-thumb">画像</th><th>帳票</th><th>判定</th>';
+    fnames.forEach(n => { h += `<th>${esc(n)}</th>`; });
+    ext.forEach(n => { h += `<th class="rtbl-ext-h">${esc(n)}</th>`; });
+    h += '</tr></thead><tbody>';
+    rows.forEach((r, i) => {
+      const v = TBL_VERDICT[r.decision] || r.decision || '—';
+      h += '<tr>';
+      h += `<td class="rtbl-c-idx"><button class="rtbl-review" data-row="${i}" title="このページを確認"><i class="fas fa-magnifying-glass"></i></button></td>`;
+      h += `<td class="rtbl-c-page">P${esc(r.page)}</td>`;
+      h += `<td class="rtbl-c-thumb">${r.thumb ? `<img src="${r.thumb}" data-row="${i}" alt="">` : ''}</td>`;
+      h += `<td class="rtbl-form">${esc(r.formName || '—')}</td>`;
+      h += `<td><span class="hist-verdict ${esc(r.decision || '')}">${esc(v)}</span></td>`;
+      const map = {}; (r.fields || []).forEach(f => { map[f.name] = f; });
+      fnames.forEach(n => {
+        const f = map[n], val = f ? (f.text || '') : '', conf = f ? f.confidence : null;
+        const cls = (conf == null) ? '' : (conf >= 85 ? 'hi' : conf >= 60 ? 'mid' : 'lo');
+        const ro = r.record ? '' : ' readonly';
+        h += `<td class="rtbl-fcell ${cls}"><input class="rtbl-input" data-row="${i}" data-field="${esc(n)}" value="${esc(val)}"${ro} title="${conf != null ? conf + '%' : ''}"></td>`;
+      });
+      ext.forEach(n => {
+        const val = (r.ext && r.ext[n] != null) ? r.ext[n] : '';
+        h += `<td class="rtbl-ext ${r.extMatched === false ? 'rtbl-ext-miss' : ''}">${esc(val)}</td>`;
+      });
+      h += '</tr>';
+    });
+    h += '</tbody></table>';
+    wrap.innerHTML = h;
+    wrap.querySelectorAll('.rtbl-input').forEach(inp => inp.addEventListener('change', () => handlers.onEdit(+inp.dataset.row, inp.dataset.field, inp.value)));
+    wrap.querySelectorAll('.rtbl-review, .rtbl-c-thumb img').forEach(el => el.addEventListener('click', () => handlers.onReview(+el.dataset.row)));
+  }
+
   return {
-    $, esc, toast, REGION_COLORS, ANCHOR_COLOR, OCR_COLOR,
+    $, esc, toast, REGION_COLORS, ANCHOR_COLOR, OCR_COLOR, renderResultTable,
     refreshRegSteps, renderFormLibrary, renderAnchorList, renderRegionList,
     setPipeline, resetPipeline,
     renderDecision, renderRecogPreview, renderFieldResults, symbolChipsHTML, confClass,

@@ -29,6 +29,8 @@
     dbgLoadedFormId: null, patternOverrides: {}, constraintOverrides: {},
     batchResults: null, batchCancel: false, review: null, rec: null,
     recogPageNum: 1, pageNav: null, navReviewMode: false,
+    /* 複数ページ結果のテーブル / 突き合わせ / ページ確認カルーセル */
+    table: null, tj: null, pr: null,
   };
 
   /* PSM 比較用パターン */
@@ -911,18 +913,20 @@
       const candId = decision.best && decision.best.formId;
       const useId = forcedFormId || candId;
       const form = useId ? S.forms.find(f => f.id === useId) : null;
-      if (!form) return { page, decision: decision.decision, formName: '—', fields: [], thumb };
+      if (!form) return { page, decision: decision.decision, formName: '—', fields: [], thumb, record: null };
       /* 表示用の判定ラベル: 手動指定=指定どおり採用 / 自動=本来の判定を踏襲 */
       const verdict = forcedFormId ? 'accepted' : decision.decision;
       const res = await Recognizer.runOcr(canvas, form, bestAnchorFor(form, scores), {}, {});
-      if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
+      if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb, record: null }; }
       LineRemovalProcessor.cleanupMats(res.previewMats);
       const manual = forcedFormId ? true : !(candId === form.id);
-      try { await FormDB.putResult(buildResultRecord(form, decision, res, canvas, manual, page)); } catch (_) {}
+      /* レコードを保持し、後段のテーブル編集が同一レコードを更新（再保存）できるようにする */
+      const record = buildResultRecord(form, decision, res, canvas, manual, page);
+      try { await FormDB.putResult(record); } catch (_) {}
       const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
-      return { page, decision: verdict, formName: form.name, formId: form.id, forced: !!forcedFormId, avgConf: avg, fields: res.fields, thumb };
+      return { page, decision: verdict, formName: form.name, formId: form.id, forced: !!forcedFormId, avgConf: avg, fields: record.fields, thumb, record };
     } catch (e) {
-      return { page, decision: 'error', formName: '—', error: e.message || String(e), thumb };
+      return { page, decision: 'error', formName: '—', error: e.message || String(e), thumb, record: null };
     }
   }
 
@@ -961,8 +965,14 @@
     UI.updateBatchProgress('完了', 1);
     UI.renderBatchResults(results, { hasNav: !!S.pageNav });
     refreshHistory();
+    /* 結果を1つのデータテーブルにまとめ、テーブルタブへ自動遷移（要望の主表示） */
+    buildTableFromBatch();
+    renderTable();
+    markRecogTab('table', true);
+    switchRecogTab('table');
+    UI.closeBatchModal();
     const ok = results.filter(r => r.decision === 'accepted').length;
-    UI.toast(`一括OCR${cancelled ? '中止' : '完了'} — ${results.length}/${total}ページ処理・${ok}件採用、履歴に保存`, cancelled ? 'warning' : 'success', 4500);
+    UI.toast(`一括OCR${cancelled ? '中止' : '完了'} — ${results.length}/${total}ページ処理・${ok}件採用。テーブルで確認・編集できます`, cancelled ? 'warning' : 'success', 4800);
   }
 
   /* ── 一括OCR結果のページ送り（詳細ペインで1枚ずつ拡大確認） ──
@@ -1372,6 +1382,213 @@
     downloadCsv([head.map(esc).join(','), ...lines].join('\n'), `reconcile_${Date.now()}.csv`);
   }
 
+  /* ════════════════════════════════════════════════════
+     複数ページ結果のデータテーブル（編集・突き合わせ・1ページ確認）
+     ════════════════════════════════════════════════════ */
+  function computeTableFieldNames() {
+    const names = [];
+    (S.table.rows || []).forEach(r => (r.fields || []).forEach(f => { if (f.name && !names.includes(f.name)) names.push(f.name); }));
+    S.table.fieldNames = names;
+  }
+  /* 一括OCR結果（S.batchResults）を1つの表へ。record を保持し編集をDBへ再保存できる。 */
+  function buildTableFromBatch() {
+    const results = S.batchResults || [];
+    S.table = {
+      rows: results.map(r => ({
+        id: r.record ? r.record.id : null,
+        page: r.page, formName: r.formName, decision: r.decision,
+        avgConf: (r.avgConf != null) ? r.avgConf : (r.record ? r.record.overallFieldConfidence : null),
+        error: r.error || null,
+        fields: r.record ? r.record.fields : (r.fields || []),   // record.fields と同一参照で編集を共有
+        thumb: r.thumb || (r.record ? r.record.sourceThumb : ''),
+        record: r.record || null, ext: {}, extMatched: undefined,
+      })),
+      extCols: [],
+      getPage: S.pageNav ? S.pageNav.getPage : null,   // 保持PDFから各ページを再ラスタライズ
+    };
+    computeTableFieldNames();
+  }
+  /* 履歴(IndexedDB)からテーブルを構成（単ページOCRの蓄積も表で確認できる） */
+  async function buildTableFromHistory() {
+    let rows = [];
+    try { rows = await FormDB.getAllResults(100000); } catch (_) {}
+    if (!rows.length) return UI.toast('履歴がありません（先にOCRを実行）', 'warning');
+    S.table = {
+      rows: rows.map(r => ({
+        id: r.id, page: r.page, formName: r.formName, decision: r.decision,
+        avgConf: r.overallFieldConfidence, error: null,
+        fields: r.fields || [], thumb: r.sourceThumb || '', record: r, ext: {}, extMatched: undefined,
+      })),
+      extCols: [], getPage: null,
+    };
+    computeTableFieldNames();
+    renderTable(); markRecogTab('table', true); switchRecogTab('table');
+    UI.toast(`履歴 ${rows.length} 件をテーブルに読み込みました`, 'success', 2500);
+  }
+  function showTableArea() {
+    const has = !!(S.table && S.table.rows && S.table.rows.length);
+    const e = $('emptyTable'), a = $('tableArea');
+    if (e) e.classList.toggle('hidden', has);
+    if (a) a.classList.toggle('hidden', !has);
+  }
+  function tableSummary() {
+    const rows = (S.table && S.table.rows) || [];
+    const c = k => rows.filter(r => r.decision === k).length;
+    let s = `全 ${rows.length} ページ ・ 採用 ${c('accepted')} / 要確認 ${c('review')} / 不一致 ${c('rejected')}`;
+    if (c('error')) s += ` / エラー ${c('error')}`;
+    if (S.table && S.table.extCols && S.table.extCols.length) {
+      const m = rows.filter(r => r.extMatched).length;
+      s += ` ・ 突き合わせ一致 ${m}/${rows.length}`;
+    }
+    return s;
+  }
+  function renderTable() {
+    showTableArea();
+    if (!S.table || !S.table.rows.length) return;
+    $('rtblSummary').textContent = tableSummary();
+    UI.renderResultTable(S.table, { onEdit: onTableEdit, onReview: openPageReview });
+  }
+  function tableGetVal(row, col) {
+    if (col === 'ページ') return row.page;
+    if (col === '帳票') return row.formName || '';
+    const f = (row.fields || []).find(x => x.name === col);
+    return f ? (f.text || '') : '';
+  }
+  /* セル編集 → モデル更新＋（レコードがあれば）履歴DBへ再保存 */
+  async function onTableEdit(rowIdx, field, value) {
+    const t = S.table; if (!t) return;
+    const row = t.rows[rowIdx]; if (!row) return;
+    value = value == null ? '' : value;
+    let f = (row.fields || []).find(x => x.name === field);
+    if (f) f.text = value; else { f = { name: field, text: value, confidence: null }; (row.fields = row.fields || []).push(f); }
+    if (row.record) {
+      row.record.ocrValues = row.record.ocrValues || {};
+      row.record.ocrValues[field] = value;       // row.fields は record.fields と同一参照のため text は反映済み
+      try { await FormDB.putResult(row.record); } catch (_) {}
+      refreshHistory();
+    }
+  }
+  /* CSV（フィールド列＋突き合わせ列を含む） */
+  function tableToCsv() {
+    const t = S.table; if (!t) return '';
+    const esc = v => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : String(v == null ? '' : v);
+    const VER = { accepted: '採用', review: '要確認', rejected: '不一致', error: 'エラー' };
+    const head = ['ページ', ...t.fieldNames, ...t.extCols, '帳票', '判定'];
+    const lines = t.rows.map(r => {
+      const fmap = {}; (r.fields || []).forEach(f => { fmap[f.name] = f.text || ''; });
+      const cols = [r.page, ...t.fieldNames.map(n => fmap[n] ?? ''), ...t.extCols.map(n => (r.ext && r.ext[n] != null) ? r.ext[n] : ''), r.formName || '', VER[r.decision] || r.decision || ''];
+      return cols.map(esc).join(',');
+    });
+    return [head.map(esc).join(','), ...lines].join('\n');
+  }
+  function copyTableCsv() { const t = S.table; if (!t || !t.rows.length) return UI.toast('データがありません', 'warning'); copyCsvToClipboard(tableToCsv()); }
+  function downloadTableCsv() { const t = S.table; if (!t || !t.rows.length) return UI.toast('データがありません', 'warning'); downloadCsv(tableToCsv(), `ocr_table_${Date.now()}.csv`); }
+  function clearTableJoin() {
+    const t = S.table; if (!t || !t.extCols.length) return UI.toast('突き合わせ列はありません', 'info');
+    t.extCols = []; t.rows.forEach(r => { r.ext = {}; r.extMatched = undefined; });
+    renderTable(); UI.toast('突き合わせ列を消しました', 'info');
+  }
+
+  /* ── 1ページずつ確認（ページ単位カルーセル） ──
+     一括OCR済みの結果を表示するだけ（再OCRしない）ので、マッチングが悪いページでも止まらない。 */
+  function openPageReview(startIdx) {
+    const t = S.table; if (!t || !t.rows.length) return UI.toast('確認するページがありません', 'warning');
+    S.pr = { idx: Math.max(0, Math.min(t.rows.length - 1, startIdx || 0)), token: 0 };
+    $('pageReviewModal').classList.remove('hidden');
+    pageReviewRender();
+  }
+  function pageReviewClose() { $('pageReviewModal').classList.add('hidden'); if (S.pr) { S.pr = null; renderTable(); } }
+  function pageReviewGo(d) { const t = S.table, pr = S.pr; if (!t || !pr) return; pr.idx = Math.max(0, Math.min(t.rows.length - 1, pr.idx + d)); pageReviewRender(); }
+  async function pageReviewRender() {
+    const t = S.table, pr = S.pr; if (!t || !pr) return;
+    const row = t.rows[pr.idx]; if (!row) return;
+    const VER = { accepted: '採用', review: '要確認', rejected: '不一致', error: 'エラー' };
+    $('prProgress').textContent = `${pr.idx + 1} / ${t.rows.length}`;
+    $('prMeta').textContent = `P${row.page} ・ ${row.formName || '—'} ・ ${VER[row.decision] || row.decision || '—'}` + (row.avgConf != null ? ` ・ 平均 ${row.avgConf}%` : '');
+    $('prPrev').disabled = pr.idx <= 0;
+    $('prNext').disabled = pr.idx >= t.rows.length - 1;
+    const fc = $('prFields'); fc.innerHTML = '';
+    if (!(row.fields || []).length) {
+      fc.innerHTML = `<div class="pr-empty">${row.error ? 'エラー: ' + UI.esc(row.error) : 'このページで読み取れた項目はありません（帳票が未採用）。'}</div>`;
+    } else {
+      row.fields.forEach(f => {
+        const conf = f.confidence, cls = conf == null ? '' : (conf >= 85 ? 'hi' : conf >= 60 ? 'mid' : 'lo');
+        const div = document.createElement('div'); div.className = 'pr-field';
+        div.innerHTML = `<label class="pr-field-name">${UI.esc(f.name || '')}</label>
+          <input class="pr-field-input" value="${UI.esc(f.text || '')}"${row.record ? '' : ' readonly'}>
+          ${conf != null ? `<span class="conf-badge ${cls}">${conf}%</span>` : ''}`;
+        const inp = div.querySelector('input');
+        inp.addEventListener('change', () => onTableEdit(pr.idx, f.name, inp.value));
+        fc.appendChild(div);
+      });
+    }
+    const img = $('prImg'); img.src = row.thumb || '';
+    const token = ++pr.token;
+    if (t.getPage) {
+      try { const canvas = await t.getPage(row.page); if (S.pr && pr.token === token) img.src = canvas.toDataURL('image/png'); }
+      catch (_) { /* サムネ表示のまま */ }
+    }
+  }
+
+  /* ── 突き合わせデータを追加（CSV/貼付をキーで対応付け、テーブルに列追加） ── */
+  function openTableJoin() {
+    const t = S.table; if (!t || !t.rows.length) return UI.toast('先にOCR結果をテーブルに表示してください', 'warning');
+    S.tj = { ext: null };
+    $('tjPaste').value = ''; $('tjPreview').innerHTML = ''; $('tjColsWrap').style.display = 'none'; $('tjCols').innerHTML = '';
+    recFill('tjOcrKey', ['ページ', '帳票', ...t.fieldNames]);
+    recFill('tjExtKey', []);
+    $('tableJoinModal').classList.remove('hidden');
+  }
+  function closeTableJoin() { $('tableJoinModal').classList.add('hidden'); }
+  function tjParse() {
+    const text = $('tjPaste').value;
+    if (!text.trim()) return UI.toast('データを貼り付けるかファイルを読み込んでください', 'warning');
+    const rows = recParseText(text, $('tjDelim').value);
+    if (!rows.length) return UI.toast('データを解析できませんでした', 'warning');
+    const hasHeader = $('tjHasHeader').checked;
+    const header = rows[0].map((h, i) => (hasHeader && h) ? h : `列${i + 1}`);
+    const data = hasHeader ? rows.slice(1) : rows;
+    S.tj = { ext: { header, rows: data } };
+    recFill('tjExtKey', header);
+    const head = '<tr>' + header.map(h => `<th>${recHtml(h)}</th>`).join('') + '</tr>';
+    const body = data.slice(0, 6).map(r => '<tr>' + header.map((_, i) => `<td>${recHtml(r[i] ?? '')}</td>`).join('') + '</tr>').join('');
+    $('tjPreview').innerHTML = `<div class="rec-tbl-wrap"><table class="rec-tbl">${head}${body}</table></div>` + (data.length > 6 ? `<div class="rec-more">… 他 ${data.length - 6} 行</div>` : '');
+    const wrap = $('tjCols'); wrap.innerHTML = '';
+    header.forEach(h => { const lbl = document.createElement('label'); lbl.className = 'tj-col-chk'; lbl.innerHTML = `<input type="checkbox" value="${UI.esc(h)}" checked> ${UI.esc(h)}`; wrap.appendChild(lbl); });
+    $('tjColsWrap').style.display = '';
+    UI.toast(`比較データ ${data.length} 行 × ${header.length} 列を読み込みました`, 'success', 2500);
+  }
+  function tjReadFile(file) {
+    const r = new FileReader();
+    r.onload = () => { $('tjPaste').value = recDecode(r.result, $('tjEnc').value); tjParse(); };
+    r.onerror = () => UI.toast('ファイルの読み込みに失敗しました', 'error');
+    r.readAsArrayBuffer(file);
+  }
+  function tjRun() {
+    const t = S.table; if (!t) return;
+    if (!S.tj || !S.tj.ext) return UI.toast('先に突き合わせデータを読み込んでください', 'warning');
+    const ocrKey = $('tjOcrKey').value, extKey = $('tjExtKey').value;
+    const extKeyIdx = S.tj.ext.header.indexOf(extKey);
+    if (extKeyIdx < 0) return UI.toast('外部側キーを選んでください', 'warning');
+    const cols = [...$('tjCols').querySelectorAll('input:checked')].map(c => c.value).filter(c => c !== extKey);
+    if (!cols.length) return UI.toast('追加する列を1つ以上選んでください', 'warning');
+    const norm = s => String(s == null ? '' : s).trim().replace(/\s+/g, '');
+    const map = new Map();
+    S.tj.ext.rows.forEach(row => { const k = norm(row[extKeyIdx]); if (k && !map.has(k)) map.set(k, row); });
+    const colName = {};   // フィールド名/既存列と衝突したら接尾辞
+    cols.forEach(c => { let nm = c; if (t.fieldNames.includes(nm) || t.extCols.includes(nm)) nm = c + '(突)'; colName[c] = nm; });
+    let matched = 0;
+    t.rows.forEach(r => {
+      const ext = map.get(norm(tableGetVal(r, ocrKey)));
+      r.ext = r.ext || {};
+      if (ext) { matched++; r.extMatched = true; cols.forEach(c => { r.ext[colName[c]] = ext[S.tj.ext.header.indexOf(c)] ?? ''; }); }
+      else { r.extMatched = false; cols.forEach(c => { r.ext[colName[c]] = ''; }); }
+    });
+    cols.forEach(c => { if (!t.extCols.includes(colName[c])) t.extCols.push(colName[c]); });
+    renderTable(); closeTableJoin();
+    UI.toast(`突き合わせ完了 — ${matched}/${t.rows.length} ページが一致`, matched ? 'success' : 'warning', 4000);
+  }
+
   /* ── Init ───────────────────────────────────────────── */
   function init() {
     initAccordions(); initRegSliders(); initRegCanvasEvents(); initDbgControls(); initRrPan();
@@ -1439,6 +1656,35 @@
     $('recExport').addEventListener('click', recExport);
     $('recFileBtn').addEventListener('click', () => $('recFileInput').click());
     $('recFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) recReadFile(f); e.target.value = ''; });
+
+    /* 結果テーブル（複数ページを1表に・編集・突き合わせ・1ページ確認） */
+    $('btnTableFromHistory').addEventListener('click', buildTableFromHistory);
+    $('btnTableReload').addEventListener('click', buildTableFromHistory);
+    $('btnPageReview').addEventListener('click', () => openPageReview(0));
+    $('btnTableJoin').addEventListener('click', openTableJoin);
+    $('btnTableCsvDl').addEventListener('click', downloadTableCsv);
+    $('btnTableCsvCopy').addEventListener('click', copyTableCsv);
+    $('btnTableClearJoin').addEventListener('click', clearTableJoin);
+    /* 1ページずつ確認カルーセル */
+    $('prPrev').addEventListener('click', () => pageReviewGo(-1));
+    $('prNext').addEventListener('click', () => pageReviewGo(1));
+    $('prClose').addEventListener('click', pageReviewClose);
+    $('prCancel').addEventListener('click', pageReviewClose);
+    $('pageReviewModal').addEventListener('click', e => { if (e.target === $('pageReviewModal')) pageReviewClose(); });
+    document.addEventListener('keydown', e => {
+      if ($('pageReviewModal').classList.contains('hidden')) return;
+      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+      if (e.key === 'ArrowRight') { e.preventDefault(); pageReviewGo(1); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); pageReviewGo(-1); }
+    });
+    /* 突き合わせデータ追加モーダル */
+    $('tjParse').addEventListener('click', tjParse);
+    $('tjRun').addEventListener('click', tjRun);
+    $('tjClose').addEventListener('click', closeTableJoin);
+    $('tjCancel').addEventListener('click', closeTableJoin);
+    $('tableJoinModal').addEventListener('click', e => { if (e.target === $('tableJoinModal')) closeTableJoin(); });
+    $('tjFileBtn').addEventListener('click', () => $('tjFileInput').click());
+    $('tjFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) tjReadFile(f); e.target.value = ''; });
     /* テキストエリアへファイルをドロップ */
     const rp = $('recPaste');
     rp.addEventListener('dragover', e => { if (Array.from(e.dataTransfer?.types || []).includes('Files')) { e.preventDefault(); rp.classList.add('drag-over'); } });
@@ -1477,6 +1723,7 @@
       if (e.key !== 'Escape') return;
       document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => m.classList.add('hidden'));
       document.querySelectorAll('.ovf.is-open').forEach(m => m.classList.remove('is-open'));
+      if (S.pr) { S.pr = null; renderTable(); }   // ページ確認を閉じたらテーブルへ編集を反映
     });
 
     /* OCR実行ビューのタブ切替・「…」メニュー・かんたん調整チップ */

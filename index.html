@@ -286,6 +286,7 @@
     <div class="recog-tabs" id="recogTabs" role="tablist">
       <button class="recog-tab is-active" role="tab" data-tab="decide"><i class="fas fa-scale-balanced"></i> 判定</button>
       <button class="recog-tab" role="tab" data-tab="result"><i class="fas fa-list-check"></i> 結果</button>
+      <button class="recog-tab" role="tab" data-tab="table"><i class="fas fa-table-cells"></i> テーブル</button>
       <button class="recog-tab" role="tab" data-tab="detail"><i class="fas fa-sliders"></i> 詳細調整</button>
       <button class="recog-tab" role="tab" data-tab="history"><i class="fas fa-clock-rotate-left"></i> 履歴</button>
     </div>
@@ -468,6 +469,34 @@
       </div>
     </div>
     </div><!-- /TAB 結果 -->
+
+    <!-- TAB: テーブル（複数ページの結果を1つの表に・編集/突き合わせ） ── -->
+    <div class="recog-tabpanel hidden" data-tab="table">
+      <div class="recog-empty" id="emptyTable">
+        <i class="fas fa-table-cells"></i>
+        <span>複数ページPDFを「全ページ一括OCR」すると、各ページの結果がこの<b>表</b>にまとまります。<br>セルを直接<b>編集</b>でき、外部データ（CSV/貼付）を<b>突き合わせ列</b>として追加できます。</span>
+        <button id="btnTableFromHistory" class="btn btn-outline btn-sm"><i class="fas fa-clock-rotate-left"></i> 履歴から読み込む</button>
+      </div>
+      <div id="tableArea" class="rtbl-area hidden">
+        <div class="rtbl-toolbar">
+          <span id="rtblSummary" class="rtbl-summary"></span>
+          <span class="rtbl-acts">
+            <button id="btnPageReview" class="btn btn-outline btn-sm"><i class="fas fa-images"></i> 1ページずつ確認</button>
+            <button id="btnTableJoin" class="btn btn-primary btn-sm"><i class="fas fa-code-compare"></i> 突き合わせデータを追加</button>
+            <div class="ovf ovf--right">
+              <button class="btn btn-ghost btn-sm ovf-btn" title="その他の操作"><i class="fas fa-ellipsis"></i></button>
+              <div class="ovf-pop">
+                <button id="btnTableCsvDl" class="btn btn-ghost btn-sm"><i class="fas fa-download"></i> CSV出力</button>
+                <button id="btnTableCsvCopy" class="btn btn-ghost btn-sm"><i class="fas fa-file-csv"></i> CSVコピー</button>
+                <button id="btnTableClearJoin" class="btn btn-ghost btn-sm"><i class="fas fa-eraser"></i> 突き合わせ列を消す</button>
+                <button id="btnTableReload" class="btn btn-ghost btn-sm"><i class="fas fa-clock-rotate-left"></i> 履歴から読み込む</button>
+              </div>
+            </div>
+          </span>
+        </div>
+        <div id="resultTableWrap" class="rtbl-wrap"></div>
+      </div>
+    </div><!-- /TAB テーブル -->
 
     <!-- TAB: 履歴 ─────────────────────────────────────── -->
     <div class="recog-tabpanel hidden" data-tab="history">
@@ -846,6 +875,78 @@
       <button type="button" id="batchCsvDl" class="btn btn-outline"><i class="fas fa-download"></i> CSV出力</button>
       <button type="button" id="batchCsv" class="btn btn-outline"><i class="fas fa-file-csv"></i> CSVコピー</button>
       <button type="button" id="batchCloseBtn" class="btn btn-primary">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 1ページずつ確認（ページ単位カルーセル） -->
+<div class="modal-overlay hidden" id="pageReviewModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr">
+      <h2><i class="fas fa-images"></i> 1ページずつ確認 <span id="prProgress" class="review-progress"></span></h2>
+      <button class="modal-close" id="prClose"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <div class="pr-card">
+        <div class="pr-img-wrap">
+          <span class="pr-meta" id="prMeta"></span>
+          <img id="prImg" class="pr-img" alt="">
+        </div>
+        <div class="pr-fields-col">
+          <div class="pr-fields-hdr"><i class="fas fa-list-check"></i> OCR結果（必要なら修正）</div>
+          <div class="pr-fields" id="prFields"></div>
+        </div>
+      </div>
+      <p class="hint-text"><b>←→</b>=ページ移動。値はその場で編集でき、<b>履歴(DB)とテーブルに反映</b>されます。一括OCR済みの結果を表示するので、マッチングが悪い（要確認/不一致）ページでも<b>止まらず</b>確認できます。</p>
+    </div>
+    <div class="cr-ftr review-ftr">
+      <button type="button" id="prCancel" class="btn btn-ghost">閉じる</button>
+      <div class="review-nav">
+        <button type="button" id="prPrev" class="btn btn-outline"><i class="fas fa-arrow-left"></i> 前のページ</button>
+        <button type="button" id="prNext" class="btn btn-primary">次のページ <i class="fas fa-arrow-right"></i></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 突き合わせデータを追加（テーブルにキー対応で列追加） -->
+<div class="modal-overlay hidden" id="tableJoinModal">
+  <div class="modal modal--xl">
+    <div class="modal-hdr"><h2><i class="fas fa-code-compare"></i> 突き合わせデータを追加</h2>
+      <button class="modal-close" id="tjClose"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <div class="rec-step-ttl">① 突き合わせデータを読み込む（貼り付け / ファイル）</div>
+      <div class="rec-input-row">
+        <textarea id="tjPaste" class="rec-paste" placeholder="ここに Ctrl+V で貼り付け（Excel/CSV/テキスト）、または右の「ファイル選択」" spellcheck="false"></textarea>
+        <div class="rec-input-side">
+          <button id="tjFileBtn" class="btn btn-ghost btn-sm"><i class="fas fa-folder-open"></i> ファイル選択</button>
+          <input type="file" id="tjFileInput" accept=".csv,.tsv,.txt,text/*" style="display:none">
+          <label class="rec-opt">区切り
+            <select id="tjDelim" class="pselect"><option value="auto">自動判定</option><option value="comma">カンマ ,</option><option value="tab">タブ</option><option value="space">スペース</option><option value="semicolon">セミコロン ;</option></select>
+          </label>
+          <label class="rec-opt">文字コード
+            <select id="tjEnc" class="pselect"><option value="auto">自動</option><option value="utf-8">UTF-8</option><option value="shift_jis">Shift-JIS</option></select>
+          </label>
+          <label class="rec-check"><input type="checkbox" id="tjHasHeader" checked> 1行目を見出しにする</label>
+          <button id="tjParse" class="btn btn-primary btn-sm"><i class="fas fa-table"></i> 読み込む</button>
+        </div>
+      </div>
+      <div id="tjPreview" class="rec-preview"></div>
+
+      <div class="rec-step-ttl">② キーと、テーブルに追加する列を選ぶ</div>
+      <div class="rec-map">
+        <label>テーブル側キー <select id="tjOcrKey" class="pselect"></select></label>
+        <label>外部側キー <select id="tjExtKey" class="pselect"></select></label>
+      </div>
+      <div class="tj-cols" id="tjColsWrap" style="display:none">
+        <span class="rec-sep">追加する列（チェック）：</span>
+        <div id="tjCols" class="tj-cols-list"></div>
+      </div>
+    </div>
+    <div class="cr-ftr">
+      <button id="tjCancel" class="btn btn-ghost">キャンセル</button>
+      <button id="tjRun" class="btn btn-success"><i class="fas fa-plus"></i> テーブルに列を追加</button>
     </div>
   </div>
 </div>
