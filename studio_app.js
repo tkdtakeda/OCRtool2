@@ -570,8 +570,9 @@
   async function reviewComplete() {
     reviewSaveEdit();
     const rv = S.review; if (!rv) return;
-    /* 一括（OCR中確認）: このページを確定 → ループ側が保存して次ページへ */
-    if (rv.batch) { const done = rv.batch.resolve; S.review = null; reviewBatchBusy(true); done('done'); return; }
+    /* 一括（OCR中確認）: このページを確定 → ループ側が保存して次ページへ
+       （次ページが先読み済みなら待ちなしで切り替わる。未完了なら直後にループが「認識中」を出す） */
+    if (rv.batch) { const done = rv.batch.resolve; S.review = null; done('done'); return; }
     const { form, result } = rv;
     reviewHide();
     UI.renderFieldResults(result.fields);   // 修正を画面に反映
@@ -582,7 +583,7 @@
   function reviewCancel() {
     const rv = S.review;
     /* 一括（OCR中確認）: 中止 → このページは保存せずループを終了（ここまでは保存済み） */
-    if (rv && rv.batch) { const stop = rv.batch.resolve; S.review = null; reviewBatchBusy(true); stop('stop'); return; }
+    if (rv && rv.batch) { const stop = rv.batch.resolve; S.review = null; stop('stop'); return; }
     reviewHide();
     UI.toast('確認をキャンセルしました（未保存）。結果は画面に表示中です', 'info', 4000);
   }
@@ -914,18 +915,37 @@
     const results = [];
     let cancelled = false;
     if (review) reviewBatchOpen(total); else UI.openBatchModal(total);
-    try {
-      for (let idx = 0; idx < pages.length; idx++) {
-        if (S.batchCancel) { cancelled = true; break; }
-        const p = pages[idx];
-        const msg = `ページ ${p}（${idx + 1}/${total}）を認識中…`, pct = idx / Math.max(1, total);
-        if (review) reviewBatchProgress(msg, pct); else UI.updateBatchProgress(msg, pct);
-        await new Promise(r => setTimeout(r, 5));   // 進捗描画・中止受付の隙間
+
+    /* 1ページ分のラスタライズ＋OCRを開始し、完了フラグ付きで返す（先読み用に await しない）。
+       確認中に次ページを裏でOCRしておくことで、確定→次ページの待ち時間をなくす。 */
+    const ocrAt = i => {
+      if (i < 0 || i >= pages.length) return null;
+      const p = pages[i];
+      const forcedFormId = src.formFor ? src.formFor(p) : '';
+      const entry = { page: p, ready: false };
+      entry.promise = (async () => {
         let canvas;
         try { canvas = await src.getPage(p); }
-        catch (_) { results.push({ page: p, decision: 'error', formName: '—', error: 'ページ描画に失敗', thumb: '' }); continue; }
-        const forcedFormId = src.formFor ? src.formFor(p) : '';
-        const r = await ocrPageForBatch(canvas, p, forcedFormId);
+        catch (_) { return { page: p, decision: 'error', formName: '—', error: 'ページ描画に失敗', thumb: '' }; }
+        return await ocrPageForBatch(canvas, p, forcedFormId);
+      })();
+      entry.promise.then(() => { entry.ready = true; }, () => { entry.ready = true; });
+      return entry;
+    };
+
+    let cur = ocrAt(0);                          // 先頭ページのOCRを先行開始
+    try {
+      for (let idx = 0; idx < pages.length; idx++) {
+        if (!cur || S.batchCancel) { if (S.batchCancel) cancelled = true; break; }
+        const p = pages[idx], pct = idx / Math.max(1, total);
+        if (!cur.ready) {                        // 先読みが間に合っていない時だけ「認識中」を出す
+          const msg = `ページ ${p}（${idx + 1}/${total}）を認識中…`;
+          if (review) { reviewBatchBusy(true); reviewBatchProgress(msg, pct); }
+          else UI.updateBatchProgress(msg, pct);
+          await new Promise(r => setTimeout(r, 5));   // 進捗描画・中止受付の隙間
+        }
+        const r = await cur.promise;
+        const nextEntry = ocrAt(idx + 1);        // ★先読み: 確認している間に次ページを裏でOCR
         /* review: OCR結果を1ページずつ写真と見比べ→修正→確認してから保存 */
         if (review && r._save && r.fields && r.fields.length) {
           const action = await reviewBatchPage(r, idx, total);
@@ -933,6 +953,7 @@
         }
         await persistBatchRecord(r);
         results.push(r);
+        cur = nextEntry;
       }
     } finally { /* 詳細ペインでのページ送り用に PDF を保持するため、ここでは破棄しない */ }
     if (review) reviewBatchClose();              // 確認カルーセルを閉じてからサマリを出す（重なり防止）
