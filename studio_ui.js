@@ -380,7 +380,7 @@ const StudioUI = (() => {
     $, esc, toast, REGION_COLORS, ANCHOR_COLOR, OCR_COLOR,
     refreshRegSteps, renderFormLibrary, renderAnchorList, renderRegionList,
     setPipeline, resetPipeline,
-    renderDecision, renderRecogPreview, renderFieldResults,
+    renderDecision, renderRecogPreview, renderFieldResults, symbolChipsHTML, confClass,
     showRecogProgress, updateRecogProgress, renderHistory,
     openBatchModal, closeBatchModal, updateBatchProgress, renderBatchResults,
   };

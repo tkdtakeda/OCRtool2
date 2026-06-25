@@ -27,7 +27,7 @@
     recogCanvas: null, lastClassify: null,
     recogFormId: null, recogMatchInfo: null, recogResult: null, rrZoom: 1,
     dbgLoadedFormId: null, patternOverrides: {}, constraintOverrides: {},
-    batchResults: null, batchCancel: false,
+    batchResults: null, batchCancel: false, review: null,
     recogPageNum: 1, pageNav: null, navReviewMode: false,
   };
 
@@ -492,11 +492,71 @@
       UI.renderFieldResults(result.fields);
       LineRemovalProcessor.cleanupMats(result.previewMats);
 
-      await saveResult(form, result);
       const ok = result.fields.filter(f => !f.error).length;
-      UI.toast(`OCR完了 — ${ok}/${result.fields.length} フィールド認識`, 'success');
+      if (S.navReviewMode) {
+        /* 一括結果のページ確認のための再実行: 保存もカルーセルもしない（表示のみ） */
+      } else if ($('recogReviewMode').checked && result.fields.length) {
+        openReview(form, result);   // 保存前に1件ずつ確認 → 確認後に保存
+      } else {
+        await saveResult(form, result);
+        UI.toast(`OCR完了 — ${ok}/${result.fields.length} フィールド認識`, 'success');
+      }
     } catch (e) { UI.showRecogProgress(false); UI.toast('OCRエラー: ' + e.message, 'error', 5000); }
     finally { $('btnRerun').disabled = false; }
+  }
+
+  /* ── 保存前レビュー（カルーセル）─────────────────────
+     写真（切り出し）とOCR結果を1件ずつ見比べ、修正→完了でDB保存。
+     Enter=次へ / Shift+Enter or「すべて完了」=途中でも全件保存。 */
+  function openReview(form, result) {
+    S.review = { form, result, idx: 0 };
+    $('reviewModal').classList.remove('hidden');
+    reviewRender();
+    setTimeout(() => { $('reviewValue').focus(); $('reviewValue').select(); }, 60);
+  }
+  function reviewHide() { $('reviewModal').classList.add('hidden'); S.review = null; }
+  function reviewSaveEdit() {
+    if (!S.review) return;
+    const f = S.review.result.fields[S.review.idx];
+    if (f) f.text = $('reviewValue').value;
+  }
+  function reviewRender() {
+    const rv = S.review; if (!rv) return;
+    const fields = rv.result.fields, i = rv.idx, f = fields[i];
+    $('reviewProgress').textContent = `(${i + 1} / ${fields.length})`;
+    $('reviewFieldName').textContent = f.name || `OCR${i + 1}`;
+    $('reviewCrop').src = f.cropDataURL || '';
+    $('reviewValue').value = f.error ? '' : (f.text || '');
+    $('reviewConf').innerHTML = f.error ? '<span class="conf-badge lo">読取エラー</span>'
+      : `信頼度 <span class="conf-badge ${UI.confClass(f.confidence)}">${f.confidence}%</span>`;
+    $('reviewSyms').innerHTML = UI.symbolChipsHTML(f.symbols);
+    $('reviewPrev').disabled = i === 0;
+    const last = i === fields.length - 1;
+    $('reviewNext').innerHTML = last ? '<i class="fas fa-check"></i> 完了（保存）' : '次へ <i class="fas fa-arrow-right"></i>';
+    $('reviewNext').className = 'btn ' + (last ? 'btn-success' : 'btn-primary');
+  }
+  function reviewGo(delta) {
+    reviewSaveEdit();
+    const rv = S.review; if (!rv) return;
+    const n = rv.idx + delta;
+    if (n < 0) return;
+    if (n >= rv.result.fields.length) { reviewComplete(); return; }
+    rv.idx = n; reviewRender();
+    $('reviewValue').focus(); $('reviewValue').select();
+  }
+  async function reviewComplete() {
+    reviewSaveEdit();
+    const rv = S.review; if (!rv) return;
+    const { form, result } = rv;
+    reviewHide();
+    UI.renderFieldResults(result.fields);   // 修正を画面に反映
+    await saveResult(form, result);
+    const ok = result.fields.filter(f => !f.error).length;
+    UI.toast(`確認完了 — ${ok}/${result.fields.length} フィールドをDBへ保存しました`, 'success');
+  }
+  function reviewCancel() {
+    reviewHide();
+    UI.toast('確認をキャンセルしました（未保存）。結果は画面に表示中です', 'info', 4000);
   }
 
   /* デバッグパネル設定で上書きした帳票を返す */
@@ -732,8 +792,9 @@
      DB出力用に page（ページ数）と ocrValues（OCR1, OCR2,… の番号付き値）も保持する。 */
   function buildResultRecord(form, dec, result, srcCanvas, manual, page) {
     const avgConf = result.fields.length ? Math.round(result.fields.reduce((s, f) => s + (f.confidence || 0), 0) / result.fields.length) : 0;
+    /* OCRエリア名 → 値（DB出力・照合用）。名前が無い場合のみ OCRn で補完 */
     const ocrValues = {};
-    result.fields.forEach((f, i) => { ocrValues['OCR' + (i + 1)] = f.text || ''; });
+    result.fields.forEach((f, i) => { ocrValues[f.name || ('OCR' + (i + 1))] = f.text || ''; });
     return {
       id: uid(),
       formId: form.id, formName: form.name,
@@ -887,17 +948,15 @@
   /* OCR結果を「ページ数, OCR1, OCR2, …」形式の CSV に整形（DB出力フォーマット）。
      rows: [{ page, formName, decision, fields:[{text}] }]。OCR列はページ最大数に合わせる。 */
   function resultsToCsv(rows) {
-    const maxN = rows.reduce((m, r) => Math.max(m, (r.fields || []).length), 0);
+    /* 列は OCRエリア名（決定時に付けた名前）の和集合（出現順） */
+    const names = [];
+    rows.forEach(r => (r.fields || []).forEach(f => { if (f.name && !names.includes(f.name)) names.push(f.name); }));
     const esc = v => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : String(v == null ? '' : v);
-    const head = ['ページ数'];
-    for (let i = 1; i <= maxN; i++) head.push('OCR' + i);
-    head.push('帳票', '判定');
+    const head = ['ページ数', ...names, '帳票', '判定'];
     const verdict = { accepted: '採用', review: '要確認', rejected: '不一致', error: 'エラー' };
     const lines = rows.map(r => {
-      const vals = (r.fields || []).map(f => f.text || '');
-      const cols = [r.page ?? ''];
-      for (let i = 0; i < maxN; i++) cols.push(vals[i] ?? '');
-      cols.push(r.formName || '', verdict[r.decision] || r.decision || '');
+      const map = {}; (r.fields || []).forEach(f => { map[f.name] = f.text || ''; });
+      const cols = [r.page ?? '', ...names.map(n => map[n] ?? ''), r.formName || '', verdict[r.decision] || r.decision || ''];
       return cols.map(esc).join(',');
     });
     return [head.map(esc).join(','), ...lines].join('\n');
@@ -1196,6 +1255,18 @@
     $('settingsSave').addEventListener('click', saveSettings);
     $('settingsReset').addEventListener('click', resetSettings);
     $('settingsModal').addEventListener('click', e => { if (e.target === $('settingsModal')) closeSettings(); });
+
+    /* 保存前レビュー（カルーセル） */
+    $('reviewPrev').addEventListener('click', () => reviewGo(-1));
+    $('reviewNext').addEventListener('click', () => reviewGo(1));
+    $('reviewAll').addEventListener('click', reviewComplete);
+    $('reviewCancel').addEventListener('click', reviewCancel);
+    $('reviewClose').addEventListener('click', reviewCancel);
+    $('reviewValue').addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); if (e.shiftKey) reviewComplete(); else reviewGo(1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); reviewGo(-1); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); reviewGo(1); }
+    });
     [['setAcceptConf', 'setValAcceptConf', 2], ['setNearExact', 'setValNearExact', 2], ['setAcceptFloor', 'setValAcceptFloor', 2], ['setMarginMin', 'setValMarginMin', 2], ['setAngleRange', 'setValAngle', 0]]
       .forEach(([sl, lb, d]) => $(sl).addEventListener('input', () => { $(lb).textContent = Number($(sl).value).toFixed(d); }));
 

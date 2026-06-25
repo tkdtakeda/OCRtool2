@@ -450,3 +450,22 @@
 .library-panel.json-drag { background: var(--c-pri-lt); }
 .library-panel.json-drag::after { content: 'レイアウト設定 JSON をドロップして読み込み'; position: absolute; inset: 8px; border: 2px dashed var(--c-pri); border-radius: var(--r-sm); display: flex; align-items: center; justify-content: center; text-align: center; font-size: .8rem; font-weight: 700; color: var(--c-pri); background: rgba(235,244,255,.85); z-index: 5; pointer-events: none; }
 .library-panel { position: relative; }
+
+/* ── 認識前の確認トグル ─────────────────────────────── */
+.recog-review-toggle { display: flex; align-items: center; gap: 8px; font-size: .8rem; color: var(--c-text-2); margin: 8px 0; cursor: pointer; }
+.recog-review-toggle input { width: 16px; height: 16px; accent-color: var(--c-pri); }
+
+/* ── 保存前レビュー（カルーセル）─────────────────────── */
+.review-progress { font-weight: 400; font-size: .8rem; color: var(--c-text-3); }
+.review-card { display: grid; grid-template-columns: 1fr; gap: 12px; }
+.review-img-wrap { position: relative; display: flex; align-items: center; justify-content: center; background:
+  repeating-conic-gradient(#eef2f6 0% 25%, #fff 0% 50%) 0 / 16px 16px; border: 1px solid var(--c-border-dk); border-radius: var(--r-sm); min-height: 90px; padding: 12px; }
+.review-field-name { position: absolute; top: 6px; left: 8px; font-size: .72rem; font-weight: 700; color: #fff; background: var(--c-pri); padding: 2px 9px; border-radius: 9px; }
+.review-crop { max-width: 100%; max-height: 170px; object-fit: contain; image-rendering: -webkit-optimize-contrast; }
+.review-edit { display: flex; flex-direction: column; gap: 6px; }
+.review-lbl { font-size: .74rem; font-weight: 700; color: var(--c-text-2); }
+.review-value { padding: 10px 12px; border: 2px solid var(--c-pri-mid); border-radius: var(--r-sm); font-family: 'IBM Plex Mono', monospace; font-size: 1.1rem; color: var(--c-text); }
+.review-value:focus { outline: none; border-color: var(--c-pri); box-shadow: 0 0 0 3px var(--c-pri-lt); }
+.review-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: .76rem; color: var(--c-text-2); }
+.review-ftr { justify-content: space-between; }
+.review-nav { display: flex; gap: 8px; }

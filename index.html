@@ -247,6 +247,7 @@
           <img id="recogPreview" alt="" style="display:none;max-height:160px;max-width:100%;object-fit:contain;">
         </div>
         <input type="file" id="recogFileInput" accept="image/*,application/pdf" style="display:none">
+        <label class="recog-review-toggle"><input type="checkbox" id="recogReviewMode"><span>保存前に <b>1件ずつ写真と見比べて確認</b>する（カルーセル）</span></label>
         <div class="recog-input-acts">
           <button id="btnRecogSample" class="btn btn-ghost btn-sm"><i class="fas fa-images"></i> サンプル画像（傾き付）</button>
           <button id="btnRunRecognize" class="btn btn-primary" disabled><i class="fas fa-play"></i> 認識を実行</button>
@@ -637,6 +638,41 @@
       <button type="button" id="pdfCancel" class="btn btn-ghost">キャンセル</button>
       <button type="button" id="pdfBatchBtn" class="btn btn-outline" style="display:none"><i class="fas fa-layer-group"></i> 全ページを一括OCR</button>
       <button type="button" id="pdfLoadBtn" class="btn btn-primary"><i class="fas fa-check"></i> このページを読み込む</button>
+    </div>
+  </div>
+</div>
+
+<!-- 保存前レビュー（カルーセル） -->
+<div class="modal-overlay hidden" id="reviewModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr">
+      <h2><i class="fas fa-clipboard-check"></i> 結果の確認 <span id="reviewProgress" class="review-progress"></span></h2>
+      <button class="modal-close" id="reviewClose"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <div class="review-card">
+        <div class="review-img-wrap">
+          <span class="review-field-name" id="reviewFieldName"></span>
+          <img id="reviewCrop" class="review-crop" alt="">
+        </div>
+        <div class="review-edit">
+          <label class="review-lbl">OCR結果（必要なら修正）</label>
+          <input type="text" id="reviewValue" class="review-value" autocomplete="off" spellcheck="false">
+          <div class="review-meta">
+            <span id="reviewConf" class="review-conf"></span>
+            <span id="reviewSyms" class="field-syms"></span>
+          </div>
+        </div>
+      </div>
+      <p class="hint-text"><b>Enter</b>=次へ ／ <b>←→</b>=移動 ／ <b>Shift+Enter</b>=すべて信頼して完了。最後の項目で「完了」を押すとDBへ保存します。</p>
+    </div>
+    <div class="cr-ftr review-ftr">
+      <button type="button" id="reviewCancel" class="btn btn-ghost">キャンセル</button>
+      <div class="review-nav">
+        <button type="button" id="reviewPrev" class="btn btn-outline"><i class="fas fa-arrow-left"></i> 前へ</button>
+        <button type="button" id="reviewNext" class="btn btn-primary">次へ <i class="fas fa-arrow-right"></i></button>
+      </div>
+      <button type="button" id="reviewAll" class="btn btn-success"><i class="fas fa-check-double"></i> すべて完了</button>
     </div>
   </div>
 </div>
