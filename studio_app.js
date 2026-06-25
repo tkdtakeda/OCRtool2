@@ -527,6 +527,8 @@
      Enter=次へ / Shift+Enter or「すべて完了」=途中でも全件保存。 */
   function openReview(form, result) {
     S.review = { form, result, idx: 0 };
+    $('reviewBatchBar').classList.add('hidden');     // 単一ページ確認では一括用の進捗・ページ表示は出さない
+    $('reviewPageCtx').classList.add('hidden');
     $('reviewModal').classList.remove('hidden');
     reviewRender();
     setTimeout(() => { $('reviewValue').focus(); $('reviewValue').select(); }, 60);
@@ -549,8 +551,12 @@
     $('reviewSyms').innerHTML = UI.symbolChipsHTML(f.symbols);
     $('reviewPrev').disabled = i === 0;
     const last = i === fields.length - 1;
-    $('reviewNext').innerHTML = last ? '<i class="fas fa-check"></i> 完了（保存）' : '次へ <i class="fas fa-arrow-right"></i>';
+    /* 一括（OCR中確認）では「完了→次ページ」、単一では「完了（保存）」 */
+    const lastLabel = rv.batch ? '<i class="fas fa-check"></i> このページを確定' : '<i class="fas fa-check"></i> 完了（保存）';
+    $('reviewNext').innerHTML = last ? lastLabel : '次へ <i class="fas fa-arrow-right"></i>';
     $('reviewNext').className = 'btn ' + (last ? 'btn-success' : 'btn-primary');
+    $('reviewCancel').textContent = rv.batch ? '中止（ここまで保存）' : 'キャンセル';
+    $('reviewAll').innerHTML = rv.batch ? '<i class="fas fa-check-double"></i> このページを全確定' : '<i class="fas fa-check-double"></i> すべて完了';
   }
   function reviewGo(delta) {
     reviewSaveEdit();
@@ -564,6 +570,8 @@
   async function reviewComplete() {
     reviewSaveEdit();
     const rv = S.review; if (!rv) return;
+    /* 一括（OCR中確認）: このページを確定 → ループ側が保存して次ページへ */
+    if (rv.batch) { const done = rv.batch.resolve; S.review = null; reviewBatchBusy(true); done('done'); return; }
     const { form, result } = rv;
     reviewHide();
     UI.renderFieldResults(result.fields);   // 修正を画面に反映
@@ -572,6 +580,9 @@
     UI.toast(`確認完了 — ${ok}/${result.fields.length} フィールドをDBへ保存しました`, 'success');
   }
   function reviewCancel() {
+    const rv = S.review;
+    /* 一括（OCR中確認）: 中止 → このページは保存せずループを終了（ここまでは保存済み） */
+    if (rv && rv.batch) { const stop = rv.batch.resolve; S.review = null; reviewBatchBusy(true); stop('stop'); return; }
     reviewHide();
     UI.toast('確認をキャンセルしました（未保存）。結果は画面に表示中です', 'info', 4000);
   }
@@ -852,10 +863,11 @@
   /* ════════════════════════════════════════════════════
      複数ページ一括OCR（PDFの全ページ）
      ════════════════════════════════════════════════════ */
-  /* 1枚のキャンバスを判定→OCRし、結果と履歴保存まで行う（UIは触らない）。
+  /* 1枚のキャンバスを判定→OCRする（保存はしない／UIは触らない）。
      forcedFormId 指定時はその帳票で必ずOCR。未指定（自動）でも、確信度が低く
-     「要確認」でも best候補があれば停止せずOCRする（複数ページで止まらないように）。 */
-  async function recognizePageQuietly(canvas, page, forcedFormId) {
+     「要確認」でも best候補があれば停止せずOCRする（複数ページで止まらないように）。
+     確認カルーセルで修正してから保存できるよう、保存用の材料を _save に持たせて返す。 */
+  async function ocrPageForBatch(canvas, page, forcedFormId) {
     const thumb = thumbURL(canvas, 120);
     try {
       const { decision, scores } = await Recognizer.classify(canvas, S.forms, classifyOpts());
@@ -869,12 +881,24 @@
       if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
       LineRemovalProcessor.cleanupMats(res.previewMats);
       const manual = forcedFormId ? true : !(candId === form.id);
-      try { await FormDB.putResult(await buildResultRecord(form, decision, res, canvas, manual, page)); } catch (_) {}
       const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
-      return { page, decision: verdict, formName: form.name, formId: form.id, forced: !!forcedFormId, avgConf: avg, fields: res.fields, thumb };
+      return {
+        page, decision: verdict, formName: form.name, formId: form.id, forced: !!forcedFormId,
+        avgConf: avg, fields: res.fields, thumb,
+        _save: { form, dec: decision, res, canvas, manual, page },   // 確認後に putResult する材料
+      };
     } catch (e) {
       return { page, decision: 'error', formName: '—', error: e.message || String(e), thumb };
     }
+  }
+
+  /* 一括結果1ページ分を履歴(IndexedDB)へ保存。確認カルーセルでの修正は
+     res.fields[].text に反映済みなので、そのまま buildResultRecord が拾う。 */
+  async function persistBatchRecord(r) {
+    if (!r || !r._save) return;
+    const s = r._save;
+    try { await FormDB.putResult(await buildResultRecord(s.form, s.dec, s.res, s.canvas, s.manual, s.page)); } catch (_) {}
+    r._save = null;   // ページ全体の canvas/結果への参照を解放（大量ページでもメモリ一定に保つ）
   }
 
   /* 指定範囲のページを順に一括OCR（pageSource = { pages:[n…], total, getPage(n), done() }）。
@@ -885,23 +909,33 @@
     releasePageNav();                            // 前回の一括結果ナビゲーションを解放
     const pages = src.pages || [];
     const total = src.total || pages.length;
-    UI.openBatchModal(total);
+    const review = !!src.review;                 // OCR中に1ページずつカルーセルで確認するか
     S.batchCancel = false;
     const results = [];
     let cancelled = false;
+    if (review) reviewBatchOpen(total); else UI.openBatchModal(total);
     try {
       for (let idx = 0; idx < pages.length; idx++) {
         if (S.batchCancel) { cancelled = true; break; }
         const p = pages[idx];
-        UI.updateBatchProgress(`ページ ${p}（${idx + 1}/${total}）を認識中…`, idx / Math.max(1, total));
+        const msg = `ページ ${p}（${idx + 1}/${total}）を認識中…`, pct = idx / Math.max(1, total);
+        if (review) reviewBatchProgress(msg, pct); else UI.updateBatchProgress(msg, pct);
         await new Promise(r => setTimeout(r, 5));   // 進捗描画・中止受付の隙間
         let canvas;
         try { canvas = await src.getPage(p); }
         catch (_) { results.push({ page: p, decision: 'error', formName: '—', error: 'ページ描画に失敗', thumb: '' }); continue; }
         const forcedFormId = src.formFor ? src.formFor(p) : '';
-        results.push(await recognizePageQuietly(canvas, p, forcedFormId));
+        const r = await ocrPageForBatch(canvas, p, forcedFormId);
+        /* review: OCR結果を1ページずつ写真と見比べ→修正→確認してから保存 */
+        if (review && r._save && r.fields && r.fields.length) {
+          const action = await reviewBatchPage(r, idx, total);
+          if (action === 'stop') { cancelled = true; break; }   // 中止: このページは保存しない
+        }
+        await persistBatchRecord(r);
+        results.push(r);
       }
     } finally { /* 詳細ペインでのページ送り用に PDF を保持するため、ここでは破棄しない */ }
+    if (review) reviewBatchClose();              // 確認カルーセルを閉じてからサマリを出す（重なり防止）
     S.batchResults = results;
     /* 処理済みページを詳細ペインで1枚ずつ確認できるよう、PDFソースを保持
        （次の一括/新規読み込み時に releasePageNav で破棄）。 */
@@ -909,11 +943,58 @@
       S.pageNav = { pages: results.map(r => r.page), idx: 0, started: false, getPage: src.getPage, done: src.done, fileName: src.fileName };
       updatePageNavUI();                       // 詳細ペインにページ送りバーを表示（モーダルを閉じても使える）
     } else if (src.done) { try { src.done(); } catch (_) {} }
+    if (review) UI.openBatchModal(total);        // 確認後にサマリ（CSV出力など）を表示
     UI.updateBatchProgress('完了', 1);
     UI.renderBatchResults(results, { hasNav: !!S.pageNav });
     refreshHistory();
     const ok = results.filter(r => r.decision === 'accepted').length;
     UI.toast(`一括OCR${cancelled ? '中止' : '完了'} — ${results.length}/${total}ページ処理・${ok}件採用、履歴に保存`, cancelled ? 'warning' : 'success', 4500);
+  }
+
+  /* ── OCR中カルーセル確認（一括OCRで review=ON）──────────
+     reviewModal を確認のホストに流用。ページOCR中は進捗バー＋「認識中」を出し、
+     OCR完了でそのページのフィールドをカルーセル表示→修正→確認（保存はループ側）。 */
+  function reviewBatchOpen(total) {
+    S.review = null;
+    $('reviewModal').classList.remove('hidden');
+    $('reviewBatchBar').classList.remove('hidden');
+    $('reviewPageCtx').classList.add('hidden');
+    reviewBatchProgress(`全 ${total} ページを認識します…`, 0);
+    reviewBatchBusy(true);
+  }
+  function reviewBatchProgress(msg, pct) {
+    $('reviewBatchFill').style.width = `${Math.round((pct || 0) * 100)}%`;
+    $('reviewBatchMsg').textContent = msg || '処理中…';
+  }
+  /* 認識中はカードを伏せて操作を止める（次ページのOCR待ち表示） */
+  function reviewBatchBusy(busy) {
+    ['reviewValue', 'reviewPrev', 'reviewNext', 'reviewAll'].forEach(id => { const el = $(id); if (el) el.disabled = !!busy; });
+    if (busy) {
+      $('reviewFieldName').textContent = '認識中…';
+      $('reviewCrop').src = '';
+      $('reviewValue').value = '';
+      $('reviewConf').innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> ページを認識しています…';
+      $('reviewSyms').innerHTML = '';
+      $('reviewProgress').textContent = '';
+    }
+  }
+  function reviewBatchClose() {
+    $('reviewBatchBar').classList.add('hidden');
+    $('reviewPageCtx').classList.add('hidden');
+    $('reviewModal').classList.add('hidden');
+    S.review = null;
+  }
+  /* 1ページ分のカルーセルを開き、確認完了('done')／中止('stop')を待つ */
+  function reviewBatchPage(r, idx, total) {
+    return new Promise(resolve => {
+      reviewBatchBusy(false);
+      reviewBatchProgress(`ページ ${r.page}（${idx + 1}/${total}）を確認中…`, (idx + 0.5) / Math.max(1, total));
+      $('reviewPageCtx').textContent = `ページ ${r.page}（${idx + 1}/${total}）`;
+      $('reviewPageCtx').classList.remove('hidden');
+      S.review = { form: r._save.form, result: r._save.res, idx: 0, batch: { resolve } };
+      reviewRender();
+      setTimeout(() => { $('reviewValue').focus(); $('reviewValue').select(); }, 60);
+    });
   }
 
   /* ── 一括OCR結果のページ送り（詳細ペインで1枚ずつ拡大確認） ──
@@ -1369,7 +1450,7 @@
 
     /* OCR工程（画像・PDF 共通の入口。PDFは複数ページの一括OCRも可。
        一括では「ページ範囲ごとに使う帳票」を割り当てられる） */
-    const recogOpts = { onBatch: runBatchPdf, allowBatch: true, getForms: () => S.forms.map(f => ({ id: f.id, name: f.name })) };
+    const recogOpts = { onBatch: runBatchPdf, allowBatch: true, getForms: () => S.forms.map(f => ({ id: f.id, name: f.name })), getReviewDefault: () => !!($('recogReviewMode') && $('recogReviewMode').checked) };
     setupDrop('recogDrop', f => acceptFile(f, loadRecogImage, recogOpts), 'recogFileInput');
     $('recogFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) acceptFile(f, loadRecogImage, recogOpts); e.target.value = ''; });
     $('batchClose').addEventListener('click', () => UI.closeBatchModal());
@@ -1429,7 +1510,12 @@
     $('btnHelp').addEventListener('click', () => $('helpModal').classList.remove('hidden'));
     $('closeHelpModal').addEventListener('click', () => $('helpModal').classList.add('hidden'));
     $('helpModal').addEventListener('click', e => { if (e.target === $('helpModal')) $('helpModal').classList.add('hidden'); });
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => m.classList.add('hidden')); });
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      /* 一括の確認カルーセル中は中止として扱う（ただ閉じるとOCRループが止まったままになる） */
+      if (S.review && S.review.batch) { reviewCancel(); return; }
+      document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => m.classList.add('hidden'));
+    });
 
     /* はじめての方向けガイド（初回のみ表示・閉じたら記憶） */
     try { if (!localStorage.getItem('ocrtool_onboard_dismissed')) $('onboardBar').classList.remove('hidden'); } catch (_) {}

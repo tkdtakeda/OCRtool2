@@ -457,6 +457,9 @@
 
 /* ── 保存前レビュー（カルーセル）─────────────────────── */
 .review-progress { font-weight: 400; font-size: .8rem; color: var(--c-text-3); }
+.review-page-ctx { font-weight: 700; font-size: .76rem; color: #fff; background: var(--c-ocr, #7C3AED); padding: 2px 10px; border-radius: 9px; vertical-align: middle; }
+.review-batch-bar { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; padding: 8px 10px; background: #F5F3FF; border: 1px solid #DDD6FE; border-radius: var(--r-sm); }
+.pdf-review-toggle { margin: 10px 2px 2px; }
 .review-card { display: grid; grid-template-columns: 1fr; gap: 12px; }
 .review-img-wrap { position: relative; display: flex; align-items: center; justify-content: center; background:
   repeating-conic-gradient(#eef2f6 0% 25%, #fff 0% 50%) 0 / 16px 16px; border: 1px solid var(--c-border-dk); border-radius: var(--r-sm); min-height: 90px; padding: 12px; }

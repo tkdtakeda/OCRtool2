@@ -640,6 +640,7 @@
         </div>
         <div class="pdf-assign-rows" id="pdfAssignRows"></div>
         <p class="pdf-assign-hint">「ページ 1–3 → 帳票A、4–6 → 帳票B」のように指定できます。<b>自動判定</b>はページごとに帳票を推定（要確認でも停止せずOCR）。重なった範囲は後の行が優先。</p>
+        <label class="recog-review-toggle pdf-review-toggle"><input type="checkbox" id="pdfBatchReview"><span><i class="fas fa-clipboard-check"></i> OCR中に <b>1ページずつ写真と見比べて確認</b>する（カルーセル）</span></label>
       </div>
       <p class="hint-text">DPIが高いほど文字は鮮明になり認識精度が上がりますが、処理は重くなります。迷ったら<b>150（推奨）</b>。複数ページは範囲を指定して一括OCRできます。</p>
     </div>
@@ -708,10 +709,14 @@
 <div class="modal-overlay hidden" id="reviewModal">
   <div class="modal modal--lg">
     <div class="modal-hdr">
-      <h2><i class="fas fa-clipboard-check"></i> 結果の確認 <span id="reviewProgress" class="review-progress"></span></h2>
+      <h2><i class="fas fa-clipboard-check"></i> 結果の確認 <span id="reviewProgress" class="review-progress"></span> <span id="reviewPageCtx" class="review-page-ctx hidden"></span></h2>
       <button class="modal-close" id="reviewClose"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="modal-bdy">
+      <div id="reviewBatchBar" class="review-batch-bar hidden">
+        <div class="ocr-progress-track"><div id="reviewBatchFill" class="ocr-progress-fill"></div></div>
+        <span id="reviewBatchMsg" class="ocr-progress-msg"></span>
+      </div>
       <div class="review-card">
         <div class="review-img-wrap">
           <span class="review-field-name" id="reviewFieldName"></span>

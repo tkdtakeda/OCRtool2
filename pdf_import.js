@@ -19,6 +19,7 @@ const PdfImport = (() => {
 
   let doc = null, numPages = 0, curPage = 1, dpi = DEFAULT_DPI, fileName = '', onCanvasCb = null, onBatchCb = null, allowBatch = false, busy = false, workerSet = false;
   let getFormsFn = null;          // 帳票一覧の取得関数（一括の帳票割り当て用）
+  let getReviewDefaultFn = null;  // 一括カルーセル確認の初期ON/OFFを供給（OCR画面のトグルに同期）
   let assigns = [];               // 一括OCRの割り当て [{ from, to, formId }]
 
   /* 指定ページを現在のDPIでキャンバスへラスタライズ */
@@ -59,6 +60,7 @@ const PdfImport = (() => {
     onBatchCb  = opts.onBatch || null;
     allowBatch = !!opts.allowBatch;
     getFormsFn = opts.getForms || null;
+    getReviewDefaultFn = opts.getReviewDefault || null;
     if (doc) { try { doc.destroy(); } catch (_) {} doc = null; }   // 直前のPDF（ESCで閉じた等）を解放
     try {
       ensureLib();
@@ -67,6 +69,7 @@ const PdfImport = (() => {
       numPages = doc.numPages; curPage = 1; fileName = file.name || 'PDF';
       dpi = clampDpi(parseInt(localStorage.getItem(LS_KEY), 10) || DEFAULT_DPI);
       assigns = [{ from: 1, to: numPages, formId: '' }];   // 既定=全ページ・自動判定
+      const rv = $('pdfBatchReview'); if (rv) rv.checked = !!(getReviewDefaultFn && getReviewDefaultFn());
       $('pdfModal').classList.remove('hidden');
       renderControls();
       await renderPreview();
@@ -187,12 +190,13 @@ const PdfImport = (() => {
     const { pages, formFor } = resolveBatch();
     if (!pages.length) return;
     localStorage.setItem(LS_KEY, String(dpi));
+    const review = !!($('pdfBatchReview') && $('pdfBatchReview').checked);   // OCR中に1ページずつ確認するか
     const d = doc, dp = dpi, cb = onBatchCb, fn = fileName;
     doc = null;                                 // close()/次のopen()で破棄させない（pageSourceが保持）
     onCanvasCb = null; onBatchCb = null;
     $('pdfModal').classList.add('hidden');
     cb({
-      pages, total: pages.length, dpi: dp, fileName: fn,
+      pages, total: pages.length, dpi: dp, fileName: fn, review,
       formFor: n => formFor[n] || '',
       getPage: n => renderPageToCanvas(d, n, dp),
       done: () => { try { d.destroy(); } catch (_) {} },
