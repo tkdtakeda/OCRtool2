@@ -17,7 +17,7 @@ const PdfImport = (() => {
   const LS_KEY = 'ocrtool_pdf_dpi';
   const DEFAULT_DPI = 150;
 
-  let doc = null, numPages = 0, curPage = 1, dpi = DEFAULT_DPI, fileName = '', onCanvasCb = null, onBatchCb = null, allowBatch = false, busy = false, workerSet = false;
+  let doc = null, numPages = 0, curPage = 1, dpi = DEFAULT_DPI, fileName = '', onCanvasCb = null, onBatchCb = null, allowBatch = false, busy = false;
   let getFormsFn = null;          // 帳票一覧の取得関数（一括の帳票割り当て用）
   let getReviewDefaultFn = null;  // 一括カルーセル確認の初期ON/OFFを供給（OCR画面のトグルに同期）
   let assigns = [];               // 一括OCRの割り当て [{ from, to, formId }]
@@ -39,9 +39,26 @@ const PdfImport = (() => {
   }
   function clampDpi(d) { return Math.max(72, Math.min(400, d || DEFAULT_DPI)); }
 
-  function ensureLib() {
+  /* pdf.worker を Blob URL 化して1度だけ準備する。
+     CDN URL をそのまま workerSrc に渡すと、Worker 内部が importScripts() で
+     追加のクロスオリジン取得を行うため、file:// で開いた場合に Chrome がこれを
+     ブロックすることがある（要確認: 「ローカルサーバーを立てずに開く」と失敗する件）。
+     ここでは先にスクリプト本文を fetch し、同一オリジンの Blob URL として
+     Worker に渡すことで、Worker 生成後のクロスオリジン取得を発生させない
+     （Tesseract 側は同種の対策がライブラリ内蔵で既に効いている）。 */
+  let workerSrcPromise = null;
+  function ensureWorkerSrc() {
+    if (!workerSrcPromise) {
+      workerSrcPromise = fetch(WORKER_SRC)
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+        .then(code => URL.createObjectURL(new Blob([code], { type: 'text/javascript' })))
+        .catch(() => WORKER_SRC);   // 取得できない場合は直接URLにフォールバック（従来どおり）
+    }
+    return workerSrcPromise;
+  }
+  async function ensureLib() {
     if (!window.pdfjsLib) throw new Error('PDFライブラリを読み込めませんでした（ネット接続を確認してください）');
-    if (!workerSet) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER_SRC; workerSet = true; }
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = await ensureWorkerSrc();
   }
   function fileToArrayBuffer(file) {
     return new Promise((res, rej) => {
@@ -63,7 +80,7 @@ const PdfImport = (() => {
     getReviewDefaultFn = opts.getReviewDefault || null;
     if (doc) { try { doc.destroy(); } catch (_) {} doc = null; }   // 直前のPDF（ESCで閉じた等）を解放
     try {
-      ensureLib();
+      await ensureLib();
       const buf = await fileToArrayBuffer(file);
       doc = await window.pdfjsLib.getDocument({ data: buf }).promise;
       numPages = doc.numPages; curPage = 1; fileName = file.name || 'PDF';
