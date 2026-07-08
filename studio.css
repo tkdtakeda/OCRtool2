@@ -496,6 +496,17 @@
 .rec-tbl td { font-family: 'IBM Plex Mono', monospace; color: var(--c-text); }
 .rec-tbl-rownum { font-family: 'IBM Plex Mono', monospace; color: var(--c-text-3); text-align: right; background: var(--c-surface2); }
 .rec-more { font-size: .7rem; color: var(--c-text-3); padding: 4px 2px; }
+/* 比較データの確認・整形モーダル（見出し行の選び直し・行削除） */
+.rec-tbl-hint { margin-bottom: 8px; }
+.rec-tbl-toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
+.rec-tbl-hdrcol, .rec-tbl-delcol { text-align: center !important; white-space: nowrap; }
+.rec-tbl-hdrcol input[type=radio] { width: 14px; height: 14px; accent-color: var(--c-pri); cursor: pointer; }
+.rec-row-del { width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: var(--c-text-3); font-size: .68rem; transition: background var(--ease), color var(--ease); }
+.rec-row-del:hover { background: #FEE2E2; color: var(--c-err); }
+.rec-edit-tbl tr.rec-row-header td, .rec-edit-tbl tr.rec-row-header th { background: var(--c-pri-lt); }
+.rec-edit-tbl tr.rec-row-above td { opacity: .45; }
+.rec-edit-tbl tr.rec-row-blank:not(.rec-row-excluded) td { background: #FFFBEB; }
+.rec-edit-tbl tr.rec-row-excluded td { opacity: .35; text-decoration: line-through; }
 /* 照合の設定: 「対応させるキー(必須)」「値を比較(任意)」の2枚のカードで関係を視覚化 */
 .rec-settings { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
 .rec-card { flex: 1 1 320px; border: 1px solid var(--c-border); border-radius: var(--r-sm); background: var(--c-surface2); padding: 10px 12px; }

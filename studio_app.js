@@ -1317,11 +1317,21 @@
     const sep = delim === 'tab' ? '\t' : ';';
     return line.split(sep).map(s => s.trim());
   }
+  /* 区切り文字の自動判定は1行目だけでなく複数行を見て多数決で決める。
+     実ファイルはタイトル等で1行目に区切り文字が無いことがあり、1行目だけで判定すると
+     ファイル全体が誤って1列扱いになってしまうため。 */
+  function recDetectDelim(lines) {
+    const sample = lines.slice(0, 30);
+    const score = ch => sample.filter(l => l.includes(ch)).length;
+    const candidates = [['tab', '\t'], ['comma', ','], ['semicolon', ';']];
+    let best = null, bestScore = 0;
+    candidates.forEach(([name, ch]) => { const s = score(ch); if (s > bestScore) { bestScore = s; best = name; } });
+    return best || 'space';
+  }
   function recParseText(text, delim) {
     const lines = text.replace(/\r\n?/g, '\n').split('\n').filter(l => l.trim().length);
     if (!lines.length) return [];
-    let d = delim;
-    if (d === 'auto') { const f = lines[0]; d = f.includes('\t') ? 'tab' : f.includes(',') ? 'comma' : f.includes(';') ? 'semicolon' : 'space'; }
+    const d = delim === 'auto' ? recDetectDelim(lines) : delim;
     return lines.map(l => recSplitLine(l, d));
   }
   function recFill(id, opts) {
@@ -1347,6 +1357,13 @@
     $('reconcileModal').classList.remove('hidden');
   }
   function closeReconcile() { $('reconcileModal').classList.add('hidden'); }
+  const REC_PREVIEW_ROWS = 8;        // このモーダル内の簡易プレビューはここまで（全件は別モーダルで確認・整形）
+  const REC_TABLE_ROW_CAP = 5000;    // 全件表示モーダルでも重くなりすぎないための上限
+  const recRowBlank = r => r.every(c => !c || !c.trim());
+  function recFindFirstNonBlank(rows, from) {
+    for (let i = from; i < rows.length; i++) if (!recRowBlank(rows[i])) return i;
+    return from;
+  }
   function recParse() {
     if (!S.rec) return;
     const text = $('recPaste').value;
@@ -1354,35 +1371,115 @@
     const rows = recParseText(text, $('recDelim').value);
     if (!rows.length) return UI.toast('データを解析できませんでした', 'warning');
     const hasHeader = $('recHasHeader').checked;
-    const header = (hasHeader ? rows[0] : rows[0]).map((h, i) => (hasHeader && h) ? h : `列${i + 1}`);
-    const data = hasHeader ? rows.slice(1) : rows;
+    /* 生の行をそのまま保持し、見出し行/削除行はここでは確定しない。
+       実ファイルは1〜数行目がタイトル等で、見出しが4行目から…ということがあるため、
+       まず「先頭の空白でない行」を暫定の見出しとし、「テーブルで確認・整形」で選び直せるようにする。 */
+    S.rec.raw = { rows, excluded: new Set(), headerIdx: hasHeader ? recFindFirstNonBlank(rows, 0) : -1 };
+    applyRecShape();
+    const n = S.rec.ext.rows.length;
+    UI.toast(`比較データ ${n} 行 × ${S.rec.ext.header.length} 列を読み込みました`, 'success', 2500);
+  }
+  /* 削除された行が見出し行だった場合は選び直しを促す（headerIdxを未選択に戻す） */
+  function recExcludeRow(idx) {
+    const raw = S.rec.raw; if (!raw) return;
+    raw.excluded.add(idx);
+    if (raw.headerIdx === idx) raw.headerIdx = -1;
+  }
+  /* S.rec.raw（生の行・見出し行・削除行）から S.rec.ext（header, rows）を再構成し、
+     照合の設定セレクトや簡易プレビューへ反映する。「テーブルで確認・整形」の適用時と
+     初回パース時の両方から呼ばれる。 */
+  function applyRecShape() {
+    const raw = S.rec.raw; if (!raw) return;
+    const { rows, excluded, headerIdx } = raw;
+    let header;
+    if (headerIdx >= 0) {
+      header = rows[headerIdx].map((h, i) => (h && h.trim()) ? h : `列${i + 1}`);
+    } else {
+      /* 見出し行が無い場合、列数は先頭行ではなく残っている行の最大セル数から決める
+         （特定の行だけ列が少ないために他行の末尾が切れるのを防ぐ） */
+      const maxCols = rows.reduce((m, r, i) => (excluded.has(i) ? m : Math.max(m, r.length)), 0);
+      header = Array.from({ length: maxCols }, (_, i) => `列${i + 1}`);
+    }
+    const data = [];
+    rows.forEach((r, i) => {
+      if (i === headerIdx) return;                       // 見出し行自体はデータに含めない
+      if (headerIdx >= 0 && i < headerIdx) return;        // 見出しより上は無視
+      if (excluded.has(i)) return;                        // 個別削除・空白行削除
+      data.push(r);
+    });
     S.rec.ext = { header, rows: data };
     recFill('recExtKey', header);
     recFill('recExtVal', ['(なし)', ...header]);
     renderRecPreview(header, data);
     $('recPreviewInfo').textContent = `${data.length} 行 × ${header.length} 列を読み込みました`;
     $('recPreviewExpand').disabled = false;
-    UI.toast(`比較データ ${data.length} 行 × ${header.length} 列を読み込みました`, 'success', 2500);
   }
-  const REC_PREVIEW_ROWS = 8;        // このモーダル内の簡易プレビューはここまで（全件は別モーダルで確認）
-  const REC_TABLE_ROW_CAP = 5000;    // 全件表示モーダルでも重くなりすぎないための上限
   function renderRecPreview(header, data) {
     const head = '<tr>' + header.map(h => `<th>${recHtml(h)}</th>`).join('') + '</tr>';
     const body = data.slice(0, REC_PREVIEW_ROWS).map(r => '<tr>' + header.map((_, i) => `<td>${recHtml(r[i] ?? '')}</td>`).join('') + '</tr>').join('');
     $('recPreview').innerHTML = `<div class="rec-tbl-wrap"><table class="rec-tbl">${head}${body}</table></div>`
-      + (data.length > REC_PREVIEW_ROWS ? `<div class="rec-more">… 他 ${data.length - REC_PREVIEW_ROWS} 行（「テーブルで全件確認」で全件を表示できます）</div>` : '');
+      + (data.length > REC_PREVIEW_ROWS ? `<div class="rec-more">… 他 ${data.length - REC_PREVIEW_ROWS} 行（「テーブルで確認・整形」で全件を表示できます）</div>` : '');
   }
-  /* 比較データの全件を別モーダルの大きな表で確認（列がずれずに読み込めているか等の確認用） */
+  /* 比較データの全件を別モーダルの大きな表で確認・整形する。
+     行頭のラジオボタンで見出し行を選び直せる（データがどの行から始まるか目視で決める）。
+     ✕で個別削除、「空白の行を削除」で全セル空白の行を一括削除できる。「適用」を押すまで
+     S.rec.ext（実際に照合で使うデータ）は変わらない。 */
   function openRecTableModal() {
-    const ext = S.rec && S.rec.ext; if (!ext) return;
-    const { header, rows } = ext;
-    $('recTableCount').textContent = `(${rows.length} 行 × ${header.length} 列)`;
-    const head = '<tr><th class="rec-tbl-rownum">#</th>' + header.map(h => `<th>${recHtml(h)}</th>`).join('') + '</tr>';
-    const shown = rows.slice(0, REC_TABLE_ROW_CAP);
-    const body = shown.map((r, i) => '<tr><td class="rec-tbl-rownum">' + (i + 1) + '</td>' + header.map((_, ci) => `<td>${recHtml(r[ci] ?? '')}</td>`).join('') + '</tr>').join('');
-    $('recTableFull').innerHTML = `<table class="rec-tbl">${head}${body}</table>`
-      + (rows.length > REC_TABLE_ROW_CAP ? `<div class="rec-more">… 表示は先頭 ${REC_TABLE_ROW_CAP} 行のみ（全 ${rows.length} 行）</div>` : '');
+    if (!S.rec || !S.rec.raw) return;
+    renderRecTableModalBody();
     $('recTableModal').classList.remove('hidden');
+  }
+  function renderRecTableModalBody() {
+    const raw = S.rec.raw; if (!raw) return;
+    const { rows, excluded, headerIdx } = raw;
+    const maxCols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+    $('recTableCount').textContent = `(${rows.length} 行 × 最大 ${maxCols} 列)`;
+    const colHead = Array.from({ length: maxCols }, (_, i) => `<th>列${i + 1}</th>`).join('');
+    const head = `<tr><th class="rec-tbl-rownum">#</th><th class="rec-tbl-hdrcol">見出し行</th><th class="rec-tbl-delcol"></th>${colHead}</tr>`;
+    const shown = rows.slice(0, REC_TABLE_ROW_CAP);
+    const body = shown.map((r, i) => {
+      const cls = [
+        i === headerIdx ? 'rec-row-header' : '',
+        headerIdx >= 0 && i < headerIdx ? 'rec-row-above' : '',
+        recRowBlank(r) ? 'rec-row-blank' : '',
+        excluded.has(i) ? 'rec-row-excluded' : '',
+      ].filter(Boolean).join(' ');
+      const cells = Array.from({ length: maxCols }, (_, ci) => `<td>${recHtml(r[ci] ?? '')}</td>`).join('');
+      return `<tr class="${cls}" data-idx="${i}">`
+        + `<td class="rec-tbl-rownum">${i + 1}</td>`
+        + `<td class="rec-tbl-hdrcol"><input type="radio" name="recHeaderRadio" data-idx="${i}"${i === headerIdx ? ' checked' : ''} title="この行を見出しにする"></td>`
+        + `<td class="rec-tbl-delcol"><button type="button" class="rec-row-del" data-idx="${i}" title="この行を削除"><i class="fas fa-xmark"></i></button></td>`
+        + cells + '</tr>';
+    }).join('');
+    $('recTableFull').innerHTML = `<table class="rec-tbl rec-edit-tbl">${head}${body}</table>`
+      + (rows.length > REC_TABLE_ROW_CAP ? `<div class="rec-more">… 表示・編集は先頭 ${REC_TABLE_ROW_CAP} 行のみ（全 ${rows.length} 行）</div>` : '');
+  }
+  function recTableRowRadioChange(e) {
+    const radio = e.target.closest('input[name="recHeaderRadio"]'); if (!radio) return;
+    S.rec.raw.headerIdx = parseInt(radio.dataset.idx, 10);
+    renderRecTableModalBody();
+  }
+  function recTableRowDelClick(e) {
+    const btn = e.target.closest('.rec-row-del'); if (!btn) return;
+    recExcludeRow(parseInt(btn.dataset.idx, 10));
+    renderRecTableModalBody();
+  }
+  function recRemoveBlankRows() {
+    const raw = S.rec && S.rec.raw; if (!raw) return;
+    let n = 0;
+    raw.rows.forEach((r, i) => { if (recRowBlank(r) && !raw.excluded.has(i)) { recExcludeRow(i); n++; } });
+    renderRecTableModalBody();
+    UI.toast(n ? `空白の行を ${n} 件削除しました` : '空白の行はありませんでした', n ? 'success' : 'info', 2500);
+  }
+  function recResetRowExclusions() {
+    const raw = S.rec && S.rec.raw; if (!raw) return;
+    raw.excluded.clear();   // 削除の取り消しのみ。見出し行の選択はそのまま（未選択なら手動で選び直す）
+    renderRecTableModalBody();
+  }
+  function recTableApply() {
+    applyRecShape();
+    closeRecTableModal();
+    UI.toast(`${S.rec.ext.rows.length} 行 × ${S.rec.ext.header.length} 列を適用しました`, 'success', 2500);
   }
   function closeRecTableModal() { $('recTableModal').classList.add('hidden'); }
   function recReadFile(file) {
@@ -1498,6 +1595,7 @@
     $('batchCsvDl').addEventListener('click', downloadBatchCsv);
     $('batchCancel').addEventListener('click', () => { S.batchCancel = true; UI.updateBatchProgress('中止しています…', 1); });
     $('batchReview').addEventListener('click', () => { if (S.pageNav) { UI.closeBatchModal(); navLoadPage(S.pageNav.idx || 0); } });
+    $('batchReconcile').addEventListener('click', () => { UI.closeBatchModal(); openReconcile(); });
     $('btnRecogSample').addEventListener('click', () => loadRecogImage(SampleForms.sampleInputCanvas(0, 1.5)));
     $('btnRunRecognize').addEventListener('click', runRecognize);
     $('btnApplyForm').addEventListener('click', () => applyForm($('dpFormSelect').value));
@@ -1519,6 +1617,11 @@
     $('recTableClose').addEventListener('click', closeRecTableModal);
     $('recTableCloseBtn').addEventListener('click', closeRecTableModal);
     $('recTableModal').addEventListener('click', e => { if (e.target === $('recTableModal')) closeRecTableModal(); });
+    $('recTableApply').addEventListener('click', recTableApply);
+    $('recRemoveBlankRows').addEventListener('click', recRemoveBlankRows);
+    $('recResetRows').addEventListener('click', recResetRowExclusions);
+    $('recTableFull').addEventListener('change', recTableRowRadioChange);
+    $('recTableFull').addEventListener('click', recTableRowDelClick);
     /* テキストエリアへファイルをドロップ */
     const rp = $('recPaste');
     rp.addEventListener('dragover', e => { if (Array.from(e.dataTransfer?.types || []).includes('Files')) { e.preventDefault(); rp.classList.add('drag-over'); } });
