@@ -1343,6 +1343,7 @@
     recFill('recOcrVal', ['(なし)', ...ocrOpts]);
     recFill('recExtKey', []); recFill('recExtVal', ['(なし)']);
     $('recPreview').innerHTML = ''; $('recResult').innerHTML = ''; $('recSummary').classList.add('hidden'); $('recExport').disabled = true;
+    $('recPreviewInfo').textContent = ''; $('recPreviewExpand').disabled = true;
     $('reconcileModal').classList.remove('hidden');
   }
   function closeReconcile() { $('reconcileModal').classList.add('hidden'); }
@@ -1359,14 +1360,31 @@
     recFill('recExtKey', header);
     recFill('recExtVal', ['(なし)', ...header]);
     renderRecPreview(header, data);
+    $('recPreviewInfo').textContent = `${data.length} 行 × ${header.length} 列を読み込みました`;
+    $('recPreviewExpand').disabled = false;
     UI.toast(`比較データ ${data.length} 行 × ${header.length} 列を読み込みました`, 'success', 2500);
   }
+  const REC_PREVIEW_ROWS = 8;        // このモーダル内の簡易プレビューはここまで（全件は別モーダルで確認）
+  const REC_TABLE_ROW_CAP = 5000;    // 全件表示モーダルでも重くなりすぎないための上限
   function renderRecPreview(header, data) {
     const head = '<tr>' + header.map(h => `<th>${recHtml(h)}</th>`).join('') + '</tr>';
-    const body = data.slice(0, 8).map(r => '<tr>' + header.map((_, i) => `<td>${recHtml(r[i] ?? '')}</td>`).join('') + '</tr>').join('');
+    const body = data.slice(0, REC_PREVIEW_ROWS).map(r => '<tr>' + header.map((_, i) => `<td>${recHtml(r[i] ?? '')}</td>`).join('') + '</tr>').join('');
     $('recPreview').innerHTML = `<div class="rec-tbl-wrap"><table class="rec-tbl">${head}${body}</table></div>`
-      + (data.length > 8 ? `<div class="rec-more">… 他 ${data.length - 8} 行</div>` : '');
+      + (data.length > REC_PREVIEW_ROWS ? `<div class="rec-more">… 他 ${data.length - REC_PREVIEW_ROWS} 行（「テーブルで全件確認」で全件を表示できます）</div>` : '');
   }
+  /* 比較データの全件を別モーダルの大きな表で確認（列がずれずに読み込めているか等の確認用） */
+  function openRecTableModal() {
+    const ext = S.rec && S.rec.ext; if (!ext) return;
+    const { header, rows } = ext;
+    $('recTableCount').textContent = `(${rows.length} 行 × ${header.length} 列)`;
+    const head = '<tr><th class="rec-tbl-rownum">#</th>' + header.map(h => `<th>${recHtml(h)}</th>`).join('') + '</tr>';
+    const shown = rows.slice(0, REC_TABLE_ROW_CAP);
+    const body = shown.map((r, i) => '<tr><td class="rec-tbl-rownum">' + (i + 1) + '</td>' + header.map((_, ci) => `<td>${recHtml(r[ci] ?? '')}</td>`).join('') + '</tr>').join('');
+    $('recTableFull').innerHTML = `<table class="rec-tbl">${head}${body}</table>`
+      + (rows.length > REC_TABLE_ROW_CAP ? `<div class="rec-more">… 表示は先頭 ${REC_TABLE_ROW_CAP} 行のみ（全 ${rows.length} 行）</div>` : '');
+    $('recTableModal').classList.remove('hidden');
+  }
+  function closeRecTableModal() { $('recTableModal').classList.add('hidden'); }
   function recReadFile(file) {
     const r = new FileReader();
     r.onload = () => { $('recPaste').value = recDecode(r.result, $('recEnc').value); recParse(); };
@@ -1497,6 +1515,10 @@
     $('recExport').addEventListener('click', recExport);
     $('recFileBtn').addEventListener('click', () => $('recFileInput').click());
     $('recFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) recReadFile(f); e.target.value = ''; });
+    $('recPreviewExpand').addEventListener('click', openRecTableModal);
+    $('recTableClose').addEventListener('click', closeRecTableModal);
+    $('recTableCloseBtn').addEventListener('click', closeRecTableModal);
+    $('recTableModal').addEventListener('click', e => { if (e.target === $('recTableModal')) closeRecTableModal(); });
     /* テキストエリアへファイルをドロップ */
     const rp = $('recPaste');
     rp.addEventListener('dragover', e => { if (Array.from(e.dataTransfer?.types || []).includes('Files')) { e.preventDefault(); rp.classList.add('drag-over'); } });

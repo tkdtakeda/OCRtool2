@@ -682,17 +682,36 @@
           <button id="recParse" class="btn btn-primary btn-sm"><i class="fas fa-table"></i> 読み込む</button>
         </div>
       </div>
+      <div class="rec-preview-bar">
+        <span id="recPreviewInfo" class="rec-preview-info"></span>
+        <button type="button" id="recPreviewExpand" class="btn btn-outline btn-sm" disabled><i class="fas fa-expand"></i> テーブルで全件確認</button>
+      </div>
       <div id="recPreview" class="rec-preview"></div>
 
       <div class="rec-step-ttl">② 照合の設定</div>
-      <div class="rec-map">
-        <label>OCR側キー <select id="recOcrKey" class="pselect"></select></label>
-        <label>外部側キー <select id="recExtKey" class="pselect"></select></label>
-        <span class="rec-sep">値の比較(任意)：</span>
-        <label>OCR側値 <select id="recOcrVal" class="pselect"></select></label>
-        <label>外部側値 <select id="recExtVal" class="pselect"></select></label>
-        <label class="rec-check"><input type="checkbox" id="recNumeric" checked> 数値として比較</label>
-        <button id="recRun" class="btn btn-success btn-sm"><i class="fas fa-play"></i> 照合を実行</button>
+      <div class="rec-settings">
+        <div class="rec-card rec-card--key">
+          <div class="rec-card-ttl"><i class="fas fa-key"></i> 行を対応させるキー <span class="rec-badge rec-badge--req">必須</span></div>
+          <p class="rec-card-hint">両方のデータで同じ値（伝票番号など）を持つ行どうしを1件ずつ対応させます。</p>
+          <div class="rec-pair">
+            <label>OCR側 <select id="recOcrKey" class="pselect"></select></label>
+            <span class="rec-eq">=</span>
+            <label>外部側 <select id="recExtKey" class="pselect"></select></label>
+          </div>
+        </div>
+        <div class="rec-card rec-card--val">
+          <div class="rec-card-ttl"><i class="fas fa-equals"></i> 値を比較する <span class="rec-badge rec-badge--opt">任意</span></div>
+          <p class="rec-card-hint">指定すると対応した行どうしの値が一致するか判定します。未指定なら「キーが見つかったか」だけを判定します。</p>
+          <div class="rec-pair">
+            <label>OCR側 <select id="recOcrVal" class="pselect"></select></label>
+            <span class="rec-eq">=</span>
+            <label>外部側 <select id="recExtVal" class="pselect"></select></label>
+          </div>
+          <label class="rec-check"><input type="checkbox" id="recNumeric" checked> 数値として比較（カンマ・空白・単位を無視）</label>
+        </div>
+      </div>
+      <div class="rec-run-row">
+        <button id="recRun" class="btn btn-success"><i class="fas fa-play"></i> 照合を実行</button>
       </div>
 
       <div id="recSummary" class="rec-summary hidden"></div>
@@ -701,6 +720,22 @@
     <div class="cr-ftr">
       <button id="recExport" class="btn btn-outline" disabled><i class="fas fa-download"></i> 結果をCSV出力</button>
       <button id="reconcileCloseBtn" class="btn btn-primary">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 比較データの全件テーブル表示（列がずれずに読み込めているか確認用） -->
+<div class="modal-overlay hidden" id="recTableModal">
+  <div class="modal modal--full">
+    <div class="modal-hdr">
+      <h2><i class="fas fa-table"></i> 比較データ（全件） <span id="recTableCount" class="review-progress"></span></h2>
+      <button class="modal-close" id="recTableClose"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <div id="recTableFull" class="rec-tbl-wrap rec-tbl-wrap--full"></div>
+    </div>
+    <div class="cr-ftr">
+      <button type="button" id="recTableCloseBtn" class="btn btn-primary">閉じる</button>
     </div>
   </div>
 </div>
