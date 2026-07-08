@@ -806,10 +806,48 @@
 <!-- Toast -->
 <div id="toastContainer" class="toast-container"></div>
 <script>
-  var Module = { onRuntimeInitialized: function () { document.dispatchEvent(new CustomEvent('cv-ready')); } };
+/* OpenCV.js ローダー（file:// でサーバー無しでも開けるようにする）
+   docs.opencv.org の opencv.js は Cross-Origin-Resource-Policy の都合で、file:// で
+   直接開いた（＝ローカルサーバー無しの）ページからは <script src> 埋め込みがブロック
+   される（net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin）。jsDelivr 配信の tesseract/
+   pdf.js が通るのは CORP:cross-origin を返すため。
+   対策: ソースを順に試し、各ソースにつき
+     ① 通常の <script src>（サーバー配信・ローカル同梱ファイルで有効）
+     ② 失敗したら fetch でJS本文を取得し Blob URL 化して注入（CORP は no-cors 埋め込み
+        のみを制限するため、ACAO が許可されていれば file:// でも取得でき回避できる）
+   の順で読み込む。emscripten ビルドはグローバル Module を読み、初期化完了で
+   onRuntimeInitialized → 'cv-ready' を発火する。 */
+var Module = { onRuntimeInitialized: function () { document.dispatchEvent(new CustomEvent('cv-ready')); } };
+(function () {
+  var SOURCES = ['opencv.js', 'https://docs.opencv.org/4.8.0/opencv.js'];  // ローカル同梱を優先→CDN
+  var idx = 0, settled = false;
+  document.addEventListener('cv-ready', function () { settled = true; }, { once: true });
+
+  function injectBlob(code) {
+    var url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+    var s = document.createElement('script');
+    s.src = url;
+    s.onload = function () { setTimeout(function () { URL.revokeObjectURL(url); }, 0); };
+    s.onerror = nextSource;                 // 注入したのに実行できなければ次のソースへ
+    document.body.appendChild(s);
+  }
+  function nextSource() {
+    if (settled) return;
+    if (idx >= SOURCES.length) { document.dispatchEvent(new CustomEvent('cv-error')); return; }
+    var url = SOURCES[idx++];
+    var s = document.createElement('script');
+    s.async = true; s.src = url;
+    s.onerror = function () {                // <script src> が弾かれた（CORP等）→ fetch→Blob注入で回避
+      if (settled) return;
+      fetch(url).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+                .then(injectBlob)
+                .catch(nextSource);          // 取得も不可 → 次のソースへ
+    };
+    document.body.appendChild(s);
+  }
+  nextSource();
+})();
 </script>
-<script async src="https://docs.opencv.org/4.8.0/opencv.js"
-  onerror="document.dispatchEvent(new CustomEvent('cv-error'))"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
 <!-- engines -->

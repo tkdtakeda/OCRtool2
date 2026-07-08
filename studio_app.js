@@ -80,7 +80,7 @@
 
   /* ── CV lifecycle ───────────────────────────────────── */
   document.addEventListener('cv-ready', () => { S.cvReady = true; $('loadingOverlay').classList.add('hidden'); UI.toast('OpenCV.js の準備が完了しました', 'success'); });
-  document.addEventListener('cv-error', () => { $('loadingMsg').textContent = '読み込み失敗。インターネット接続を確認してください。'; UI.toast('OpenCV.js の読み込みに失敗しました', 'error', 6000); });
+  document.addEventListener('cv-error', () => { $('loadingMsg').innerHTML = 'OpenCV.js を読み込めませんでした。ネット接続を確認するか、サーバー無しで開く場合は <b>opencv.js</b> を index.html と同じフォルダに置いてください。'; UI.toast('OpenCV.js の読み込みに失敗しました', 'error', 6000); });
 
   /* ── モード切替 ─────────────────────────────────────── */
   function setMode(mode) {
