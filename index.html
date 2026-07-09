@@ -896,8 +896,14 @@ var Module = { onRuntimeInitialized: function () { document.dispatchEvent(new Cu
     var s = document.createElement('script');
     s.async = true; s.src = url;
     s.onload = function () { wireInit(); };
-    s.onerror = function () {                          // <script src> が弾かれた（CORP等）→ fetch→Blob注入で回避
+    s.onerror = function () {
       if (settled) return;
+      /* fetch() での再取得は http(s) の場合のみ意味がある（CORPでの<script src>ブロックを
+         fetch+Blob注入で回避できるのはCORS越しの取得ができるケースだけ）。ローカル同梱
+         ファイル（相対パス）が無い場合の404はここでは再取得しても無意味（file:// への
+         fetch はブラウザ仕様上ブロックされるため）なので、余計なエラーを console に出さず
+         次のソースへ進む。 */
+      if (!/^https?:\/\//i.test(url)) { nextSource(); return; }
       fetch(url).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
                 .then(injectBlob)
                 .catch(nextSource);                   // 取得も不可 → 次のソースへ
