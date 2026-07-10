@@ -726,8 +726,25 @@
       <div id="recResult" class="rec-result"></div>
     </div>
     <div class="cr-ftr">
+      <button id="recHistBtn" class="btn btn-outline"><i class="fas fa-clock-rotate-left"></i> 過去の照合結果</button>
       <button id="recExport" class="btn btn-outline" disabled><i class="fas fa-download"></i> 結果をCSV出力</button>
       <button id="reconcileCloseBtn" class="btn btn-primary">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 照合結果の履歴（後から参照） -->
+<div class="modal-overlay hidden" id="recHistModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr">
+      <h2><i class="fas fa-clock-rotate-left"></i> 過去の照合結果</h2>
+      <button class="modal-close" id="recHistClose"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <div id="recHistList" class="rec-hist-list"></div>
+    </div>
+    <div class="cr-ftr">
+      <button type="button" id="recHistCloseBtn" class="btn btn-primary">閉じる</button>
     </div>
   </div>
 </div>

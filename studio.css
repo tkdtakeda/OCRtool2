@@ -527,6 +527,13 @@
 /* 見出し行の列数を超える「余分」な列（適用すると捨てられることが分かるよう別枠で表示） */
 .rec-th-extra, .rec-td-extra { background: #FEF2F2 !important; }
 .rec-th-extra { color: var(--c-err); }
+/* 照合設定のセレクト: 入力して候補を絞り込めるコンボボックス */
+.rec-search-select { position: relative; width: 100%; }
+.rec-native-select-hidden { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.rec-search-list { position: absolute; top: calc(100% + 3px); left: 0; right: 0; z-index: 50; max-height: 180px; overflow-y: auto; background: var(--c-surface); border: 1px solid var(--c-border-dk); border-radius: var(--r-sm); box-shadow: var(--sh-sm); }
+.rec-search-item { padding: 5px 9px; font-size: .78rem; cursor: pointer; }
+.rec-search-item:hover, .rec-search-item.is-selected { background: var(--c-pri-lt); color: var(--c-pri-dk); }
+.rec-search-empty { padding: 5px 9px; font-size: .74rem; color: var(--c-text-3); }
 /* 照合の設定: 「対応させるキー(必須)」「値を比較(任意)」の2枚のカードで関係を視覚化 */
 .rec-settings { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
 .rec-card { flex: 1 1 320px; border: 1px solid var(--c-border); border-radius: var(--r-sm); background: var(--c-surface2); padding: 10px 12px; }
@@ -563,6 +570,18 @@
 .rec-result-tbl tr.rec-row-miss td { background: #F3F4F6; }
 .rec-result-tbl tr.rec-row-bad td { background: #FEF2F2; }
 .rec-result-tbl tr.rec-row-bad td:last-child, .rec-result-tbl tr.rec-row-miss td:last-child { font-weight: 700; }
+/* 照合結果テーブルでOCR値をその場修正できる入力欄（誤読の手直し用） */
+.rec-ocr-edit { width: 100%; min-width: 70px; border: 1px solid transparent; background: transparent; padding: 2px 4px; font-family: 'IBM Plex Mono', monospace; font-size: .74rem; color: var(--c-text); border-radius: 3px; }
+.rec-ocr-edit:hover { border-color: var(--c-border-dk); }
+.rec-ocr-edit:focus { outline: none; border-color: var(--c-pri); background: #fff; box-shadow: 0 0 0 2px var(--c-pri-lt); }
+/* 照合結果の履歴（後から参照）一覧 */
+.rec-hist-list { display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; }
+.rec-hist-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border: 1px solid var(--c-border); border-radius: var(--r-sm); background: var(--c-surface2); }
+.rec-hist-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.rec-hist-date { font-size: .78rem; font-weight: 700; color: var(--c-text); }
+.rec-hist-form { font-size: .74rem; color: var(--c-text-2); }
+.rec-hist-stats { font-size: .74rem; color: var(--c-text-2); }
+.rec-hist-acts { display: flex; gap: 6px; flex-shrink: 0; }
 
 /* ── はじめての方向けガイド（オンボーディング） ───────── */
 .onboard-bar { display: flex; align-items: center; gap: 10px; padding: 8px 16px; background: linear-gradient(90deg, var(--c-pri-lt), #fff); border-bottom: 1px solid var(--c-pri-mid); font-size: .82rem; color: var(--c-text); }
