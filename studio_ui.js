@@ -328,13 +328,13 @@ const StudioUI = (() => {
   }
 
   /* ── 複数ページ一括OCR モーダル ─────────────────────── */
-  function openBatchModal(total) {
+  function openBatchModal(total, resuming) {
     $('batchModal').classList.remove('hidden');
     $('batchProgress').classList.remove('hidden');
     $('batchCancel').style.display = '';
     $('batchSummary').classList.add('hidden');
     $('batchList').innerHTML = '';
-    updateBatchProgress(`${total} ページを認識します…`, 0);
+    updateBatchProgress(resuming ? `続きから残り ${total} ページを認識します…` : `${total} ページを認識します…`, 0);
   }
   function closeBatchModal() { $('batchModal').classList.add('hidden'); }
   function updateBatchProgress(msg, pct) {
@@ -346,6 +346,12 @@ const StudioUI = (() => {
     $('batchProgress').classList.add('hidden');
     $('batchCancel').style.display = 'none';
     const review = $('batchReview'); if (review) review.style.display = (opts && opts.hasNav) ? '' : 'none';
+    const resume = $('batchResume');
+    if (resume) {
+      const show = !!(opts && opts.canResume);
+      resume.style.display = show ? '' : 'none';
+      if (show) resume.innerHTML = `<i class="fas fa-play"></i> 続きから実行（残り${opts.resumeCount}ページ）`;
+    }
     const count = k => results.filter(r => r.decision === k).length;
     const sum = $('batchSummary');
     sum.classList.remove('hidden');

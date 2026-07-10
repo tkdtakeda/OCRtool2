@@ -27,7 +27,7 @@
     recogCanvas: null, lastClassify: null,
     recogFormId: null, recogMatchInfo: null, recogResult: null, rrZoom: 1,
     dbgLoadedFormId: null, patternOverrides: {}, constraintOverrides: {},
-    batchResults: null, batchCancel: false, review: null, rec: null,
+    batchResults: null, batchCancel: false, batchResume: null, review: null, rec: null,
     recogPageNum: 1, pageNav: null, navReviewMode: false,
   };
 
@@ -548,6 +548,12 @@
     $('reviewValue').value = f.error ? '' : (f.text || '');
     $('reviewConf').innerHTML = f.error ? '<span class="conf-badge lo">読取エラー</span>'
       : `信頼度 <span class="conf-badge ${UI.confClass(f.confidence)}">${f.confidence}%</span>`;
+    /* 画像のすぐ下にも読み取り結果を出し、入力欄まで視線を動かさず見比べられるようにする */
+    const rt = $('reviewReadoutText');
+    rt.textContent = f.error ? '読取エラー' : (f.text || '(空欄)');
+    rt.classList.toggle('is-empty', !!f.error || !f.text);
+    $('reviewReadoutConf').textContent = f.error ? '' : `${f.confidence}%`;
+    $('reviewReadoutConf').className = 'conf-badge' + (f.error ? '' : ` ${UI.confClass(f.confidence)}`);
     $('reviewSyms').innerHTML = UI.symbolChipsHTML(f.symbols);
     $('reviewPrev').disabled = i === 0;
     const last = i === fields.length - 1;
@@ -904,17 +910,19 @@
 
   /* 指定範囲のページを順に一括OCR（pageSource = { pages:[n…], total, getPage(n), done() }）。
      大量ページでも 1枚ずつ描画→OCR→破棄するためメモリは一定。中止可能。 */
-  async function runBatchPdf(src) {
+  async function runBatchPdf(src, opts) {
     if (!S.cvReady) { src.done && src.done(); return UI.toast('OpenCV.js 読み込み中です', 'warning'); }
     if (!S.forms.length) { src.done && src.done(); return UI.toast('先に帳票を登録してください', 'warning'); }
-    releasePageNav();                            // 前回の一括結果ナビゲーションを解放
+    const resuming = !!(opts && opts.resuming);
+    const priorResults = resuming ? (S.batchResults || []) : [];
+    if (!resuming) { releasePageNav(); S.batchResume = null; }   // 新規アップロード時は前回の「続きから」を無効化（PDFハンドルが破棄されるため）
     const pages = src.pages || [];
     const total = src.total || pages.length;
     const review = !!src.review;                 // OCR中に1ページずつカルーセルで確認するか
     S.batchCancel = false;
     const results = [];
     let cancelled = false;
-    if (review) reviewBatchOpen(total); else UI.openBatchModal(total);
+    if (review) reviewBatchOpen(total); else UI.openBatchModal(total, resuming);
 
     /* 1ページ分のラスタライズ＋OCRを開始し、完了フラグ付きで返す（先読み用に await しない）。
        確認中に次ページを裏でOCRしておくことで、確定→次ページの待ち時間をなくす。 */
@@ -957,19 +965,28 @@
       }
     } finally { /* 詳細ペインでのページ送り用に PDF を保持するため、ここでは破棄しない */ }
     if (review) reviewBatchClose();              // 確認カルーセルを閉じてからサマリを出す（重なり防止）
-    S.batchResults = results;
+    const combined = priorResults.concat(results);   // 「続きから実行」の場合は前回分と合算
+    S.batchResults = combined;
+    /* 中止していて未処理ページが残っていれば、同じPDFハンドルのまま「続きから実行」
+       できるよう保持する（再アップロード不要）。formFor/review/dpi は元のまま引き継ぐ。 */
+    const remainingPages = cancelled ? pages.slice(results.length) : [];
+    S.batchResume = remainingPages.length
+      ? { pages: remainingPages, total: remainingPages.length, getPage: src.getPage, done: src.done, formFor: src.formFor, review: src.review, fileName: src.fileName }
+      : null;
     /* 処理済みページを詳細ペインで1枚ずつ確認できるよう、PDFソースを保持
-       （次の一括/新規読み込み時に releasePageNav で破棄）。 */
-    if (src.getPage && results.length) {
-      S.pageNav = { pages: results.map(r => r.page), idx: 0, started: false, getPage: src.getPage, done: src.done, fileName: src.fileName };
+       （次の一括/新規読み込み時に releasePageNav で破棄）。「続きから」用に残す場合も破棄しない。 */
+    if (src.getPage && combined.length) {
+      S.pageNav = { pages: combined.map(r => r.page), idx: 0, started: false, getPage: src.getPage, done: src.done, fileName: src.fileName };
       updatePageNavUI();                       // 詳細ペインにページ送りバーを表示（モーダルを閉じても使える）
-    } else if (src.done) { try { src.done(); } catch (_) {} }
-    if (review) UI.openBatchModal(total);        // 確認後にサマリ（CSV出力など）を表示
+    }
+    if (!S.pageNav && !S.batchResume && src.done) { try { src.done(); } catch (_) {} }
+    if (review) UI.openBatchModal(total, resuming);   // 確認後にサマリ（CSV出力など）を表示
     UI.updateBatchProgress('完了', 1);
-    UI.renderBatchResults(results, { hasNav: !!S.pageNav });
+    UI.renderBatchResults(combined, { hasNav: !!S.pageNav, canResume: !!S.batchResume, resumeCount: remainingPages.length });
     refreshHistory();
-    const ok = results.filter(r => r.decision === 'accepted').length;
-    UI.toast(`一括OCR${cancelled ? '中止' : '完了'} — ${results.length}/${total}ページ処理・${ok}件採用、履歴に保存`, cancelled ? 'warning' : 'success', 4500);
+    const ok = combined.filter(r => r.decision === 'accepted').length;
+    const doneCount = combined.length, wholeTotal = priorResults.length + total;
+    UI.toast(`一括OCR${cancelled ? '中止' : '完了'} — ${doneCount}/${wholeTotal}ページ処理・${ok}件採用、履歴に保存`, cancelled ? 'warning' : 'success', 4500);
   }
 
   /* ── OCR中カルーセル確認（一括OCRで review=ON）──────────
@@ -997,6 +1014,8 @@
       $('reviewConf').innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> ページを認識しています…';
       $('reviewSyms').innerHTML = '';
       $('reviewProgress').textContent = '';
+      $('reviewReadoutText').textContent = ''; $('reviewReadoutText').classList.remove('is-empty');
+      $('reviewReadoutConf').textContent = ''; $('reviewReadoutConf').className = 'conf-badge';
     }
   }
   function reviewBatchClose() {
@@ -1361,19 +1380,59 @@
     const s = $(id); s.innerHTML = '';
     opts.forEach(o => { const op = document.createElement('option'); op.value = o; op.textContent = o; s.appendChild(op); });
   }
-  async function openReconcile() {
-    let rows = [];
-    try { rows = await FormDB.getAllResults(100000); } catch (_) {}
+  /* 履歴が複数帳票にまたがっていると、OCR側の項目名が帳票をまたいで和集合になり
+     （例: 帳票Aの2項目＋帳票Bの2項目＝4項目）「2つのはずが4つ出る」ように見える。
+     対象の帳票を1つに絞り込めるようにし、既定は最新の結果が属する帳票にする。 */
+  function recFormList(rows) {
+    const seen = new Map();
+    rows.forEach(r => { const id = r.formId || ''; if (!seen.has(id)) seen.set(id, { id, name: r.formName || '(不明な帳票)', count: 0 }); seen.get(id).count++; });
+    return [...seen.values()];
+  }
+  function recRebuildOcrSide(formId) {
+    const rows = formId ? S.rec.allRows.filter(r => (r.formId || '') === formId) : S.rec.allRows;
     const cols = [];
     rows.forEach(r => (r.fields || []).forEach(f => { if (f.name && !cols.includes(f.name)) cols.push(f.name); }));
-    if (!rows.length) return UI.toast('照合する認識結果がありません（先にOCRを実行）', 'warning');
-    S.rec = {
-      ocr: rows.map(r => { const values = {}, crops = {}; (r.fields || []).forEach(f => { values[f.name] = f.text || ''; if (f.crop) crops[f.name] = f.crop; }); return { page: r.page || 1, formName: r.formName || '', values, crops }; }),
-      ocrCols: cols, ext: null, result: null,
-    };
+    S.rec.formId = formId;
+    S.rec.ocr = rows.map(r => { const values = {}, crops = {}; (r.fields || []).forEach(f => { values[f.name] = f.text || ''; if (f.crop) crops[f.name] = f.crop; }); return { page: r.page || 1, formName: r.formName || '', values, crops }; });
+    S.rec.ocrCols = cols;
     const ocrOpts = ['ページ', '帳票', ...cols];
     recFill('recOcrKey', ocrOpts);
     recFill('recOcrVal', ['(なし)', ...ocrOpts]);
+    $('recResult').innerHTML = ''; $('recSummary').classList.add('hidden'); $('recExport').disabled = true;
+    updateRecOcrSamples();
+  }
+  /* OCR側フィールドが実際に何を指すか分かるよう、選んだ項目のサンプル切り出し画像を出す
+     （履歴の中で最初に見つかった、その項目名を持つ切り出し画像を代表として使う）。 */
+  function recOcrSampleCrop(name) {
+    if (!S.rec || !S.rec.ocr || !name || name === 'ページ' || name === '帳票' || name === '(なし)') return '';
+    const rec = S.rec.ocr.find(r => r.crops && r.crops[name]);
+    return rec ? rec.crops[name] : '';
+  }
+  function updateRecOcrSamples() {
+    [['recOcrKey', 'recOcrKeySample'], ['recOcrVal', 'recOcrValSample']].forEach(([selId, boxId]) => {
+      const box = $(boxId); if (!box) return;
+      const crop = recOcrSampleCrop($(selId).value);
+      box.innerHTML = crop ? `<img src="${crop}" alt="サンプル" class="rec-ocr-sample-img">` : '<span class="rec-ocr-sample-empty">(この項目のサンプル画像はありません)</span>';
+    });
+  }
+  async function openReconcile() {
+    let rows = [];
+    try { rows = await FormDB.getAllResults(100000); } catch (_) {}
+    if (!rows.length) return UI.toast('照合する認識結果がありません（先にOCRを実行）', 'warning');
+    const forms = recFormList(rows);
+    S.rec = { allRows: rows, ext: null, result: null };
+    const row = $('recFormRow'), sel = $('recFormFilter');
+    if (forms.length > 1) {
+      row.classList.remove('hidden');
+      sel.innerHTML = '';
+      forms.forEach(f => { const o = document.createElement('option'); o.value = f.id; o.textContent = `${f.name}（${f.count}件）`; sel.appendChild(o); });
+      const allOpt = document.createElement('option'); allOpt.value = ''; allOpt.textContent = `すべての帳票（${rows.length}件・項目名が混在します）`;
+      sel.appendChild(allOpt);
+      sel.value = forms[0].id;   // 既定は最新の結果が属する帳票（rowsは新しい順）
+    } else {
+      row.classList.add('hidden');
+    }
+    recRebuildOcrSide(forms.length > 1 ? forms[0].id : '');
     recFill('recExtKey', []); recFill('recExtVal', ['(なし)']);
     $('recPreview').innerHTML = ''; $('recResult').innerHTML = ''; $('recSummary').classList.add('hidden'); $('recExport').disabled = true;
     $('recPreviewInfo').textContent = ''; $('recPreviewExpand').disabled = true;
@@ -1439,11 +1498,27 @@
     $('recPreviewInfo').textContent = `${data.length} 行 × ${header.length} 列を読み込みました`;
     $('recPreviewExpand').disabled = false;
   }
+  /* 外部側キー/値は、設定カードのドロップダウンだけでなく、この列見出しの
+     🔑/＝ボタンをクリックしても選べるようにする（テーブルを見ながら直感的に選べるように）。 */
   function renderRecPreview(header, data) {
-    const head = '<tr>' + header.map(h => `<th>${recHtml(h)}</th>`).join('') + '</tr>';
+    const keyName = $('recExtKey').value, valName = $('recExtVal').value;
+    const head = '<tr>' + header.map(h => {
+      const hh = recHtml(h);
+      const cls = [h === keyName ? 'rec-th-iskey' : '', h === valName ? 'rec-th-isval' : ''].filter(Boolean).join(' ');
+      return `<th class="${cls}"><span class="rec-th-name">${hh}</span>`
+        + `<button type="button" class="rec-th-pick rec-th-pick--key" data-col="${hh}" title="外部側キーに設定"><i class="fas fa-key"></i></button>`
+        + `<button type="button" class="rec-th-pick rec-th-pick--val" data-col="${hh}" title="外部側値に設定"><i class="fas fa-equals"></i></button>`
+        + '</th>';
+    }).join('') + '</tr>';
     const body = data.slice(0, REC_PREVIEW_ROWS).map(r => '<tr>' + header.map((_, i) => `<td>${recHtml(r[i] ?? '')}</td>`).join('') + '</tr>').join('');
     $('recPreview').innerHTML = `<div class="rec-tbl-wrap"><table class="rec-tbl">${head}${body}</table></div>`
-      + (data.length > REC_PREVIEW_ROWS ? `<div class="rec-more">… 他 ${data.length - REC_PREVIEW_ROWS} 行（「テーブルで確認・整形」で全件を表示できます）</div>` : '');
+      + (data.length > REC_PREVIEW_ROWS ? `<div class="rec-more">… 他 ${data.length - REC_PREVIEW_ROWS} 行（「テーブルで確認・整形」で全件を表示できます／列見出しの🔑＝でキー・値を選べます）</div>` : '');
+  }
+  function recPreviewPickClick(e) {
+    const btn = e.target.closest('.rec-th-pick'); if (!btn || !S.rec || !S.rec.ext) return;
+    const col = btn.dataset.col;
+    $(btn.classList.contains('rec-th-pick--key') ? 'recExtKey' : 'recExtVal').value = col;
+    renderRecPreview(S.rec.ext.header, S.rec.ext.rows);   // 選択状態(ハイライト)を反映
   }
   /* 比較データの全件を別モーダルの大きな表で確認・整形する。
      行頭のラジオボタンで見出し行を選び直せる（データがどの行から始まるか目視で決める）。
@@ -1546,49 +1621,59 @@
     const norm = s => recEsc(s).trim().replace(/\s+/g, '');
     const numNorm = s => { const n = parseFloat(recEsc(s).replace(/[,\s¥￥$]/g, '')); return isFinite(n) ? n : null; };
     const getOcr = (r, col) => col === 'ページ' ? r.page : col === '帳票' ? r.formName : (r.values[col] ?? '');
-    /* 行ごとの見比べ画像: 値比較時はOCR値フィールド、それ以外はキーのフィールドの切り出しを使う */
-    const getCrop = (r, col) => (col && col !== 'ページ' && col !== '帳票' && r.crops) ? (r.crops[col] || '') : '';
     const extMap = new Map();
     S.rec.ext.rows.forEach(row => { const k = norm(row[extKeyIdx]); if (k && !extMap.has(k)) extMap.set(k, row); });
     let nMatch = 0, nNo = 0, nMiss = 0;
     const out = S.rec.ocr.map(r => {
       const keyVal = getOcr(r, ocrKey);
       const ext = extMap.get(norm(keyVal));
-      let verdict, ocrShown = '', extShown = '';
+      let verdict, extShown = '';
       if (!ext) { verdict = '該当なし'; nMiss++; }
       else if (compareVals) {
-        ocrShown = getOcr(r, ocrValCol); extShown = ext[extValIdx] ?? '';
+        const ocrShown = getOcr(r, ocrValCol); extShown = ext[extValIdx] ?? '';
         const eq = numeric ? (() => { const a = numNorm(ocrShown), b = numNorm(extShown); return a != null && b != null && a === b; })()
                            : norm(ocrShown) === norm(extShown);
         verdict = eq ? '〇' : '×'; eq ? nMatch++ : nNo++;
       } else { verdict = '〇'; extShown = ext.join(' '); nMatch++; }
-      const crop = getCrop(r, (compareVals && ext) ? ocrValCol : ocrKey);
-      return { page: r.page, key: keyVal, ocr: ocrShown, ext: extShown, verdict, compareVals, crop };
+      /* この記録が持つOCR項目すべての値+切り出し画像を並べる（キー/比較値だけでなく
+         その帳票のOCR項目全部を出し、見比べやすくする）。 */
+      const ocrFields = S.rec.ocrCols.map(name => ({ name, value: r.values[name] ?? '', crop: (r.crops && r.crops[name]) || '' }));
+      return { page: r.page, ocrFields, ext: extShown, verdict, compareVals, ocrKeyName: ocrKey, ocrValName: compareVals ? ocrValCol : '' };
     });
     S.rec.result = out;
     renderRecResult(out, { nMatch, nNo, nMiss, compareVals });
     $('recExport').disabled = false;
   }
+  /* 照合結果テーブル: OCR項目ごとに「値・切り出し画像」を交互に並べ、その帳票の
+     OCR項目すべてを見比べられるようにする。該当なし/不一致は行全体を色付けして目立たせる。 */
   function renderRecResult(out, st) {
     const sum = $('recSummary'); sum.classList.remove('hidden');
     sum.innerHTML = st.compareVals
       ? `${out.length}件 ・ <span class="bs-ok">一致 ${st.nMatch}</span> / <span class="bs-rj">不一致 ${st.nNo}</span> / <span class="bs-er">該当なし ${st.nMiss}</span>`
       : `${out.length}件 ・ <span class="bs-ok">キー一致 ${st.nMatch}</span> / <span class="bs-er">該当なし ${st.nMiss}</span>`;
-    const hasCrop = out.some(r => r.crop);   // 旧データ（切り出し未保存）では画像列を出さない
-    const head = `<tr><th>ページ</th><th>キー</th>${st.compareVals ? '<th>OCR値</th><th>外部値</th>' : '<th>外部データ</th>'}${hasCrop ? '<th>切り出し画像</th>' : ''}<th>判定</th></tr>`;
+    const names = S.rec.ocrCols;
+    const hasAnyCrop = out.some(r => r.ocrFields.some(f => f.crop));   // 旧データ（切り出し未保存）では画像列を出さない
+    const first = out[0] || {};
+    const tagFor = name => name === first.ocrKeyName ? '<span class="rec-th-tag rec-th-tag--key">キー</span>'
+      : (first.compareVals && name === first.ocrValName) ? '<span class="rec-th-tag rec-th-tag--val">比較</span>' : '';
+    const fieldHead = names.map(name => `<th>OCR値: ${recHtml(name)} ${tagFor(name)}</th>` + (hasAnyCrop ? '<th>切り出し画像</th>' : '')).join('');
+    const head = `<tr><th>ページ</th>${fieldHead}${st.compareVals ? '<th>外部値</th>' : '<th>外部データ</th>'}<th>判定</th></tr>`;
     const cls = v => v === '〇' ? 'rv-ok' : v === '×' ? 'rv-no' : 'rv-miss';
-    const body = out.map(r => `<tr><td>${recHtml(r.page)}</td><td>${recHtml(r.key)}</td>`
-      + (st.compareVals ? `<td>${recHtml(r.ocr)}</td><td>${recHtml(r.ext)}</td>` : `<td>${recHtml(r.ext)}</td>`)
-      + (hasCrop ? `<td class="rec-crop-cell">${r.crop ? `<img class="rec-crop" src="${r.crop}" alt="切り出し" loading="lazy">` : ''}</td>` : '')
-      + `<td class="${cls(r.verdict)}">${r.verdict}</td></tr>`).join('');
+    const rowCls = v => v === '該当なし' ? 'rec-row-miss' : v === '×' ? 'rec-row-bad' : '';
+    const body = out.map(r => {
+      const fieldCells = r.ocrFields.map(f => `<td>${recHtml(f.value)}</td>`
+        + (hasAnyCrop ? `<td class="rec-crop-cell">${f.crop ? `<img class="rec-crop" src="${f.crop}" alt="切り出し" loading="lazy">` : ''}</td>` : '')).join('');
+      return `<tr class="${rowCls(r.verdict)}"><td>${recHtml(r.page)}</td>${fieldCells}<td>${recHtml(r.ext)}</td><td class="${cls(r.verdict)}">${r.verdict}</td></tr>`;
+    }).join('');
     $('recResult').innerHTML = `<div class="rec-tbl-wrap rec-result-wrap"><table class="rec-tbl rec-result-tbl">${head}${body}</table></div>`;
   }
   function recExport() {
     const out = S.rec && S.rec.result; if (!out || !out.length) return;
     const cmp = out[0].compareVals;
     const esc = v => /[",\n]/.test(v) ? `"${recEsc(v).replace(/"/g, '""')}"` : recEsc(v);
-    const head = ['ページ', 'キー', ...(cmp ? ['OCR値', '外部値'] : ['外部データ']), '判定'];
-    const lines = out.map(r => [r.page, r.key, ...(cmp ? [r.ocr, r.ext] : [r.ext]), r.verdict].map(esc).join(','));
+    const names = S.rec.ocrCols;
+    const head = ['ページ', ...names.map(n => `OCR値:${n}`), ...(cmp ? ['外部値'] : ['外部データ']), '判定'];
+    const lines = out.map(r => [r.page, ...r.ocrFields.map(f => f.value), r.ext, r.verdict].map(esc).join(','));
     downloadCsv([head.map(esc).join(','), ...lines].join('\n'), `reconcile_${Date.now()}.csv`);
   }
 
@@ -1643,6 +1728,15 @@
     $('batchCancel').addEventListener('click', () => { S.batchCancel = true; UI.updateBatchProgress('中止しています…', 1); });
     $('batchReview').addEventListener('click', () => { if (S.pageNav) { UI.closeBatchModal(); navLoadPage(S.pageNav.idx || 0); } });
     $('batchReconcile').addEventListener('click', () => { UI.closeBatchModal(); openReconcile(); });
+    $('batchResume').addEventListener('click', () => {
+      const r = S.batchResume; if (!r) return;
+      S.batchResume = null;
+      /* 同じPDFハンドルを続けて使うので、詳細ペインのページ送り(pageNav)はdone()を
+         呼ばず参照だけ外す（呼ぶとハンドルごと破棄されてしまう）。 */
+      S.pageNav = null;
+      const bar = $('rrPageNav'); if (bar) bar.classList.add('hidden');
+      runBatchPdf(r, { resuming: true });
+    });
     $('btnRecogSample').addEventListener('click', () => loadRecogImage(SampleForms.sampleInputCanvas(0, 1.5)));
     $('btnRunRecognize').addEventListener('click', runRecognize);
     $('btnApplyForm').addEventListener('click', () => applyForm($('dpFormSelect').value));
@@ -1652,6 +1746,9 @@
 
     /* 照合（OCR結果 × 外部データ） */
     $('btnReconcile').addEventListener('click', openReconcile);
+    $('recFormFilter').addEventListener('change', e => recRebuildOcrSide(e.target.value));
+    $('recOcrKey').addEventListener('change', updateRecOcrSamples);
+    $('recOcrVal').addEventListener('change', updateRecOcrSamples);
     $('reconcileClose').addEventListener('click', closeReconcile);
     $('reconcileCloseBtn').addEventListener('click', closeReconcile);
     $('reconcileModal').addEventListener('click', e => { if (e.target === $('reconcileModal')) closeReconcile(); });
@@ -1661,6 +1758,7 @@
     $('recFileBtn').addEventListener('click', () => $('recFileInput').click());
     $('recFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) recReadFile(f); e.target.value = ''; });
     $('recPreviewExpand').addEventListener('click', openRecTableModal);
+    $('recPreview').addEventListener('click', recPreviewPickClick);
     $('recTableClose').addEventListener('click', closeRecTableModal);
     $('recTableCloseBtn').addEventListener('click', closeRecTableModal);
     $('recTableModal').addEventListener('click', e => { if (e.target === $('recTableModal')) closeRecTableModal(); });
@@ -1708,7 +1806,8 @@
       if (e.key !== 'Escape') return;
       /* 一括の確認カルーセル中は中止として扱う（ただ閉じるとOCRループが止まったままになる） */
       if (S.review && S.review.batch) { reviewCancel(); return; }
-      document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => m.classList.add('hidden'));
+      /* PDF読み込みモーダルは×以外で閉じない（誤操作でのキャンセル・読み込み直しを防ぐ） */
+      document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => { if (m.id !== 'pdfModal') m.classList.add('hidden'); });
     });
 
     /* はじめての方向けガイド（初回のみ表示・閉じたら記憶） */
@@ -1733,6 +1832,12 @@
       if (e.key === 'Enter') { e.preventDefault(); if (e.shiftKey) reviewComplete(); else reviewGo(1); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); reviewGo(-1); }
       else if (e.key === 'ArrowDown') { e.preventDefault(); reviewGo(1); }
+    });
+    /* 画像直下の読み取り結果表示も、修正に合わせて追従させる */
+    $('reviewValue').addEventListener('input', e => {
+      const rt = $('reviewReadoutText');
+      rt.textContent = e.target.value || '(空欄)';
+      rt.classList.toggle('is-empty', !e.target.value);
     });
     [['setAcceptConf', 'setValAcceptConf', 2], ['setNearExact', 'setValNearExact', 2], ['setAcceptFloor', 'setValAcceptFloor', 2], ['setMarginMin', 'setValMarginMin', 2], ['setAngleRange', 'setValAngle', 0]]
       .forEach(([sl, lb, d]) => $(sl).addEventListener('input', () => { $(lb).textContent = Number($(sl).value).toFixed(d); }));

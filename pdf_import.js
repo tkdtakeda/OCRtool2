@@ -225,7 +225,8 @@ const PdfImport = (() => {
     if (!$('pdfModal')) return;
     $('pdfClose').addEventListener('click', close);
     $('pdfCancel').addEventListener('click', close);
-    $('pdfModal').addEventListener('click', e => { if (e.target === $('pdfModal')) close(); });
+    /* 背景クリックでは閉じない（設定中に誤って外側をクリックしてキャンセルになり、
+       読み込み直しになる手間を避けるため）。閉じるのは×またはキャンセルのみ。 */
     $('pdfDpiBtns').addEventListener('click', e => {
       const b = e.target.closest('button[data-dpi]'); if (!b) return;
       dpi = clampDpi(parseInt(b.dataset.dpi, 10)); renderControls(); renderPreview();

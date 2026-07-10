@@ -660,6 +660,12 @@
       <button class="modal-close" id="reconcileClose"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="modal-bdy">
+      <div class="rec-form-row hidden" id="recFormRow">
+        <label class="rec-form-lbl"><i class="fas fa-file-invoice"></i> 対象の帳票
+          <select id="recFormFilter" class="pselect"></select>
+        </label>
+        <span class="hint-text rec-form-hint">複数の帳票の認識結果が履歴にあるため、OCR側の項目を絞り込めます。</span>
+      </div>
       <div class="rec-step-ttl">① 比較データを読み込む（貼り付け / ファイル）</div>
       <div class="rec-input-row">
         <textarea id="recPaste" class="rec-paste" placeholder="ここに Ctrl+V で貼り付け（Excel/CSV/テキスト）、または右の「ファイル選択」／ここへドロップ" spellcheck="false"></textarea>
@@ -698,6 +704,7 @@
             <span class="rec-eq">=</span>
             <label>外部側 <select id="recExtKey" class="pselect"></select></label>
           </div>
+          <div class="rec-ocr-sample" id="recOcrKeySample"></div>
         </div>
         <div class="rec-card rec-card--val">
           <div class="rec-card-ttl"><i class="fas fa-equals"></i> 値を比較する <span class="rec-badge rec-badge--opt">任意</span></div>
@@ -707,6 +714,7 @@
             <span class="rec-eq">=</span>
             <label>外部側 <select id="recExtVal" class="pselect"></select></label>
           </div>
+          <div class="rec-ocr-sample" id="recOcrValSample"></div>
           <label class="rec-check"><input type="checkbox" id="recNumeric" checked> 数値として比較（カンマ・空白・単位を無視）</label>
         </div>
       </div>
@@ -771,6 +779,10 @@
         <div class="review-img-wrap">
           <span class="review-field-name" id="reviewFieldName"></span>
           <img id="reviewCrop" class="review-crop" alt="">
+        </div>
+        <div class="review-readout">
+          <span id="reviewReadoutText" class="review-readout-text"></span>
+          <span id="reviewReadoutConf" class="conf-badge"></span>
         </div>
         <div class="review-edit">
           <label class="review-lbl">OCR結果（必要なら修正）</label>
@@ -846,6 +858,7 @@
     </div>
     <div class="cr-ftr">
       <button type="button" id="batchReview" class="btn btn-outline" style="display:none"><i class="fas fa-magnifying-glass-plus"></i> 詳細ペインで確認</button>
+      <button type="button" id="batchResume" class="btn btn-primary" style="display:none"><i class="fas fa-play"></i> 続きから実行</button>
       <button type="button" id="batchCsvDl" class="btn btn-outline"><i class="fas fa-download"></i> CSV出力</button>
       <button type="button" id="batchCsv" class="btn btn-outline"><i class="fas fa-file-csv"></i> CSVコピー</button>
       <button type="button" id="batchReconcile" class="btn btn-success"><i class="fas fa-code-compare"></i> この結果を照合する</button>

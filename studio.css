@@ -465,6 +465,10 @@
   repeating-conic-gradient(#eef2f6 0% 25%, #fff 0% 50%) 0 / 16px 16px; border: 1px solid var(--c-border-dk); border-radius: var(--r-sm); min-height: 90px; padding: 12px; }
 .review-field-name { position: absolute; top: 6px; left: 8px; font-size: .72rem; font-weight: 700; color: #fff; background: var(--c-pri); padding: 2px 9px; border-radius: 9px; }
 .review-crop { max-width: 100%; max-height: 170px; object-fit: contain; image-rendering: -webkit-optimize-contrast; }
+/* 画像のすぐ下に読み取り結果を表示（入力欄まで視線を動かさず見比べられるように） */
+.review-readout { display: flex; align-items: baseline; justify-content: center; gap: 8px; padding: 6px 4px; }
+.review-readout-text { font-family: 'IBM Plex Mono', monospace; font-size: 1.35rem; font-weight: 700; color: var(--c-text); letter-spacing: .02em; }
+.review-readout-text.is-empty { color: var(--c-text-3); font-weight: 400; font-size: .85rem; }
 .review-edit { display: flex; flex-direction: column; gap: 6px; }
 .review-lbl { font-size: .74rem; font-weight: 700; color: var(--c-text-2); }
 .review-value { padding: 10px 12px; border: 2px solid var(--c-pri-mid); border-radius: var(--r-sm); font-family: 'IBM Plex Mono', monospace; font-size: 1.1rem; color: var(--c-text); }
@@ -475,6 +479,9 @@
 
 /* ── 照合（OCR結果 × 外部データ）─────────────────────── */
 .modal--xl { width: 940px; max-width: 96vw; }
+.rec-form-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; padding: 8px 10px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); }
+.rec-form-lbl { display: flex; align-items: center; gap: 8px; font-size: .78rem; font-weight: 700; color: var(--c-text-2); white-space: nowrap; }
+.rec-form-hint { margin: 0; }
 .modal--full { width: 1240px; max-width: 96vw; }
 .rec-step-ttl { font-size: .82rem; font-weight: 700; color: var(--c-text-2); margin: 4px 0 8px; padding-bottom: 4px; border-bottom: 1px dashed var(--c-border); }
 .rec-input-row { display: grid; grid-template-columns: 1fr 240px; gap: 10px; margin-bottom: 10px; }
@@ -495,6 +502,15 @@
 .rec-tbl th { background: var(--c-surface2); position: sticky; top: 0; font-weight: 700; color: var(--c-text-2); }
 .rec-tbl td { font-family: 'IBM Plex Mono', monospace; color: var(--c-text); }
 .rec-tbl-rownum { font-family: 'IBM Plex Mono', monospace; color: var(--c-text-3); text-align: right; background: var(--c-surface2); }
+/* 比較データプレビューの列見出し: 🔑/＝ボタンでその場からキー・値を選べる */
+.rec-th-name { margin-right: 4px; }
+.rec-th-pick { width: 16px; height: 16px; border-radius: 3px; display: inline-flex; align-items: center; justify-content: center; color: var(--c-text-3); font-size: .62rem; opacity: .5; transition: opacity var(--ease), background var(--ease), color var(--ease); }
+.rec-tbl th:hover .rec-th-pick { opacity: 1; }
+.rec-th-pick--key:hover { background: var(--c-pri-lt); color: var(--c-pri-dk); }
+.rec-th-pick--val:hover { background: #FEF3C7; color: #92400E; }
+.rec-th-iskey { background: var(--c-pri-lt) !important; color: var(--c-pri-dk) !important; }
+.rec-th-isval { box-shadow: inset 0 -3px 0 #F59E0B; }
+.rec-th-iskey .rec-th-pick--key, .rec-th-isval .rec-th-pick--val { opacity: 1; }
 .rec-more { font-size: .7rem; color: var(--c-text-3); padding: 4px 2px; }
 /* 比較データの確認・整形モーダル（見出し行の選び直し・行削除） */
 .rec-tbl-hint { margin-bottom: 8px; }
@@ -526,6 +542,10 @@
 .rec-pair .pselect { width: 100%; }
 .rec-eq { font-size: .85rem; font-weight: 700; color: var(--c-text-3); padding-bottom: 6px; }
 .rec-card--val .rec-check { margin-top: 8px; }
+/* OCR側フィールドが実際にどの部分を指すか目視確認できるサンプル画像 */
+.rec-ocr-sample { margin-top: 8px; padding: 6px 8px; background: #fff; border: 1px dashed var(--c-border-dk); border-radius: var(--r-sm); min-height: 30px; display: flex; align-items: center; }
+.rec-ocr-sample-img { max-width: 100%; max-height: 46px; object-fit: contain; }
+.rec-ocr-sample-empty { font-size: .7rem; color: var(--c-text-3); }
 .rec-run-row { display: flex; justify-content: flex-end; margin-bottom: 12px; }
 .rec-summary { font-size: .82rem; color: var(--c-text-2); padding: 8px 11px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); margin-bottom: 10px; }
 .rec-result-tbl td:last-child { text-align: center; font-weight: 700; font-size: .9rem; }
@@ -535,6 +555,14 @@
 .rec-crop-cell { padding: 2px 5px; }
 .rec-crop { display: block; max-width: 240px; max-height: 42px; height: auto; border: 1px solid var(--c-border); border-radius: 3px; background: #fff; cursor: zoom-in; transition: max-height .12s ease, max-width .12s ease; }
 .rec-crop:hover { max-height: 150px; max-width: 460px; box-shadow: 0 6px 18px rgba(0, 0, 0, .28); }
+/* OCR項目ヘッダーの「キー/比較」タグ */
+.rec-th-tag { display: inline-block; font-size: .62rem; font-weight: 700; padding: 0 6px; border-radius: 7px; vertical-align: middle; }
+.rec-th-tag--key { background: var(--c-pri-lt); color: var(--c-pri-dk); }
+.rec-th-tag--val { background: #FEF3C7; color: #92400E; }
+/* 該当なし/不一致は行全体を色付けして目立たせる */
+.rec-result-tbl tr.rec-row-miss td { background: #F3F4F6; }
+.rec-result-tbl tr.rec-row-bad td { background: #FEF2F2; }
+.rec-result-tbl tr.rec-row-bad td:last-child, .rec-result-tbl tr.rec-row-miss td:last-child { font-weight: 700; }
 
 /* ── はじめての方向けガイド（オンボーディング） ───────── */
 .onboard-bar { display: flex; align-items: center; gap: 10px; padding: 8px 16px; background: linear-gradient(90deg, var(--c-pri-lt), #fff); border-bottom: 1px solid var(--c-pri-mid); font-size: .82rem; color: var(--c-text); }
