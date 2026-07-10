@@ -732,8 +732,17 @@
       <button class="modal-close" id="recTableClose"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="modal-bdy">
-      <p class="hint-text rec-tbl-hint"><i class="fas fa-circle-info"></i> 「見出し行」で選んだ行より下がデータになります（それより上の行は無視されます）。行頭の <i class="fas fa-xmark"></i> で個別に削除、または下のボタンで空白の行をまとめて削除できます。</p>
+      <p class="hint-text rec-tbl-hint"><i class="fas fa-circle-info"></i> 「見出し行」で選んだ行より下がデータになります（それより上の行は無視されます）。列数はその行のセル数で決まり、それを超える分は「余分」として右側に表示されます。行頭の <i class="fas fa-xmark"></i> で個別に削除、または下のボタンで空白の行をまとめて削除できます。</p>
       <div class="rec-tbl-toolbar">
+        <label class="rec-tbl-delim">区切り
+          <select id="recTableDelim" class="pselect">
+            <option value="auto">自動判定</option>
+            <option value="comma">カンマ ,</option>
+            <option value="tab">タブ</option>
+            <option value="space">スペース</option>
+            <option value="semicolon">セミコロン ;</option>
+          </select>
+        </label>
         <button type="button" id="recRemoveBlankRows" class="btn btn-outline btn-sm"><i class="fas fa-broom"></i> 空白の行を削除</button>
         <button type="button" id="recResetRows" class="btn btn-ghost btn-sm"><i class="fas fa-rotate-left"></i> 削除をリセット</button>
       </div>

@@ -1328,11 +1328,14 @@
     candidates.forEach(([name, ch]) => { const s = score(ch); if (s > bestScore) { bestScore = s; best = name; } });
     return best || 'space';
   }
-  function recParseText(text, delim) {
-    const lines = text.replace(/\r\n?/g, '\n').split('\n').filter(l => l.trim().length);
-    if (!lines.length) return [];
-    const d = delim === 'auto' ? recDetectDelim(lines) : delim;
-    return lines.map(l => recSplitLine(l, d));
+  function recSplitLines(text) {
+    return text.replace(/\r\n?/g, '\n').split('\n').filter(l => l.trim().length);
+  }
+  /* 行の配列を指定の区切り（'auto'可）で列分割する。同じ行数のまま区切りだけ変えられるため、
+     「テーブルで確認・整形」内で区切りパターンを変えても行の削除/見出し選択(index基準)は保たれる。 */
+  function recRowsFromLines(lines, delimSel) {
+    const delim = delimSel === 'auto' ? recDetectDelim(lines) : delimSel;
+    return { delim, rows: lines.map(l => recSplitLine(l, delim)) };
   }
   function recFill(id, opts) {
     const s = $(id); s.innerHTML = '';
@@ -1368,13 +1371,16 @@
     if (!S.rec) return;
     const text = $('recPaste').value;
     if (!text.trim()) return UI.toast('比較データを貼り付けるかファイルを読み込んでください', 'warning');
-    const rows = recParseText(text, $('recDelim').value);
-    if (!rows.length) return UI.toast('データを解析できませんでした', 'warning');
+    const lines = recSplitLines(text);
+    if (!lines.length) return UI.toast('データを解析できませんでした', 'warning');
+    const delimSel = $('recDelim').value;
+    const { delim, rows } = recRowsFromLines(lines, delimSel);
     const hasHeader = $('recHasHeader').checked;
-    /* 生の行をそのまま保持し、見出し行/削除行はここでは確定しない。
-       実ファイルは1〜数行目がタイトル等で、見出しが4行目から…ということがあるため、
-       まず「先頭の空白でない行」を暫定の見出しとし、「テーブルで確認・整形」で選び直せるようにする。 */
-    S.rec.raw = { rows, excluded: new Set(), headerIdx: hasHeader ? recFindFirstNonBlank(rows, 0) : -1 };
+    /* 生の行(lines)を保持し、区切りパターンは「テーブルで確認・整形」内でいつでも変えて
+       見比べられるようにする。見出し行/削除行もここでは確定せず、暫定で「先頭の空白でない
+       行」を見出しにし、実ファイルにありがちな「見出しが4行目から」等は同モーダルで選び
+       直せるようにする。 */
+    S.rec.raw = { lines, delimSel, delim, rows, excluded: new Set(), headerIdx: hasHeader ? recFindFirstNonBlank(rows, 0) : -1 };
     applyRecShape();
     const n = S.rec.ext.rows.length;
     UI.toast(`比較データ ${n} 行 × ${S.rec.ext.header.length} 列を読み込みました`, 'success', 2500);
@@ -1432,10 +1438,18 @@
   function renderRecTableModalBody() {
     const raw = S.rec.raw; if (!raw) return;
     const { rows, excluded, headerIdx } = raw;
+    $('recTableDelim').value = raw.delimSel;
+    /* 列数は「見出し行」に選んだ行のセル数で決める（適用時と同じ基準）。見出し未選択なら
+       除外していない行の最大セル数。それを超える分は「余分」として別枠で見える化する
+       （見出し行より列が多い行があり、適用すると末尾が捨てられることに気づけるように）。 */
+    const headerCols = headerIdx >= 0
+      ? rows[headerIdx].length
+      : rows.reduce((m, r, i) => (excluded.has(i) ? m : Math.max(m, r.length)), 0);
     const maxCols = rows.reduce((m, r) => Math.max(m, r.length), 0);
-    $('recTableCount').textContent = `(${rows.length} 行 × 最大 ${maxCols} 列)`;
-    const colHead = Array.from({ length: maxCols }, (_, i) => `<th>列${i + 1}</th>`).join('');
-    const head = `<tr><th class="rec-tbl-rownum">#</th><th class="rec-tbl-hdrcol">見出し行</th><th class="rec-tbl-delcol"></th>${colHead}</tr>`;
+    $('recTableCount').textContent = `(${rows.length} 行 × ${headerCols} 列${maxCols > headerCols ? `＋余分 最大${maxCols - headerCols}列` : ''})`;
+    const mainHead = Array.from({ length: headerCols }, (_, i) => `<th>列${i + 1}</th>`).join('');
+    const extraHead = Array.from({ length: Math.max(0, maxCols - headerCols) }, (_, i) => `<th class="rec-th-extra">余分${i + 1}</th>`).join('');
+    const head = `<tr><th class="rec-tbl-rownum">#</th><th class="rec-tbl-hdrcol">見出し行</th><th class="rec-tbl-delcol"></th>${mainHead}${extraHead}</tr>`;
     const shown = rows.slice(0, REC_TABLE_ROW_CAP);
     const body = shown.map((r, i) => {
       const cls = [
@@ -1444,15 +1458,26 @@
         recRowBlank(r) ? 'rec-row-blank' : '',
         excluded.has(i) ? 'rec-row-excluded' : '',
       ].filter(Boolean).join(' ');
-      const cells = Array.from({ length: maxCols }, (_, ci) => `<td>${recHtml(r[ci] ?? '')}</td>`).join('');
+      const mainCells = Array.from({ length: headerCols }, (_, ci) => `<td>${recHtml(r[ci] ?? '')}</td>`).join('');
+      const extraCells = Array.from({ length: Math.max(0, maxCols - headerCols) }, (_, k) => `<td class="rec-td-extra">${recHtml(r[headerCols + k] ?? '')}</td>`).join('');
       return `<tr class="${cls}" data-idx="${i}">`
         + `<td class="rec-tbl-rownum">${i + 1}</td>`
         + `<td class="rec-tbl-hdrcol"><input type="radio" name="recHeaderRadio" data-idx="${i}"${i === headerIdx ? ' checked' : ''} title="この行を見出しにする"></td>`
         + `<td class="rec-tbl-delcol"><button type="button" class="rec-row-del" data-idx="${i}" title="この行を削除"><i class="fas fa-xmark"></i></button></td>`
-        + cells + '</tr>';
+        + mainCells + extraCells + '</tr>';
     }).join('');
     $('recTableFull').innerHTML = `<table class="rec-tbl rec-edit-tbl">${head}${body}</table>`
       + (rows.length > REC_TABLE_ROW_CAP ? `<div class="rec-more">… 表示・編集は先頭 ${REC_TABLE_ROW_CAP} 行のみ（全 ${rows.length} 行）</div>` : '');
+  }
+  /* テーブル内で区切りパターンを変更 → 同じ行数のまま列だけ切り直して再描画（見出し選択・
+     削除はindex基準なので保たれる）。見出し行を変えた時に列数が追従しないという声から、
+     どちらもここで即座に反映されるようにした。 */
+  function recTableDelimChange() {
+    const raw = S.rec && S.rec.raw; if (!raw) return;
+    const delimSel = $('recTableDelim').value;
+    const { delim, rows } = recRowsFromLines(raw.lines, delimSel);
+    raw.delimSel = delimSel; raw.delim = delim; raw.rows = rows;
+    renderRecTableModalBody();
   }
   function recTableRowRadioChange(e) {
     const radio = e.target.closest('input[name="recHeaderRadio"]'); if (!radio) return;
@@ -1622,6 +1647,7 @@
     $('recResetRows').addEventListener('click', recResetRowExclusions);
     $('recTableFull').addEventListener('change', recTableRowRadioChange);
     $('recTableFull').addEventListener('click', recTableRowDelClick);
+    $('recTableDelim').addEventListener('change', recTableDelimChange);
     /* テキストエリアへファイルをドロップ */
     const rp = $('recPaste');
     rp.addEventListener('dragover', e => { if (Array.from(e.dataTransfer?.types || []).includes('Files')) { e.preventDefault(); rp.classList.add('drag-over'); } });
