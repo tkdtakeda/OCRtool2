@@ -1301,41 +1301,61 @@
     const bad = s => (s.match(/�/g) || []).length;     // 置換文字が少ない方を採用
     return bad(b) < bad(a) ? b : a;
   }
-  function recSplitLine(line, delim) {
-    if (delim === 'comma') {     // 引用符対応の簡易CSV
-      const out = []; let cur = '', q = false;
-      for (let i = 0; i < line.length; i++) {
-        const c = line[i];
-        if (q) { if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
-        else if (c === '"') q = true;
-        else if (c === ',') { out.push(cur); cur = ''; }
-        else cur += c;
-      }
-      out.push(cur); return out.map(s => s.trim());
-    }
-    if (delim === 'space') return line.trim().split(/\s+/);
-    const sep = delim === 'tab' ? '\t' : ';';
-    return line.split(sep).map(s => s.trim());
-  }
   /* 区切り文字の自動判定は1行目だけでなく複数行を見て多数決で決める。
      実ファイルはタイトル等で1行目に区切り文字が無いことがあり、1行目だけで判定すると
-     ファイル全体が誤って1列扱いになってしまうため。 */
-  function recDetectDelim(lines) {
-    const sample = lines.slice(0, 30);
+     ファイル全体が誤って1列扱いになってしまうため。判定用のサンプリングは簡易な行分割で
+     十分（多少ずれても多数決の結果への影響は軽微）。 */
+  function recDetectDelim(text) {
+    const sample = text.split('\n').filter(l => l.trim().length).slice(0, 30);
     const score = ch => sample.filter(l => l.includes(ch)).length;
     const candidates = [['tab', '\t'], ['comma', ','], ['semicolon', ';']];
     let best = null, bestScore = 0;
     candidates.forEach(([name, ch]) => { const s = score(ch); if (s > bestScore) { bestScore = s; best = name; } });
     return best || 'space';
   }
-  function recSplitLines(text) {
-    return text.replace(/\r\n?/g, '\n').split('\n').filter(l => l.trim().length);
-  }
-  /* 行の配列を指定の区切り（'auto'可）で列分割する。同じ行数のまま区切りだけ変えられるため、
-     「テーブルで確認・整形」内で区切りパターンを変えても行の削除/見出し選択(index基準)は保たれる。 */
-  function recRowsFromLines(lines, delimSel) {
-    const delim = delimSel === 'auto' ? recDetectDelim(lines) : delimSel;
-    return { delim, rows: lines.map(l => recSplitLine(l, delim)) };
+  /* テキスト全体を1回で走査し、行→セルへ分解する（引用符はRFC4180に近い扱い）。
+     「まず改行で行に割ってから列分割する」実装だと、Excel等でセル内に改行を含む値が
+     "…\n…" のように引用符で囲まれている場合、その改行で本来1行のレコードが2行に分裂し、
+     閉じ損ねた引用符が次の行のカンマ等まで1セルに巻き込んでしまう
+     （見出しが1列に潰れて見える不具合の原因だった）。改行の意味（行区切りか、引用符内の
+     値の一部か）は列区切り文字が分かっていないと判断できないため、行分割と列分割を同時に
+     1パスで行う。引用符はフィールドの先頭にある時だけ「引用開始」として扱う（フィールド
+     途中の"はただの文字）。'space' は簡易のため引用符を考慮しない従来通りの動作。 */
+  function recParseRows(text, delimSel) {
+    const norm = text.replace(/\r\n?/g, '\n');
+    const delim = delimSel === 'auto' ? recDetectDelim(norm) : delimSel;
+    if (delim === 'space') {
+      const rows = norm.split('\n').map(l => l.trim()).filter(l => l.length).map(l => l.split(/\s+/));
+      return { delim, rows };
+    }
+    const sep = delim === 'tab' ? '\t' : delim === 'semicolon' ? ';' : ',';
+    const rows = [];
+    let row = [], cur = '', q = false, sawContent = false;
+    const endRow = () => {
+      row.push(cur.trim());
+      if (sawContent) rows.push(row);           // 完全に空白だけの行は破棄（区切り文字があれば「空白の行」として残す）
+      row = []; cur = ''; sawContent = false;
+    };
+    for (let i = 0; i < norm.length; i++) {
+      const c = norm[i];
+      if (q) {
+        sawContent = true;
+        if (c === '"') { if (norm[i + 1] === '"') { cur += '"'; i++; } else q = false; }
+        else cur += c;
+      } else if (c === '"' && cur === '') {
+        q = true; sawContent = true;
+      } else if (c === sep) {
+        sawContent = true;
+        row.push(cur.trim()); cur = '';
+      } else if (c === '\n') {
+        endRow();
+      } else {
+        if (!/\s/.test(c)) sawContent = true;
+        cur += c;
+      }
+    }
+    endRow();   // 末尾に改行が無い最終行を確定
+    return { delim, rows };
   }
   function recFill(id, opts) {
     const s = $(id); s.innerHTML = '';
@@ -1371,16 +1391,15 @@
     if (!S.rec) return;
     const text = $('recPaste').value;
     if (!text.trim()) return UI.toast('比較データを貼り付けるかファイルを読み込んでください', 'warning');
-    const lines = recSplitLines(text);
-    if (!lines.length) return UI.toast('データを解析できませんでした', 'warning');
     const delimSel = $('recDelim').value;
-    const { delim, rows } = recRowsFromLines(lines, delimSel);
+    const { delim, rows } = recParseRows(text, delimSel);
+    if (!rows.length) return UI.toast('データを解析できませんでした', 'warning');
     const hasHeader = $('recHasHeader').checked;
-    /* 生の行(lines)を保持し、区切りパターンは「テーブルで確認・整形」内でいつでも変えて
+    /* 生のテキストを保持し、区切りパターンは「テーブルで確認・整形」内でいつでも変えて
        見比べられるようにする。見出し行/削除行もここでは確定せず、暫定で「先頭の空白でない
        行」を見出しにし、実ファイルにありがちな「見出しが4行目から」等は同モーダルで選び
        直せるようにする。 */
-    S.rec.raw = { lines, delimSel, delim, rows, excluded: new Set(), headerIdx: hasHeader ? recFindFirstNonBlank(rows, 0) : -1 };
+    S.rec.raw = { text, delimSel, delim, rows, excluded: new Set(), headerIdx: hasHeader ? recFindFirstNonBlank(rows, 0) : -1 };
     applyRecShape();
     const n = S.rec.ext.rows.length;
     UI.toast(`比較データ ${n} 行 × ${S.rec.ext.header.length} 列を読み込みました`, 'success', 2500);
@@ -1475,7 +1494,10 @@
   function recTableDelimChange() {
     const raw = S.rec && S.rec.raw; if (!raw) return;
     const delimSel = $('recTableDelim').value;
-    const { delim, rows } = recRowsFromLines(raw.lines, delimSel);
+    const { delim, rows } = recParseRows(raw.text, delimSel);
+    /* 引用符付きセル内の改行の扱いにより、ごく稀に区切りを変えると行数自体が変わることが
+       ある。その場合は行削除/見出し選択のindexが無意味になるためリセットする。 */
+    if (rows.length !== raw.rows.length) { raw.excluded = new Set(); raw.headerIdx = -1; }
     raw.delimSel = delimSel; raw.delim = delim; raw.rows = rows;
     renderRecTableModalBody();
   }
