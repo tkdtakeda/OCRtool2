@@ -972,8 +972,9 @@
         const t1 = performance.now();
         const r = await ocrPageForBatch(canvas, p, forcedFormId);
         /* どこで時間が掛かっているか比較できるよう、ページごとの内訳をコンソールに出す
-           （ラスタライズ=PDF描画、以降はocrPageForBatch内で計測してconsole出力済み）。 */
-        console.log(`[perf] p${p} rasterize=${(t1 - t0).toFixed(0)}ms`);
+           （ラスタライズ=PDF描画、以降はocrPageForBatch内で計測してconsole出力済み）。
+           hidden=true が長い区間はタブがバックグラウンドだった可能性が高い。 */
+        console.log(`[perf] p${p} rasterize=${(t1 - t0).toFixed(0)}ms hidden=${document.hidden}`);
         return r;
       })();
       entry.promise.then(() => { entry.ready = true; }, () => { entry.ready = true; });
@@ -983,6 +984,10 @@
     const batchStartTime = Date.now();
     /* idx件処理済み時点での「残り推定時間」の文字列（実測が無い最初の1件目は算出不可） */
     const etaText = idx => idx < 1 ? '' : `（残り約${formatDuration((Date.now() - batchStartTime) / idx * (total - idx))}）`;
+    /* タブを離れて放置した場合にChromeのバックグラウンドタイマー間引きが起きていないか
+       ログで裏付けられるよう、一括処理中だけ可視状態の変化を記録する。 */
+    const onVisChange = () => console.log(`[perf] visibilitychange hidden=${document.hidden} at ${Date.now() - batchStartTime}ms`);
+    document.addEventListener('visibilitychange', onVisChange);
 
     let cur = ocrAt(0);                          // 先頭ページのOCRを先行開始
     try {
@@ -993,7 +998,11 @@
           const msg = `ページ ${p}（${idx + 1}/${total}）を認識中…${etaText(idx)}`;
           if (review) { reviewBatchBusy(true); reviewBatchProgress(msg, pct); }
           else UI.updateBatchProgress(msg, pct);
-          await new Promise(r => setTimeout(r, 5));   // 進捗描画・中止受付の隙間
+          /* 進捗描画・中止受付の隙間は、直後の await cur.promise（未解決＝必ず一度サスペンドする）
+             が既に与えてくれるため、ここで独自に setTimeout は挟まない。
+             タブがバックグラウンドで非表示になるとChromeのタイマー間引き（Intensive
+             Throttling）でsetTimeoutが最大1分/回まで遅延することがあり、一括処理を
+             放置した際に毎ページこの遅延を踏んで極端に遅くなる原因になり得るため。 */
         }
         const r = await cur.promise;
         const nextEntry = ocrAt(idx + 1);        // ★先読み: 確認している間に次ページを裏でOCR
@@ -1008,7 +1017,10 @@
         results.push(r);
         cur = nextEntry;
       }
-    } finally { /* 詳細ペインでのページ送り用に PDF を保持するため、ここでは破棄しない */ }
+    } finally {
+      document.removeEventListener('visibilitychange', onVisChange);
+      /* 詳細ペインでのページ送り用に PDF を保持するため、ここでは破棄しない */
+    }
     if (review) reviewBatchClose();              // 確認カルーセルを閉じてからサマリを出す（重なり防止）
     S.batchReviewActive = false;
     const combined = priorResults.concat(results);   // 「続きから実行」の場合は前回分と合算
