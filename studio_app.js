@@ -894,15 +894,19 @@
      確認カルーセルで修正してから保存できるよう、保存用の材料を _save に持たせて返す。 */
   async function ocrPageForBatch(canvas, page, forcedFormId) {
     const thumb = thumbURL(canvas, 120);
+    const t0 = performance.now();
     try {
       const { decision, scores } = await Recognizer.classify(canvas, S.forms, classifyOpts());
+      const t1 = performance.now();
       const candId = decision.best && decision.best.formId;
       const useId = forcedFormId || candId;
       const form = useId ? S.forms.find(f => f.id === useId) : null;
-      if (!form) return { page, decision: decision.decision, formName: '—', fields: [], thumb };
+      if (!form) { console.log(`[perf] p${page} classify=${(t1 - t0).toFixed(0)}ms（帳票不一致）`); return { page, decision: decision.decision, formName: '—', fields: [], thumb }; }
       /* 表示用の判定ラベル: 手動指定=指定どおり採用 / 自動=本来の判定を踏襲 */
       const verdict = forcedFormId ? 'accepted' : decision.decision;
       const res = await Recognizer.runOcr(canvas, form, bestAnchorFor(form, scores), {}, {});
+      const t2 = performance.now();
+      console.log(`[perf] p${page} classify=${(t1 - t0).toFixed(0)}ms runOcr=${(t2 - t1).toFixed(0)}ms total=${(t2 - t0).toFixed(0)}ms fields=${res.fields.length}`);
       if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
       LineRemovalProcessor.cleanupMats(res.previewMats);
       const manual = forcedFormId ? true : !(candId === form.id);
@@ -961,10 +965,16 @@
       const forcedFormId = src.formFor ? src.formFor(p) : '';
       const entry = { page: p, ready: false };
       entry.promise = (async () => {
+        const t0 = performance.now();
         let canvas;
         try { canvas = await src.getPage(p); }
         catch (_) { return { page: p, decision: 'error', formName: '—', error: 'ページ描画に失敗', thumb: '' }; }
-        return await ocrPageForBatch(canvas, p, forcedFormId);
+        const t1 = performance.now();
+        const r = await ocrPageForBatch(canvas, p, forcedFormId);
+        /* どこで時間が掛かっているか比較できるよう、ページごとの内訳をコンソールに出す
+           （ラスタライズ=PDF描画、以降はocrPageForBatch内で計測してconsole出力済み）。 */
+        console.log(`[perf] p${p} rasterize=${(t1 - t0).toFixed(0)}ms`);
+        return r;
       })();
       entry.promise.then(() => { entry.ready = true; }, () => { entry.ready = true; });
       return entry;

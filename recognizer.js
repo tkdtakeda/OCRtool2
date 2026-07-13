@@ -163,11 +163,13 @@ const Recognizer = (() => {
    */
   async function prepare(sourceCanvas, form, matchInfo, cb = {}) {
     const stage = (name, pct) => cb.onStage && cb.onStage(name, pct);
+    const tPrepStart = performance.now();
 
     /* ③ 傾き補正 */
     stage('傾き補正', 0.1);
     const angle = matchInfo.angle || 0;
     const rotated = LineRemovalProcessor.rotateCanvas(sourceCanvas, angle);
+    const tRotate = performance.now();
 
     /* ④ 原点の再ローカライズ: 全アンカーを角度固定で再マッチ → 相似変換を推定
        （複数アンカーが取れればスケール=拡大率と位置ずれを同時に補正） */
@@ -196,11 +198,14 @@ const Recognizer = (() => {
     if (good.length >= 1)        transform = estimateTransform(good);
     else if (allMatches.length)  transform = estimateTransform([allMatches[0]]);
     else                         transform = { sx: 1, sy: 1, tx: 0, ty: 0, n: 0 };
+    const tLocalize = performance.now();
 
     /* ⑤ 罫線除去（登録された罫線除去パラメータを引き継ぎ） */
     stage('罫線除去', 0.45);
     const params = form.lineRemoval || LineRemovalProcessor.defaultParams();
     const proc   = LineRemovalProcessor.process(rotated, params);
+    const tLineRemoval = performance.now();
+    console.log(`[perf]   prepare: rotate=${(tRotate - tPrepStart).toFixed(0)}ms localize(anchor${anchors.length})=${(tLocalize - tRotate).toFixed(0)}ms lineRemoval=${(tLineRemoval - tLocalize).toFixed(0)}ms`);
     if (proc.error) {
       LineRemovalProcessor.cleanupMats(proc.mats);
       return { angle, transform, resultCanvas: null, previewMats: [], error: proc.error };
@@ -253,9 +258,13 @@ const Recognizer = (() => {
         fields[i] = { name: region.name, text: '', confidence: 0, error: '領域の切り出しに失敗しました' };
         continue;
       }
+      const tFieldStart = performance.now();
       const res = await OcrProcessor.recognize(upscaleForOcr(cropCanvas), psm, prog => {
         cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
       }, useLang, useWl);
+      /* 言語がページ間・領域間で切り替わるとTesseractの言語データ再読み込みが走り
+         大幅に遅くなることがあるため、領域ごとの所要時間と使用言語を記録する。 */
+      console.log(`[perf]   OCR "${region.name}" lang=${useLang} ${(performance.now() - tFieldStart).toFixed(0)}ms`);
       let text = (res.fullText || '').trim();
       if (doNorm) text = OcrProcessor.normalize(text);
       if (doKanji) text = OcrProcessor.kanjiToNum(text);

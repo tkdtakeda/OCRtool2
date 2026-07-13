@@ -31,6 +31,10 @@ const OcrProcessor = (() => {
   async function ensureWorker(lang) {
     const want = lang || 'eng';
     if (_ready && _lang === want) return;
+    /* 言語切り替え（例: 英数字欄=eng ⇔ 氏名・住所欄=jpn）は言語データの再読み込みが
+       走り、体感できるほど遅くなることがあるため、切り替えの発生と所要時間を記録する。 */
+    const t0 = performance.now();
+    const wasReady = _ready, prevLang = _lang;
     if (!_worker) {
       _worker = await Tesseract.createWorker({
         ...CDN,
@@ -42,6 +46,7 @@ const OcrProcessor = (() => {
     await _worker.initialize(want);
     _lang  = want;
     _ready = true;
+    console.log(`[perf]   ${wasReady ? '言語切替' : 'Worker初期化'} ${wasReady ? prevLang : '(初回)'}→${want} ${(performance.now() - t0).toFixed(0)}ms`);
   }
 
   function toJa(raw) {
