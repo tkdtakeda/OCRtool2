@@ -255,7 +255,7 @@ const Recognizer = (() => {
       stage(`OCR ${oi + 1}/${regions.length}`, 0.55 + 0.4 * (oi / Math.max(1, regions.length)));
       const cropCanvas = LineRemovalProcessor.extractRect(resultCanvas, mapRect(region, transform));
       if (!cropCanvas) {
-        fields[i] = { name: region.name, text: '', confidence: 0, error: '領域の切り出しに失敗しました' };
+        fields[i] = { name: region.name, globalName: region.globalName || region.name, text: '', confidence: 0, error: '領域の切り出しに失敗しました' };
         continue;
       }
       const tFieldStart = performance.now();
@@ -277,6 +277,7 @@ const Recognizer = (() => {
       const conf = valueConfidence(text, res.symbols, confOf(res));
       fields[i] = {
         name: region.name,
+        globalName: region.globalName || region.name,
         text,
         raw,
         confidence: conf,

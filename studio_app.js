@@ -23,6 +23,7 @@
     /* 描画 */
     drawMode: 'anchor', zoom: 1, baseScale: 1,
     isDrawing: false, ds: { x: 0, y: 0 }, dc: { x: 0, y: 0 }, pending: null,
+    repositioning: null,   // 登録済みアンカー/OCR領域の範囲を描き直し中: { kind:'anchor'|'region', id }
     /* 認識 */
     recogCanvas: null, lastClassify: null,
     recogFormId: null, recogMatchInfo: null, recogResult: null, rrZoom: 1,
@@ -107,16 +108,18 @@
     S.editingId = null; S.isSampleForm = false;
     S.refImg = null; S.refNatW = 0; S.refNatH = 0; S.refDataURL = null;
     S.anchors = []; S.regions = []; S.pending = null; S.zoom = 1; S.drawMode = 'anchor';
+    S.repositioning = null;
     $('formNameInput').value = '';
     $('refPreview').style.display = 'none'; $('refDropHint').style.display = 'flex';
     $('rectNameInput').value = '';
     applyLineRemovalToUI(LineRemovalProcessor.defaultParams());
     $('regPsm').value = '7'; $('regLang').value = 'eng'; $('regWhitelist').value = ''; $('regNormalize').checked = true; $('regNormalizeKanji').checked = false;
     setDrawMode('anchor');
+    updateRepositionBanner();
     $('regCanvas').style.display = 'none'; $('regCanvasPlaceholder').style.display = 'flex';
     $('editorEmpty').classList.add('hidden'); $('editorForm').classList.remove('hidden');
-    UI.renderAnchorList(S.anchors, removeAnchor);
-    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
+    UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
     refreshSteps();
     setTimeout(() => $('formNameInput').focus(), 50);
   }
@@ -127,14 +130,15 @@
     $('formNameInput').value = f.name || '';
     S.anchors = (f.anchors || []).map(a => ({ ...a }));
     S.regions = (f.ocrRegions || []).map(r => ({ ...r }));
-    S.zoom = 1; S.pending = null;
+    S.zoom = 1; S.pending = null; S.repositioning = null;
     applyLineRemovalToUI(f.lineRemoval || LineRemovalProcessor.defaultParams());
     $('regPsm').value = String(f.ocrSettings?.psm ?? 7); $('regLang').value = f.ocrSettings?.lang || 'eng';
     $('regWhitelist').value = f.ocrSettings?.whitelist || ''; $('regNormalize').checked = f.ocrSettings?.normalize !== false; $('regNormalizeKanji').checked = !!f.ocrSettings?.normalizeKanji;
     $('editorEmpty').classList.add('hidden'); $('editorForm').classList.remove('hidden');
     setDrawMode('anchor');
-    UI.renderAnchorList(S.anchors, removeAnchor);
-    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
+    updateRepositionBanner();
+    UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
     await setReference(f.referenceImage.dataURL);
     refreshSteps();
   }
@@ -239,31 +243,74 @@
     if (!S.pending) { UI.toast('先に画像上でドラッグして範囲を指定してください', 'warning'); return; }
     const name = $('rectNameInput').value.trim();
     if (!name) { UI.toast('名前を入力してください', 'warning'); $('rectNameInput').focus(); return; }
-    if (S.drawMode === 'anchor') {
+    const p = S.pending;
+    const repos = S.repositioning;
+    if (repos && repos.kind === 'anchor') {
+      /* 登録済みアンカーの範囲を描き直し：id・他の設定はそのまま、座標と切り出し画像だけ更新 */
+      const a = S.anchors.find(x => x.id === repos.id);
+      if (a) {
+        const crop = document.createElement('canvas'); crop.width = p.w; crop.height = p.h;
+        crop.getContext('2d').drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
+        Object.assign(a, { name, dataURL: crop.toDataURL('image/png'), w: p.w, h: p.h, refX: p.x, refY: p.y });
+      }
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+    } else if (repos && repos.kind === 'region') {
+      const r = S.regions.find(x => x.id === repos.id);
+      if (r) Object.assign(r, { name, x: p.x, y: p.y, w: p.w, h: p.h });
+      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
+    } else if (S.drawMode === 'anchor') {
       /* 基準画像から切り出してアンカー画像を生成 */
-      const p = S.pending;
       const crop = document.createElement('canvas'); crop.width = p.w; crop.height = p.h;
       crop.getContext('2d').drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
       S.anchors.push({ id: uid(), name, dataURL: crop.toDataURL('image/png'), w: p.w, h: p.h, refX: p.x, refY: p.y });
-      UI.renderAnchorList(S.anchors, removeAnchor);
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
     } else {
-      const p = S.pending;
       S.regions.push({ id: uid(), name, x: p.x, y: p.y, w: p.w, h: p.h });
-      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
+      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
     }
-    S.pending = null; $('rectNameInput').value = ''; $('btnAddRect').disabled = true;
+    S.repositioning = null; S.pending = null; $('rectNameInput').value = ''; $('btnAddRect').disabled = true;
+    updateRepositionBanner();
     redrawRegCanvas(); refreshSteps();
-    UI.toast(`「${name}」を追加しました`, 'success', 1600);
+    UI.toast(repos ? `「${name}」の範囲を更新しました` : `「${name}」を追加しました`, 'success', 1600);
   }
-  function removeAnchor(id) { S.anchors = S.anchors.filter(a => a.id !== id); UI.renderAnchorList(S.anchors, removeAnchor); redrawRegCanvas(); refreshSteps(); }
-  function removeRegion(id) { S.regions = S.regions.filter(r => r.id !== id); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor); redrawRegCanvas(); refreshSteps(); }
+  function removeAnchor(id) { S.anchors = S.anchors.filter(a => a.id !== id); UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor); redrawRegCanvas(); refreshSteps(); }
+  function removeRegion(id) { S.regions = S.regions.filter(r => r.id !== id); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName); redrawRegCanvas(); refreshSteps(); }
   function setRegionPattern(id, val) { const r = S.regions.find(x => x.id === id); if (r) r.pattern = (val || '').trim(); }
+  function setRegionGlobalName(id, val) { const r = S.regions.find(x => x.id === id); if (r) r.globalName = (val || '').trim(); }
+  function renameAnchor(id, name) { const a = S.anchors.find(x => x.id === id); if (a) { a.name = name; redrawRegCanvas(); } }
+  function renameRegion(id, name) { const r = S.regions.find(x => x.id === id); if (r) { r.name = name; redrawRegCanvas(); } }
   function openRegionConstraintEditor(id) {
     const r = S.regions.find(x => x.id === id); if (!r) return;
     CharRuleEditor.open(r.name, r.charRule || r.constraint, rule => {
       r.charRule = rule; delete r.constraint;   // 旧形式(文字列)は新形式へ移行
-      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
+      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
     });
+  }
+  /* ── 登録済みアンカー/OCR領域の位置を描き直す ─────────
+     「範囲を描き直す」ボタン押下→次の1回のドラッグを、新規追加ではなく
+     対象の座標更新として扱う。名前欄は現在の名前を保持（そのままドラッグすれば
+     名前は変わらず、書き換えれば改名も同時にできる）。 */
+  function startReposition(kind, id) {
+    const list = kind === 'anchor' ? S.anchors : S.regions;
+    const item = list.find(x => x.id === id); if (!item) return;
+    S.repositioning = { kind, id };
+    setDrawMode(kind === 'anchor' ? 'anchor' : 'ocr');
+    $('rectNameInput').value = item.name;
+    updateRepositionBanner();
+    UI.toast(`「${item.name}」の新しい範囲を画像上でドラッグしてください`, 'info', 3500);
+  }
+  function startRepositionAnchor(id) { startReposition('anchor', id); }
+  function startRepositionRegion(id) { startReposition('region', id); }
+  function cancelReposition() {
+    if (!S.repositioning) return;
+    S.repositioning = null; S.pending = null; $('rectNameInput').value = ''; $('btnAddRect').disabled = true;
+    updateRepositionBanner(); redrawRegCanvas();
+  }
+  function updateRepositionBanner() {
+    const b = $('repositionBanner'); if (!b) return;
+    const active = !!S.repositioning;
+    b.classList.toggle('hidden', !active);
+    if (active) $('repositionBannerText').textContent = `「${$('rectNameInput').value}」の位置を再設定中：画像上でドラッグしてください`;
   }
 
   /* ── 別画像から識別アンカーを自動配置 ───────────────── */
@@ -279,7 +326,7 @@
       const name = prompt('識別アンカー名を入力', `アンカー${S.anchors.length + 1}`);
       if (name === null) return;
       S.anchors.push({ id: uid(), name: (name || 'アンカー').trim(), dataURL, w: img.naturalWidth, h: img.naturalHeight, refX: r.loc.x, refY: r.loc.y });
-      UI.renderAnchorList(S.anchors, removeAnchor); redrawRegCanvas(); refreshSteps();
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor); redrawRegCanvas(); refreshSteps();
       UI.toast(`自動配置しました（スコア ${r.score.toFixed(2)}, 位置 ${r.loc.x},${r.loc.y}）`, 'success', 3500);
     } catch (e) { UI.toast('処理に失敗しました: ' + e.message, 'error'); }
   }
@@ -386,7 +433,7 @@
         S.regions = f.ocrRegions.map(r => ({ ...r, id: uid() }));
         $('formNameInput').value = f.name;
         applyLineRemovalToUI(f.lineRemoval); $('regPsm').value = String(f.ocrSettings.psm);
-        UI.renderAnchorList(S.anchors, removeAnchor); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
+        UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
         await setReference(f.referenceImage.dataURL);
         UI.toast('サンプルレイアウトを読み込みました。確認して保存してください', 'info', 4000);
       });
@@ -850,7 +897,7 @@
     result.fields.forEach((f, i) => { ocrValues[f.name || ('OCR' + (i + 1))] = f.text || ''; });
     /* 各フィールドの切り出し画像を縮小JPEGで保持（照合での見比べ用）。OCR時に生成済みなので再計算は不要 */
     const fields = await Promise.all(result.fields.map(async f => ({
-      name: f.name, text: f.text, confidence: f.confidence, error: f.error || null,
+      name: f.name, globalName: f.globalName || f.name, text: f.text, confidence: f.confidence, error: f.error || null,
       crop: await shrinkDataURL(f.cropDataURL),
     })));
     return {
@@ -1500,9 +1547,17 @@
   function recRebuildOcrSide(formId) {
     const rows = formId ? S.rec.allRows.filter(r => (r.formId || '') === formId) : S.rec.allRows;
     const cols = [];
-    rows.forEach(r => (r.fields || []).forEach(f => { if (f.name && !cols.includes(f.name)) cols.push(f.name); }));
+    /* 複数帳票をまたいだ照合キーの統一のため、帳票固有の項目名(name)ではなく
+       帳票編集で設定できる共通名(globalName)を列のキーにする
+       （共通名未設定ならnameをそのまま使うので、単一帳票では従来どおりの挙動）。 */
+    const keyOf = f => f.globalName || f.name;
+    rows.forEach(r => (r.fields || []).forEach(f => { const key = keyOf(f); if (key && !cols.includes(key)) cols.push(key); }));
     S.rec.formId = formId;
-    S.rec.ocr = rows.map(r => { const values = {}, crops = {}; (r.fields || []).forEach(f => { values[f.name] = f.text || ''; if (f.crop) crops[f.name] = f.crop; }); return { page: r.page || 1, formName: r.formName || '', values, crops, raw: r }; });
+    S.rec.ocr = rows.map(r => {
+      const values = {}, crops = {};
+      (r.fields || []).forEach(f => { const key = keyOf(f); if (!key) return; values[key] = f.text || ''; if (f.crop) crops[key] = f.crop; });
+      return { page: r.page || 1, formName: r.formName || '', values, crops, raw: r };
+    });
     S.rec.ocrCols = cols;
     const ocrOpts = ['ページ', '帳票', ...cols];
     recFill('recOcrKey', ocrOpts);
@@ -1535,7 +1590,7 @@
       row.classList.remove('hidden');
       sel.innerHTML = '';
       forms.forEach(f => { const o = document.createElement('option'); o.value = f.id; o.textContent = `${f.name}（${f.count}件）`; sel.appendChild(o); });
-      const allOpt = document.createElement('option'); allOpt.value = ''; allOpt.textContent = `すべての帳票（${rows.length}件・項目名が混在します）`;
+      const allOpt = document.createElement('option'); allOpt.value = ''; allOpt.textContent = `すべての帳票（${rows.length}件・共通名(任意)を設定した項目はまとめて照合できます）`;
       sel.appendChild(allOpt);
       sel.value = forms[0].id;   // 既定は最新の結果が属する帳票（rowsは新しい順）
     } else {
@@ -1795,9 +1850,12 @@
   function recPersistOcrValueFix(ocrIdx, name, newVal) {
     const entry = S.rec.ocr[ocrIdx]; if (!entry || !entry.raw) return;
     const raw = entry.raw;
-    const f = (raw.fields || []).find(x => x.name === name);
-    if (f) f.text = newVal;
-    if (raw.ocrValues) raw.ocrValues[name] = newVal;
+    /* nameは共通名(globalName)の場合があるため、globalName優先→帳票固有名の順で対象欄を探す */
+    const f = (raw.fields || []).find(x => (x.globalName || x.name) === name);
+    if (f) {
+      f.text = newVal;
+      if (raw.ocrValues) raw.ocrValues[f.name] = newVal;
+    }
     FormDB.putResult(raw).then(refreshHistory).catch(() => {});
   }
   function recResultValueChange(e) {
@@ -1929,8 +1987,12 @@
     $('regBinaryMethod').addEventListener('change', updateBinaryRows);
 
     /* 描画 */
-    document.querySelectorAll('#drawModeSwitch .dm-btn').forEach(b => b.addEventListener('click', () => setDrawMode(b.dataset.dm)));
+    document.querySelectorAll('#drawModeSwitch .dm-btn').forEach(b => b.addEventListener('click', () => {
+      if (S.repositioning) cancelReposition();   // モードを手動で切り替えたら描き直し待ちは解除する
+      setDrawMode(b.dataset.dm);
+    }));
     $('rectNameInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commitPending(); } });
+    $('repositionCancelBtn').addEventListener('click', cancelReposition);
     $('btnAddRect').addEventListener('click', commitPending);
     $('btnZoomIn').addEventListener('click', () => { S.zoom = Math.min(8, S.zoom * 1.3); redrawRegCanvas(); $('zoomLabel').textContent = Math.round(activeScale() * 100) + '%'; });
     $('btnZoomOut').addEventListener('click', () => { S.zoom = Math.max(0.2, S.zoom / 1.3); redrawRegCanvas(); $('zoomLabel').textContent = Math.round(activeScale() * 100) + '%'; });
@@ -2040,6 +2102,8 @@
         e.preventDefault(); reviewTrustRestAndReconcile(); return;
       }
       if (e.key !== 'Escape') return;
+      /* アンカー/OCR領域の位置描き直し待ち中はそれを優先してキャンセル */
+      if (S.repositioning) { cancelReposition(); return; }
       /* 一括の確認カルーセル中は中止として扱う（ただ閉じるとOCRループが止まったままになる） */
       if (S.review && S.review.batch) { reviewCancel(); return; }
       /* PDF読み込みモーダルは×以外で閉じない（誤操作でのキャンセル・読み込み直しを防ぐ） */

@@ -209,6 +209,11 @@
               <button id="btnZoomFit" class="btn btn-ghost btn-sm" title="フィット"><i class="fas fa-compress"></i></button>
             </div>
           </div>
+          <div class="reposition-banner hidden" id="repositionBanner">
+            <i class="fas fa-vector-square"></i>
+            <span id="repositionBannerText"></span>
+            <button type="button" class="reposition-banner-cancel" id="repositionCancelBtn">キャンセル</button>
+          </div>
           <div class="reg-name-row">
             <input type="text" id="rectNameInput" class="cs-name-input" placeholder="矩形を描いてから名前を入力（先入力も可）" autocomplete="off">
             <button id="btnAddRect" class="btn btn-primary btn-sm" disabled><i class="fas fa-check"></i> 追加</button>
@@ -621,8 +626,8 @@
         <span class="pdf-ctl-lbl"><i class="fas fa-gauge-high"></i> 解像度（DPI）</span>
         <div class="pdf-dpi-btns" id="pdfDpiBtns">
           <button type="button" data-dpi="100"><b>100</b><small>速い</small></button>
-          <button type="button" data-dpi="150"><b>150</b><small>推奨</small></button>
-          <button type="button" data-dpi="200"><b>200</b><small>高精度</small></button>
+          <button type="button" data-dpi="150"><b>150</b><small>標準</small></button>
+          <button type="button" data-dpi="200"><b>200</b><small>推奨</small></button>
           <button type="button" data-dpi="300"><b>300</b><small>最高・重い</small></button>
         </div>
       </div>
@@ -642,7 +647,7 @@
         <p class="pdf-assign-hint">「ページ 1–3 → 帳票A、4–6 → 帳票B」のように指定できます。<b>自動判定</b>はページごとに帳票を推定（要確認でも停止せずOCR）。重なった範囲は後の行が優先。</p>
         <label class="recog-review-toggle pdf-review-toggle"><input type="checkbox" id="pdfBatchReview"><span><i class="fas fa-clipboard-check"></i> OCR中に <b>1ページずつ写真と見比べて確認</b>する（カルーセル）</span></label>
       </div>
-      <p class="hint-text">DPIが高いほど文字は鮮明になり認識精度が上がりますが、処理は重くなります。迷ったら<b>150（推奨）</b>。複数ページは範囲を指定して一括OCRできます。</p>
+      <p class="hint-text">DPIが高いほど文字は鮮明になり認識精度が上がりますが、処理は重くなります。150では文字が潰れて読めないことがあるため、迷ったら<b>200（推奨）</b>。複数ページは範囲を指定して一括OCRできます。</p>
     </div>
     <div class="cr-ftr">
       <button type="button" id="pdfCancel" class="btn btn-ghost">キャンセル</button>

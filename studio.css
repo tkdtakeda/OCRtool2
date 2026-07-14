@@ -97,6 +97,12 @@
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 .dot-anchor { background: var(--c-anchor); }
 .dot-ocr { background: var(--c-ocr2); }
+/* 既存アンカー/OCR領域の「位置を描き直す」実行中バナー */
+.reposition-banner { display: flex; align-items: center; gap: 8px; padding: 6px 10px; margin: 0 0 8px; border-radius: var(--r-sm); background: #FEF3E2; border: 1px solid #F5CB8B; color: var(--c-warn); font-size: .78rem; }
+.reposition-banner.hidden { display: none; }
+.reposition-banner i { flex-shrink: 0; }
+.reposition-banner-cancel { margin-left: auto; padding: 3px 10px; border-radius: var(--r-sm); background: #fff; border: 1px solid #F5CB8B; font-size: .74rem; color: var(--c-warn); font-weight: 700; }
+.reposition-banner-cancel:hover { background: #FEF3E2; }
 .canvas-zoom { display: flex; align-items: center; gap: 4px; }
 .zoom-label { font-family: 'IBM Plex Mono', monospace; font-size: .72rem; color: var(--c-text-3); min-width: 40px; text-align: center; }
 
@@ -120,13 +126,20 @@
 .mini-empty { font-size: .72rem; color: var(--c-text-3); padding: 6px; text-align: center; }
 .mini-item { display: flex; align-items: center; gap: 7px; padding: 5px 7px; border: 1px solid var(--c-border); border-radius: var(--r-sm); background: var(--c-surface2); }
 .mini-item .midx { width: 16px; height: 16px; border-radius: 4px; color: #fff; font-size: .6rem; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; font-family: 'IBM Plex Mono', monospace; }
-.mini-item .mname { flex: 1; font-size: .76rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mini-item .mpos { font-size: .63rem; color: var(--c-text-3); font-family: 'IBM Plex Mono', monospace; }
 .mini-item .mthumb { width: 30px; height: 22px; object-fit: contain; border: 1px solid var(--c-border); border-radius: 2px; background: #fff; }
+/* 名前をその場で書き換えられるように、表示名をinput化（未編集時は地の文のように見せる） */
+.mini-item .mname-edit { flex: 1; min-width: 0; font-size: .76rem; padding: 3px 5px; border: 1px solid transparent; border-radius: var(--r-sm); background: transparent; color: var(--c-text); font-family: inherit; }
+.mini-item .mname-edit:hover { border-color: var(--c-border); }
+.mini-item .mname-edit:focus { outline: none; border-color: var(--c-pri); background: #fff; box-shadow: 0 0 0 2px var(--c-pri-lt); }
+/* 「削除」と紛らわしくならないよう、再設定ボタンは危険色ではなくプライマリ色でホバー */
+.mini-reposition:hover { background: var(--c-pri-lt); color: var(--c-pri); }
 .mini-region { display: flex; flex-direction: column; gap: 3px; }
 .mini-pattern { width: 100%; padding: 3px 7px; border: 1px solid var(--c-border); border-radius: var(--r-sm); font-family: 'IBM Plex Mono', monospace; font-size: .68rem; color: var(--c-text); background: #fff; }
 .mini-pattern:focus { outline: none; border-color: var(--c-pri); box-shadow: 0 0 0 2px var(--c-pri-lt); }
 .mini-pattern::placeholder { color: var(--c-text-3); }
+.mini-globalname { border-style: dashed; }
+.mini-globalname:not(:placeholder-shown) { border-style: solid; border-color: var(--c-pri-mid); background: var(--c-pri-lt); }
 
 /* 領域リスト内「文字制約」ボタン */
 .mini-cons { width: 100%; display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--c-border); border-left: 3px solid var(--c-border-dk); border-radius: var(--r-sm); background: #fff; font-size: .68rem; color: var(--c-text-2); cursor: pointer; text-align: left; transition: background var(--ease), border-color var(--ease); }

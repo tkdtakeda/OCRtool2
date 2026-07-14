@@ -15,7 +15,7 @@ const PdfImport = (() => {
   const PDFJS_VER  = '3.11.174';
   const WORKER_SRC = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/build/pdf.worker.min.js`;
   const LS_KEY = 'ocrtool_pdf_dpi';
-  const DEFAULT_DPI = 150;
+  const DEFAULT_DPI = 200;
 
   let doc = null, numPages = 0, curPage = 1, dpi = DEFAULT_DPI, fileName = '', onCanvasCb = null, onBatchCb = null, allowBatch = false, busy = false;
   let getFormsFn = null;          // 帳票一覧の取得関数（一括の帳票割り当て用）

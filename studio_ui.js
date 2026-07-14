@@ -61,7 +61,9 @@ const StudioUI = (() => {
   }
 
   /* ── 識別アンカー / OCR領域 ミニリスト ──────────────── */
-  function renderAnchorList(anchors, onRemove) {
+  /* onRename: 名前をその場で書き換え。空欄への変更は元の名前に戻す（拒否）。
+     onReposition: 「範囲を描き直す」ボタン。押すとキャンバス側が再ドラッグ待ちになる。 */
+  function renderAnchorList(anchors, onRemove, onRename, onReposition) {
     const c = $('anchorList'); $('anchorCount').textContent = anchors.length;
     if (!anchors.length) { c.innerHTML = '<div class="mini-empty">未登録（左の画像上にドラッグ）</div>'; return; }
     c.innerHTML = '';
@@ -70,15 +72,23 @@ const StudioUI = (() => {
       item.innerHTML = `
         <span class="midx" style="background:${ANCHOR_COLOR}">${i + 1}</span>
         <img class="mthumb" src="${a.dataURL}" alt="">
-        <span class="mname">${esc(a.name)}</span>
+        <input class="mname-edit" value="${esc(a.name)}" title="名前を変更" spellcheck="false">
         <span class="mpos">${a.refX},${a.refY}</span>
-        <button class="btn-icon-sm" title="削除"><i class="fas fa-xmark"></i></button>`;
-      item.querySelector('button').addEventListener('click', () => onRemove(a.id));
+        <button class="btn-icon-sm mini-reposition" title="範囲を描き直す"><i class="fas fa-vector-square"></i></button>
+        <button class="btn-icon-sm mini-del" title="削除"><i class="fas fa-xmark"></i></button>`;
+      const nameInp = item.querySelector('.mname-edit');
+      nameInp.addEventListener('change', () => {
+        const v = nameInp.value.trim();
+        if (!v) { nameInp.value = a.name; return; }   // 空欄は許可しない
+        onRename && onRename(a.id, v);
+      });
+      item.querySelector('.mini-reposition').addEventListener('click', () => onReposition && onReposition(a.id));
+      item.querySelector('.mini-del').addEventListener('click', () => onRemove(a.id));
       c.appendChild(item);
     });
   }
 
-  function renderRegionList(regions, onRemove, onPattern, onEditConstraint) {
+  function renderRegionList(regions, onRemove, onPattern, onEditConstraint, onRename, onReposition, onGlobalName) {
     const c = $('ocrRegionList'); $('ocrCount').textContent = regions.length;
     if (!regions.length) { c.innerHTML = '<div class="mini-empty">未登録（OCR領域モードで描画）</div>'; return; }
     c.innerHTML = '';
@@ -91,18 +101,30 @@ const StudioUI = (() => {
       block.innerHTML = `
         <div class="mini-item">
           <span class="midx" style="background:${col}">${i + 1}</span>
-          <span class="mname">${esc(r.name)}</span>
+          <input class="mname-edit" value="${esc(r.name)}" title="名前を変更" spellcheck="false">
           <span class="mpos">${r.x},${r.y} ${r.w}×${r.h}</span>
-          <button class="btn-icon-sm" title="削除"><i class="fas fa-xmark"></i></button>
+          <button class="btn-icon-sm mini-reposition" title="範囲を描き直す"><i class="fas fa-vector-square"></i></button>
+          <button class="btn-icon-sm mini-del" title="削除"><i class="fas fa-xmark"></i></button>
         </div>
+        <input class="mini-pattern mini-globalname" placeholder="共通名(任意・複数帳票をまたいで照合する時だけ設定)" spellcheck="false">
         <button class="mini-cons${active ? ' is-set' : ''}" type="button" title="桁数と各桁の文字を設定">
           <i class="fas fa-keyboard"></i><span class="mini-cons-lbl">文字制約: </span><b class="mini-cons-val"></b>
         </button>
         <input class="mini-pattern" placeholder="抽出パターン(任意) 例: [A-Z]{2}\\d{4}" spellcheck="false">`;
-      block.querySelector('.btn-icon-sm').addEventListener('click', () => onRemove(r.id));
+      const nameInp = block.querySelector('.mname-edit');
+      nameInp.addEventListener('change', () => {
+        const v = nameInp.value.trim();
+        if (!v) { nameInp.value = r.name; return; }   // 空欄は許可しない
+        onRename && onRename(r.id, v);
+      });
+      block.querySelector('.mini-reposition').addEventListener('click', () => onReposition && onReposition(r.id));
+      block.querySelector('.mini-del').addEventListener('click', () => onRemove(r.id));
       block.querySelector('.mini-cons-val').textContent = consLabel;
       block.querySelector('.mini-cons').addEventListener('click', () => onEditConstraint && onEditConstraint(r.id));
-      const inp = block.querySelector('.mini-pattern');
+      const gInp = block.querySelector('.mini-globalname');
+      gInp.value = r.globalName || '';
+      gInp.addEventListener('change', () => onGlobalName && onGlobalName(r.id, gInp.value));
+      const inp = block.querySelector('.mini-pattern:not(.mini-globalname)');
       inp.value = r.pattern || '';
       inp.addEventListener('change', () => onPattern && onPattern(r.id, inp.value));
       c.appendChild(block);
