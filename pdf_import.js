@@ -105,11 +105,21 @@ const PdfImport = (() => {
     $('pdfFileName').textContent = fileName;
     $('pdfPageInfo').textContent = numPages > 1 ? `全 ${numPages} ページ` : '1 ページ';
     $('pdfPageNav').style.display = numPages > 1 ? '' : 'none';
-    $('pdfPageLabel').textContent = `${curPage} / ${numPages}`;
+    $('pdfPageInput').max = String(numPages);
+    $('pdfPageInput').value = String(curPage);
+    $('pdfPageTotal').textContent = `/ ${numPages}`;
+    $('pdfPageSlider').max = String(numPages);
+    $('pdfPageSlider').value = String(curPage);
     $('pdfPrev').disabled = curPage <= 1;
     $('pdfNext').disabled = curPage >= numPages;
     document.querySelectorAll('#pdfDpiBtns [data-dpi]').forEach(b => b.classList.toggle('is-active', parseInt(b.dataset.dpi, 10) === dpi));
     renderAssigns();
+  }
+  /* ページ番号を指定して移動（範囲外は1〜numPagesへ丸める）。番号入力・スライダー共通。 */
+  function gotoPage(n) {
+    const p = Math.max(1, Math.min(numPages, Math.round(n) || 1));
+    if (p === curPage) { renderControls(); return; }   // 丸めで戻った場合も表示だけ揃える
+    curPage = p; renderControls(); renderPreview();
   }
 
   /* 一括OCR: ページ範囲ごとに使う帳票を割り当てる（formId '' = 自動判定） */
@@ -231,8 +241,17 @@ const PdfImport = (() => {
       const b = e.target.closest('button[data-dpi]'); if (!b) return;
       dpi = clampDpi(parseInt(b.dataset.dpi, 10)); renderControls(); renderPreview();
     });
-    $('pdfPrev').addEventListener('click', () => { if (curPage > 1) { curPage--; renderControls(); renderPreview(); } });
-    $('pdfNext').addEventListener('click', () => { if (curPage < numPages) { curPage++; renderControls(); renderPreview(); } });
+    $('pdfPrev').addEventListener('click', () => gotoPage(curPage - 1));
+    $('pdfNext').addEventListener('click', () => gotoPage(curPage + 1));
+    /* ページ番号を直接入力してジャンプ（何百ページもある資料で◀▶の連打を避ける） */
+    $('pdfPageInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } });
+    $('pdfPageInput').addEventListener('change', e => gotoPage(parseInt(e.target.value, 10)));
+    /* スライダーはドラッグ中(input)は表示だけ追従させ、離した瞬間(change)にだけ
+       実際にページを描画する。毎フレーム重いPDFレンダリングを走らせると、
+       非同期処理の完了順が入れ替わって違うページが表示されたままになる
+       競合状態を招くため。 */
+    $('pdfPageSlider').addEventListener('input', e => { $('pdfPageInput').value = e.target.value; });
+    $('pdfPageSlider').addEventListener('change', e => gotoPage(parseInt(e.target.value, 10)));
     $('pdfLoadBtn').addEventListener('click', loadChosen);
     $('pdfBatchBtn').addEventListener('click', loadBatch);
     $('pdfAssignAdd').addEventListener('click', addAssign);
