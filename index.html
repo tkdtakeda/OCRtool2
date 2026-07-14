@@ -113,7 +113,7 @@
             <div class="modal-drop-zone modal-drop-zone--sm" id="refDropZone">
               <div id="refDropHint" class="drop-hint-inner">
                 <i class="fas fa-file-image"></i>
-                <p>画像/PDF を ドロップ／クリック<br><small>OCR座標の基準となる帳票全体（PDFは1ページを取り込み）</small></p>
+                <p>画像/PDF を ドロップ／クリック<br><small>OCR座標の基準となる帳票全体。PDFはページ・DPIを選んで取込めます（実際にOCRするDPIに合わせると位置ズレを防げます）。差し替えても目印/OCR領域は自動で追随します。</small></p>
               </div>
               <img id="refPreview" alt="" style="display:none;max-height:120px;max-width:100%;object-fit:contain;">
             </div>
@@ -129,7 +129,7 @@
             <div class="modal-drop-zone modal-drop-zone--xs" id="anchorDropZone">
               <div id="anchorDropHint" class="drop-hint-inner">
                 <i class="fas fa-image"></i>
-                <p>特徴画像をドロップ/貼付<br><small>基準画像内の位置を自動検出</small></p>
+                <p>特徴画像をドロップ/貼付<br><small>基準画像内の位置を自動検出（PDFの場合はページ・DPIを選べます）</small></p>
               </div>
             </div>
             <input type="file" id="anchorFileInput" accept="image/*,application/pdf" style="display:none">

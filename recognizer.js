@@ -200,6 +200,21 @@ const Recognizer = (() => {
     else                         transform = { sx: 1, sy: 1, tx: 0, ty: 0, n: 0 };
     const tLocalize = performance.now();
 
+    /* 一致品質の診断: 基準画像と入力画像の縮尺が大きく違うと、ここでの探索
+       （LOCALIZE_SCALES の範囲内）で真の倍率を捉えきれず、OCR領域の位置が
+       ずれたまま気づかれない恐れがある。検出倍率が探索範囲の端に張り付いて
+       いる／信頼できる一致が1つも無い場合は、呼び出し側で警告できるように
+       フラグを返す（例: PDFの読み込みDPIが登録時と違いすぎるケース）。 */
+    const usedMatches = good.length ? good : allMatches.slice(0, 1);
+    const scaleMin = LOCALIZE_SCALES[0], scaleMax = LOCALIZE_SCALES[LOCALIZE_SCALES.length - 1];
+    const matchQuality = {
+      n: transform.n,
+      bestScore: allMatches.length ? allMatches[0].score : 0,
+      bestScale: allMatches.length ? allMatches[0].scale : 1,
+      scaleEdge: usedMatches.some(p => p.scale <= scaleMin || p.scale >= scaleMax),
+      weakMatch: !good.length,
+    };
+
     /* ⑤ 罫線除去（登録された罫線除去パラメータを引き継ぎ） */
     stage('罫線除去', 0.45);
     const params = form.lineRemoval || LineRemovalProcessor.defaultParams();
@@ -208,7 +223,7 @@ const Recognizer = (() => {
     console.log(`[perf]   prepare: rotate=${(tRotate - tPrepStart).toFixed(0)}ms localize(anchor${anchors.length})=${(tLocalize - tRotate).toFixed(0)}ms lineRemoval=${(tLineRemoval - tLocalize).toFixed(0)}ms`);
     if (proc.error) {
       LineRemovalProcessor.cleanupMats(proc.mats);
-      return { angle, transform, resultCanvas: null, previewMats: [], error: proc.error };
+      return { angle, transform, resultCanvas: null, previewMats: [], error: proc.error, matchQuality };
     }
     /* mats[3] = 罫線除去結果。OCR 入力用に独立キャンバスへ描画 */
     const resultCanvas = document.createElement('canvas');
@@ -217,7 +232,7 @@ const Recognizer = (() => {
     resultCanvas.height = resMat.rows;
     LineRemovalProcessor.renderToCanvas(resMat, resultCanvas);
 
-    return { angle, transform, resultCanvas, previewMats: proc.mats, error: null };
+    return { angle, transform, resultCanvas, previewMats: proc.mats, error: null, matchQuality };
   }
 
   async function runOcr(sourceCanvas, form, matchInfo, opts = {}, cb = {}) {
@@ -225,7 +240,7 @@ const Recognizer = (() => {
 
     const prep = await prepare(sourceCanvas, form, matchInfo, cb);
     if (prep.error) {
-      return { angle: prep.angle, transform: prep.transform, resultCanvas: null, previewMats: [], fields: [], error: prep.error };
+      return { angle: prep.angle, transform: prep.transform, resultCanvas: null, previewMats: [], fields: [], error: prep.error, matchQuality: prep.matchQuality };
     }
     const { angle, transform, resultCanvas } = prep;
 
@@ -290,7 +305,7 @@ const Recognizer = (() => {
     }
 
     stage('完了', 1);
-    return { angle, transform, resultCanvas, previewMats: prep.previewMats, fields, error: null };
+    return { angle, transform, resultCanvas, previewMats: prep.previewMats, fields, error: null, matchQuality: prep.matchQuality };
   }
 
   /**

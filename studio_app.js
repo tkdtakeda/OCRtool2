@@ -31,6 +31,8 @@
     batchResults: null, batchCancel: false, batchResume: null, review: null, rec: null,
     batchReviewActive: false, reviewTrustRest: false, reviewGoToReconcileAfterBatch: false,
     recogPageNum: 1, pageNav: null, navReviewMode: false,
+    /* 位置ズレ警告: 帳票id→そのセッションで既に目立つ警告を出したか／件数 */
+    posWarnShown: new Set(), posWarnCounts: {},
   };
 
   /* PSM 比較用パターン */
@@ -131,6 +133,7 @@
     S.anchors = (f.anchors || []).map(a => ({ ...a }));
     S.regions = (f.ocrRegions || []).map(r => ({ ...r }));
     S.zoom = 1; S.pending = null; S.repositioning = null;
+    S.refNatW = 0; S.refNatH = 0;   // 通常読み込みでは自動スケール調整を発動させない（setReference参照）
     applyLineRemovalToUI(f.lineRemoval || LineRemovalProcessor.defaultParams());
     $('regPsm').value = String(f.ocrSettings?.psm ?? 7); $('regLang').value = f.ocrSettings?.lang || 'eng';
     $('regWhitelist').value = f.ocrSettings?.whitelist || ''; $('regNormalize').checked = f.ocrSettings?.normalize !== false; $('regNormalizeKanji').checked = !!f.ocrSettings?.normalizeKanji;
@@ -160,9 +163,35 @@
   /* ── 基準画像 ───────────────────────────────────────── */
   async function setReference(dataURL) {
     const img = await dataURLtoImg(dataURL);
+    const oldW = S.refNatW, oldH = S.refNatH;
+    const hadRef = !!S.refImg;
     S.refImg = img; S.refNatW = img.naturalWidth; S.refNatH = img.naturalHeight; S.refDataURL = dataURL;
     $('refPreview').src = dataURL; $('refPreview').style.display = 'block'; $('refDropHint').style.display = 'none';
     $('regCanvasPlaceholder').style.display = 'none'; $('regCanvas').style.display = 'block';
+    /* 編集中に基準画像を差し替えた場合（例: DPI不一致を直すため同じPDFを別解像度で
+       読み込み直す）、既存のアンカー/OCR領域はそのままだと座標が合わなくなる。
+       サイズ比から自動的に座標を追随させ、手で描き直す手間を無くす。
+       アンカーは切り出し画像も新しい基準画像から再クロップする（テンプレート
+       マッチングは実ピクセル内容で行うため、座標だけ動かしても不十分）。
+       新規フォーム作成時やeditForm()での通常読み込みではrefNatWが0にリセット
+       されているため、ここには来ない（無関係な拡縮を誤って適用しないため）。 */
+    if (hadRef && oldW && oldH && (oldW !== S.refNatW || oldH !== S.refNatH) && (S.anchors.length || S.regions.length)) {
+      const sx = S.refNatW / oldW, sy = S.refNatH / oldH;
+      S.anchors.forEach(a => {
+        const refX = Math.round((a.refX || 0) * sx), refY = Math.round((a.refY || 0) * sy);
+        const w = Math.max(1, Math.round(a.w * sx)), h = Math.max(1, Math.round(a.h * sy));
+        const crop = document.createElement('canvas'); crop.width = w; crop.height = h;
+        crop.getContext('2d').drawImage(S.refImg, refX, refY, w, h, 0, 0, w, h);
+        Object.assign(a, { refX, refY, w, h, dataURL: crop.toDataURL('image/png') });
+      });
+      S.regions.forEach(r => {
+        r.x = Math.round(r.x * sx); r.y = Math.round(r.y * sy);
+        r.w = Math.max(1, Math.round(r.w * sx)); r.h = Math.max(1, Math.round(r.h * sy));
+      });
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
+      UI.toast(`基準画像のサイズが変わったため、目印${S.anchors.length}件・OCR領域${S.regions.length}件の位置を自動調整しました（${Math.round(sx * 100)}%）`, 'info', 4500);
+    }
     computeBaseScale(); redrawRegCanvas(); refreshSteps();
   }
   function computeBaseScale() {
@@ -431,6 +460,7 @@
         $('closeSampleFormModal').click();
         S.anchors = f.anchors.map(a => ({ ...a, id: uid() }));
         S.regions = f.ocrRegions.map(r => ({ ...r, id: uid() }));
+        S.refNatW = 0; S.refNatH = 0;   // 通常読み込みでは自動スケール調整を発動させない（setReference参照）
         $('formNameInput').value = f.name;
         applyLineRemovalToUI(f.lineRemoval); $('regPsm').value = String(f.ocrSettings.psm);
         UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
@@ -510,6 +540,31 @@
     return best;
   }
 
+  /* ── 位置ズレ（スケール不一致）の注意喚起 ─────────────
+     基準画像と実際にOCRする画像とで拡大率が大きく違うと（例: 登録時とは
+     別のDPIでPDFを読み込んだ）、原点の再ローカライズが対応できる範囲
+     （およそ0.8〜1.22倍）を超え、OCR領域の位置が気づかれないままずれる。
+     認知心理学的な設計:
+       ・色+アイコンの二重符号化で「よくある成功/情報トースト」と区別する
+       ・具体的な数値と直接の対処法を示し、思い出す負荷を減らす(再認>再生)
+       ・同じ帳票で連発すると慣れて見なくなる(アラーム疲れ)ため、目立つ
+         通知はセッション中その帳票につき最初の1回のみ。以降は件数だけ
+         静かに積算し、バッチ完了時にまとめて知らせる。 */
+  function checkPositionWarning(form, matchQuality) {
+    if (!form || !matchQuality || !(matchQuality.scaleEdge || matchQuality.weakMatch)) return;
+    S.posWarnCounts[form.id] = (S.posWarnCounts[form.id] || 0) + 1;
+    if (S.posWarnShown.has(form.id)) return;
+    S.posWarnShown.add(form.id);
+    const pct = Math.round((matchQuality.bestScale || 1) * 100);
+    const detail = matchQuality.weakMatch
+      ? '目印（アンカー）がうまく見つかりませんでした。'
+      : `検出された倍率が調整可能な範囲の端（${pct}%）に達しており、実際の倍率はそれ以上に違う可能性があります。`;
+    UI.toast(
+      `⚠ 「${form.name}」: OCRの位置がずれているかもしれません。${detail} 基準画像を今回と同じ解像度(DPI)で登録し直すと改善します。`,
+      'warning', 15000
+    );
+  }
+
   /* 帳票を適用 → 設定パネルの値で実行（調整済みの値は保持） */
   async function applyForm(formId) {
     if (!S.lastClassify) return UI.toast('先に「認識を実行」してください', 'warning');
@@ -547,6 +602,7 @@
         onOcr: (i, total, fname, status, pct) => UI.updateRecogProgress(`OCR ${i + 1}/${total}「${fname}」: ${status}`, 0.55 + 0.4 * ((i + (pct || 0)) / total)),
       });
       if (result.error) { UI.showRecogProgress(false); LineRemovalProcessor.cleanupMats(result.previewMats); return UI.toast('処理エラー: ' + result.error, 'error', 5000); }
+      checkPositionWarning(form, result.matchQuality);
 
       UI.setPipeline(null, ['match', 'decide', 'rotate', 'line', 'ocr']);
       UI.showRecogProgress(false);
@@ -955,6 +1011,7 @@
       const t2 = performance.now();
       console.log(`[perf] p${page} classify=${(t1 - t0).toFixed(0)}ms runOcr=${(t2 - t1).toFixed(0)}ms total=${(t2 - t0).toFixed(0)}ms fields=${res.fields.length}`);
       if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
+      checkPositionWarning(form, res.matchQuality);
       LineRemovalProcessor.cleanupMats(res.previewMats);
       const manual = forcedFormId ? true : !(candId === form.id);
       const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
@@ -990,6 +1047,7 @@
   async function runBatchPdf(src, opts) {
     if (!S.cvReady) { src.done && src.done(); return UI.toast('OpenCV.js 読み込み中です', 'warning'); }
     if (!S.forms.length) { src.done && src.done(); return UI.toast('先に帳票を登録してください', 'warning'); }
+    const posWarnBefore = { ...S.posWarnCounts };   // このバッチ中に増えた件数だけをサマリで報告するため
     const resuming = !!(opts && opts.resuming);
     const priorResults = resuming ? (S.batchResults || []) : [];
     if (!resuming) { releasePageNav(); S.batchResume = null; }   // 新規アップロード時は前回の「続きから」を無効化（PDFハンドルが破棄されるため）
@@ -1092,6 +1150,16 @@
     const ok = combined.filter(r => r.decision === 'accepted').length;
     const doneCount = combined.length, wholeTotal = priorResults.length + total;
     UI.toast(`一括OCR${cancelled ? '中止' : '完了'} — ${doneCount}/${wholeTotal}ページ処理・${ok}件採用、履歴に保存`, cancelled ? 'warning' : 'success', 4500);
+    /* 位置ズレ警告は帳票ごとに初回のみ目立つ通知にしているため、バッチ完了時に
+       このバッチ内で増えた件数をまとめて知らせる（アラーム疲れの回避と、
+       規模の把握を両立させる）。 */
+    const posWarnLines = Object.keys(S.posWarnCounts)
+      .map(fid => ({ form: S.forms.find(f => f.id === fid), delta: S.posWarnCounts[fid] - (posWarnBefore[fid] || 0) }))
+      .filter(e => e.form && e.delta > 0);
+    if (posWarnLines.length) {
+      const text = posWarnLines.map(e => `「${e.form.name}」${e.delta}件`).join('、');
+      UI.toast(`⚠ 位置ズレの可能性があるページ: ${text}。基準画像の解像度を確認してください`, 'warning', 12000);
+    }
     /* Shift+Enterで「残りは信頼して照合へ」が押されていたら、サマリを出さずそのまま照合へ */
     if (S.reviewGoToReconcileAfterBatch) {
       S.reviewGoToReconcileAfterBatch = false;
