@@ -124,14 +124,18 @@
 .list-count { margin-left: auto; background: var(--c-bg); color: var(--c-text-2); border-radius: 9px; padding: 0 7px; font-size: .68rem; font-family: 'IBM Plex Mono', monospace; }
 .mini-list { display: flex; flex-direction: column; gap: 4px; }
 .mini-empty { font-size: .72rem; color: var(--c-text-3); padding: 6px; text-align: center; }
-.mini-item { display: flex; align-items: center; gap: 7px; padding: 5px 7px; border: 1px solid var(--c-border); border-radius: var(--r-sm); background: var(--c-surface2); }
+/* 名前を最優先で読めるようにする: 位置表示・ボタンは幅固定（縮めない）にして、
+   入る余地が無ければ折り返す（flex-wrap）。名前欄だけが押し潰されて見えなく
+   なる事故（座標が長い大きな画像で特に起きやすい）を防ぐ。 */
+.mini-item { display: flex; align-items: center; gap: 7px; padding: 5px 7px; border: 1px solid var(--c-border); border-radius: var(--r-sm); background: var(--c-surface2); flex-wrap: wrap; }
 .mini-item .midx { width: 16px; height: 16px; border-radius: 4px; color: #fff; font-size: .6rem; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; font-family: 'IBM Plex Mono', monospace; }
-.mini-item .mpos { font-size: .63rem; color: var(--c-text-3); font-family: 'IBM Plex Mono', monospace; }
-.mini-item .mthumb { width: 30px; height: 22px; object-fit: contain; border: 1px solid var(--c-border); border-radius: 2px; background: #fff; }
+.mini-item .mpos { font-size: .63rem; color: var(--c-text-3); font-family: 'IBM Plex Mono', monospace; flex-shrink: 0; }
+.mini-item .mthumb { width: 30px; height: 22px; object-fit: contain; border: 1px solid var(--c-border); border-radius: 2px; background: #fff; flex-shrink: 0; }
 /* 名前をその場で書き換えられるように、表示名をinput化（未編集時は地の文のように見せる） */
-.mini-item .mname-edit { flex: 1; min-width: 0; font-size: .76rem; padding: 3px 5px; border: 1px solid transparent; border-radius: var(--r-sm); background: transparent; color: var(--c-text); font-family: inherit; }
+.mini-item .mname-edit { flex: 1 1 64px; min-width: 64px; font-size: .76rem; padding: 3px 5px; border: 1px solid transparent; border-radius: var(--r-sm); background: transparent; color: var(--c-text); font-family: inherit; }
 .mini-item .mname-edit:hover { border-color: var(--c-border); }
 .mini-item .mname-edit:focus { outline: none; border-color: var(--c-pri); background: #fff; box-shadow: 0 0 0 2px var(--c-pri-lt); }
+.mini-item .btn-icon-sm { flex-shrink: 0; }
 /* 「削除」と紛らわしくならないよう、再設定ボタンは危険色ではなくプライマリ色でホバー */
 .mini-reposition:hover { background: var(--c-pri-lt); color: var(--c-pri); }
 .mini-region { display: flex; flex-direction: column; gap: 3px; }
