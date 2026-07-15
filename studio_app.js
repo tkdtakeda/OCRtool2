@@ -354,7 +354,7 @@
     try {
       const img = await dataURLtoImg(dataURL);
       const refCanvas = canvasFromImg(S.refImg);
-      const map = MatcherEngine.matchAll(refCanvas, [{ id: '_a', imageElement: img }], { angleRange: 0, angleStep: 1 });
+      const map = await MatcherEngine.matchAll(refCanvas, [{ id: '_a', imageElement: img }], { angleRange: 0, angleStep: 1 });
       const r = map.get('_a') || { score: 0, loc: { x: 0, y: 0 } };
       if (r.score < 0.5) { UI.toast(`基準画像内に見つかりませんでした（スコア ${r.score.toFixed(2)}）`, 'warning', 4000); return; }
       const name = prompt('識別アンカー名を入力', `アンカー${S.anchors.length + 1}`);

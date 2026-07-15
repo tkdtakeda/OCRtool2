@@ -142,7 +142,7 @@ const Recognizer = (() => {
     const angleStep  = opts.angleStep  ?? 1;
     const scaleFactors = opts.scaleFactors || CLASSIFY_SCALES;
     const tpls   = await buildAnchorTemplates(forms);
-    const scores = MatcherEngine.matchAll(sourceCanvas, tpls, { angleRange, angleStep, scaleFactors });
+    const scores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angleRange, angleStep, scaleFactors });
     const decision = FormVoting.decide(forms, scores, opts.voting || {});
     return { decision, scores };
   }
@@ -180,7 +180,7 @@ const Recognizer = (() => {
     try {
       const tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, imageElement: await dataURLtoImg(a.dataURL) })));
       /* 角度固定・スケール探索で再マッチ（切り取り倍率の違いを吸収） */
-      const m = MatcherEngine.matchAll(rotated, tpls.map(t => ({ id: t.id, imageElement: t.imageElement })),
+      const m = await MatcherEngine.matchAll(rotated, tpls.map(t => ({ id: t.id, imageElement: t.imageElement })),
         { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES });
       tpls.forEach(t => {
         const r = m.get(t.id); if (!r) return;
