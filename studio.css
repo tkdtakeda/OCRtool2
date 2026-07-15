@@ -337,6 +337,23 @@
 .cr-var-note { display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--c-pri); font-weight: 600; border-style: solid; border-color: var(--c-pri-mid); background: var(--c-pri-lt); }
 .cr-extract { display: flex; align-items: flex-start; gap: 8px; margin: 11px 0 0; padding: 9px 11px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); font-size: .76rem; color: var(--c-text); line-height: 1.5; cursor: pointer; }
 .cr-extract input { margin-top: 2px; width: 15px; height: 15px; flex-shrink: 0; accent-color: var(--c-pri); }
+/* 桁専用の読み替えルール（O↔0のような組み込み以外を、ユーザー自身が追加できる） */
+.cr-subs { margin: 11px 0 0; padding: 9px 11px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); }
+.cr-subs-hdr { display: flex; align-items: baseline; gap: 6px; font-size: .76rem; font-weight: 700; color: var(--c-text-2); flex-wrap: wrap; }
+.cr-subs-hdr i { color: var(--c-pri); }
+.cr-subs-hdr-sub { font-size: .68rem; font-weight: 400; color: var(--c-text-3); }
+.cr-subs-list { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; min-height: 26px; }
+.cr-subs-empty { font-size: .7rem; color: var(--c-text-3); font-style: italic; }
+.cr-sub-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 6px 3px 9px; border-radius: 12px; background: #fff; border: 1px solid var(--c-pri-mid); font-family: 'IBM Plex Mono', monospace; font-size: .74rem; color: var(--c-text); }
+.cr-sub-chip i { color: var(--c-pri); font-size: .68rem; }
+.cr-sub-del { width: 16px; height: 16px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: var(--c-text-3); font-size: .6rem; }
+.cr-sub-del:hover { background: #FEE2E2; color: var(--c-err); }
+.cr-subs-add { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: .72rem; color: var(--c-text-2); }
+.cr-sub-input { width: 34px; height: 28px; text-align: center; font-size: .9rem; font-weight: 700; border: 1px solid var(--c-border-dk); border-radius: var(--r-sm); font-family: 'IBM Plex Mono', monospace; }
+.cr-sub-input:focus { outline: none; border-color: var(--c-pri); box-shadow: 0 0 0 2px var(--c-pri-lt); }
+/* 厳格モードは警告色にして「値を変えてしまう、より踏み込んだ設定」だと分かるようにする */
+.cr-strict-toggle { background: #FEF3E2; border-color: #F5CB8B; }
+.cr-strict-toggle input { accent-color: var(--c-warn); }
 
 /* ② 桁タイル（左→右に空間配置） */
 .cr-positions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }

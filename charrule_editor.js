@@ -13,8 +13,11 @@ const CharRuleEditor = (() => {
   const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   /* cur.mode: 'fixed' | 'variable' | 'none'
-     fixed   → len + pos[]、variable → set、共通 → extract */
-  let cur = { mode: 'fixed', len: 4, pos: [], set: '', extract: false };
+     fixed   → len + pos[]、variable → set、共通 → extract
+     subs/strict … 桁ごと(固定長)または全桁共通(可変長)のユーザー独自読み替え設定。
+       subs: この桁専用の「読んだらこう扱う」マップ。strict: 候補が無い誤読を
+       空欄(?)にするか（true=強制的に気づかせる／false=読み取ったまま警告のみ）。 */
+  let cur = { mode: 'fixed', len: 4, pos: [], set: '', extract: false, subs: [], sub: {}, strict: [], varStrict: false };
   let sel = 0;              // 選択中の桁（固定長時）
   let showLower = false;    // 小文字パレット表示
   let onSaveCb = null;
@@ -28,11 +31,14 @@ const CharRuleEditor = (() => {
     onSaveCb = onSave;
     const n = CharConstraint.normalize(rule);
     if (n && n.variable) {
-      cur = { mode: 'variable', len: 4, pos: Array.from({ length: 4 }, DEF), set: n.set, extract: n.extract };
+      cur = { mode: 'variable', len: 4, pos: Array.from({ length: 4 }, DEF), set: n.set, extract: n.extract,
+               subs: Array.from({ length: 4 }, () => ({})), sub: { ...n.sub }, strict: Array.from({ length: 4 }, () => false), varStrict: n.strict };
     } else if (n) {
-      cur = { mode: 'fixed', len: n.len, pos: n.pos.slice(), set: CharConstraint.presetSet('digit'), extract: n.extract };
+      cur = { mode: 'fixed', len: n.len, pos: n.pos.slice(), set: CharConstraint.presetSet('digit'), extract: n.extract,
+               subs: n.subs.map(s => ({ ...s })), sub: {}, strict: n.strict.slice(), varStrict: false };
     } else {
-      cur = { mode: 'fixed', len: 4, pos: Array.from({ length: 4 }, DEF), set: CharConstraint.presetSet('digit'), extract: false };
+      cur = { mode: 'fixed', len: 4, pos: Array.from({ length: 4 }, DEF), set: CharConstraint.presetSet('digit'), extract: false,
+               subs: Array.from({ length: 4 }, () => ({})), sub: {}, strict: Array.from({ length: 4 }, () => false), varStrict: false };
     }
     sel = 0;
     showLower = cur.pos.some(s => /[a-z]/.test(s)) || /[a-z]/.test(cur.set);
@@ -45,6 +51,10 @@ const CharRuleEditor = (() => {
   /* 現在編集対象の文字集合（固定=選択桁 / 可変=全桁共通） */
   function activeSet() { return cur.mode === 'variable' ? cur.set : (cur.pos[sel] || ''); }
   function setActive(v) { if (cur.mode === 'variable') cur.set = v; else cur.pos[sel] = v; }
+  /* 現在編集対象の読み替えマップ・厳格フラグ（固定=選択桁 / 可変=全桁共通） */
+  function activeSubs() { return cur.mode === 'variable' ? cur.sub : (cur.subs[sel] || {}); }
+  function activeStrict() { return cur.mode === 'variable' ? !!cur.varStrict : !!cur.strict[sel]; }
+  function setActiveStrict(v) { if (cur.mode === 'variable') cur.varStrict = v; else cur.strict[sel] = v; }
 
   /* ── モード切替 ─────────────────────────────────────── */
   function setLenFixed(n) {
@@ -52,8 +62,10 @@ const CharRuleEditor = (() => {
     if (!n) { cur.mode = 'none'; renderAll(); return; }
     cur.mode = 'fixed';
     const pos = cur.pos.slice(0, n);
-    while (pos.length < n) pos.push(DEF());
-    cur.pos = pos; cur.len = n;
+    const subs = cur.subs.slice(0, n);
+    const strict = cur.strict.slice(0, n);
+    while (pos.length < n) { pos.push(DEF()); subs.push({}); strict.push(false); }
+    cur.pos = pos; cur.subs = subs; cur.strict = strict; cur.len = n;
     if (sel >= n) sel = Math.max(0, n - 1);
     renderAll();
   }
@@ -94,13 +106,33 @@ const CharRuleEditor = (() => {
       b.classList.toggle('is-active', active);
     });
     renderPalette();
+    renderSubs();
     $('crToggleLower').classList.toggle('is-active', showLower);
     $('crApplyAll').style.display = cur.mode === 'fixed' ? '' : 'none';
     $('crExtract').checked = !!cur.extract;
+    $('crStrict').checked = activeStrict();
     $('crPosSummary').textContent = setStr
       ? `使用可: ${[...setStr].length}文字（${CharConstraint.summarizePos(setStr)}）`
       : '任意（すべての文字を許可）';
     $('crAnyNote').style.display = setStr ? 'none' : '';
+  }
+
+  /* この桁（可変長は全桁共通）のユーザー独自読み替えルールを一覧表示 */
+  function renderSubs() {
+    const list = $('crSubsList');
+    const subs = activeSubs();
+    const entries = Object.entries(subs);
+    if (!entries.length) { list.innerHTML = '<span class="cr-subs-empty">未設定（右下で追加できます）</span>'; return; }
+    list.innerHTML = '';
+    entries.forEach(([from, to]) => {
+      const chip = document.createElement('span'); chip.className = 'cr-sub-chip';
+      chip.innerHTML = `<span>${esc(from === ' ' ? '␣' : from)}</span><i class="fas fa-arrow-right-long"></i><span>${esc(to === ' ' ? '␣' : to)}</span>`;
+      const del = document.createElement('button'); del.type = 'button'; del.className = 'cr-sub-del'; del.title = '削除';
+      del.innerHTML = '<i class="fas fa-xmark"></i>';
+      del.addEventListener('click', () => removeSub(from));
+      chip.appendChild(del);
+      list.appendChild(chip);
+    });
   }
 
   function renderPalette() {
@@ -130,8 +162,8 @@ const CharRuleEditor = (() => {
   function renderPreview() {
     let txt;
     if (cur.mode === 'none') txt = '制約なし';
-    else if (cur.mode === 'variable') txt = `可変長 ・ ${CharConstraint.describe({ variable: true, set: cur.set, extract: cur.extract })}`;
-    else txt = `${cur.len}桁 ・ ${CharConstraint.describe({ len: cur.len, pos: cur.pos, extract: cur.extract })}`;
+    else if (cur.mode === 'variable') txt = `可変長 ・ ${CharConstraint.describe({ variable: true, set: cur.set, sub: cur.sub, strict: cur.varStrict, extract: cur.extract })}`;
+    else txt = `${cur.len}桁 ・ ${CharConstraint.describe({ len: cur.len, pos: cur.pos, subs: cur.subs, strict: cur.strict, extract: cur.extract })}`;
     $('crPreview').innerHTML = `<span class="cr-prev-lbl">設定内容</span> ${esc(txt)}`;
   }
 
@@ -147,15 +179,34 @@ const CharRuleEditor = (() => {
   }
   function applyAllPositions() {
     if (cur.mode !== 'fixed') return;
-    const v = cur.pos[sel];
+    const v = cur.pos[sel], s = { ...cur.subs[sel] }, st = cur.strict[sel];
     cur.pos = cur.pos.map(() => v);
+    cur.subs = cur.subs.map(() => ({ ...s }));
+    cur.strict = cur.strict.map(() => st);
     renderAll();
+  }
+
+  /* 読み替えルールの追加/削除（1文字→1文字。同じ「読んだ文字」は上書き） */
+  function addSub(from, to) {
+    if (!from || !to || from === to) return;
+    const subs = { ...activeSubs(), [from]: to };
+    if (cur.mode === 'variable') cur.sub = subs; else cur.subs[sel] = subs;
+    renderSubs(); renderPreview();
+  }
+  function removeSub(from) {
+    const subs = { ...activeSubs() };
+    delete subs[from];
+    if (cur.mode === 'variable') cur.sub = subs; else cur.subs[sel] = subs;
+    renderSubs(); renderPreview();
   }
 
   function save() {
     let rule = null;
-    if (cur.mode === 'fixed' && cur.len) rule = { len: cur.len, pos: cur.pos.slice(), extract: cur.extract };
-    else if (cur.mode === 'variable' && cur.set) rule = { variable: true, set: cur.set, extract: cur.extract };
+    if (cur.mode === 'fixed' && cur.len) {
+      rule = { len: cur.len, pos: cur.pos.slice(), subs: cur.subs.map(s => ({ ...s })), strict: cur.strict.slice(), extract: cur.extract };
+    } else if (cur.mode === 'variable' && cur.set) {
+      rule = { variable: true, set: cur.set, sub: { ...cur.sub }, strict: !!cur.varStrict, extract: cur.extract };
+    }
     close();
     if (onSaveCb) onSaveCb(rule);
   }
@@ -179,6 +230,14 @@ const CharRuleEditor = (() => {
     $('crApplyAll').addEventListener('click', applyAllPositions);
     $('crToggleLower').addEventListener('click', () => { showLower = !showLower; renderEditor(); });
     $('crExtract').addEventListener('change', () => { cur.extract = $('crExtract').checked; renderPreview(); });
+    $('crStrict').addEventListener('change', () => { setActiveStrict($('crStrict').checked); renderPreview(); });
+    const submitSub = () => {
+      const from = $('crSubFrom').value, to = $('crSubTo').value;
+      addSub(from, to);
+      $('crSubFrom').value = ''; $('crSubTo').value = ''; $('crSubFrom').focus();
+    };
+    $('crSubAdd').addEventListener('click', submitSub);
+    [$('crSubFrom'), $('crSubTo')].forEach(inp => inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitSub(); } }));
   }
 
   return { init, open };

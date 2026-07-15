@@ -604,6 +604,22 @@
         </div>
         <div class="cr-palette" id="crPalette"></div>
         <p class="cr-any-note" id="crAnyNote">任意（すべて許可）の状態です。特定の文字だけ除外したいときは、上の字種ボタンを選んでからパレットでクリックしてください。</p>
+
+        <!-- ユーザー独自の読み替えルール（この桁だけに適用） -->
+        <div class="cr-subs">
+          <div class="cr-subs-hdr"><i class="fas fa-right-left"></i> この桁だけの読み替えルール<span class="cr-subs-hdr-sub">（例：OCRが誤って「v」と読んだら「Y」として扱う）</span></div>
+          <div class="cr-subs-list" id="crSubsList"></div>
+          <div class="cr-subs-add">
+            <span>OCRがこう読んだら</span>
+            <input type="text" id="crSubFrom" class="cr-sub-input" maxlength="1" placeholder="例: v">
+            <i class="fas fa-arrow-right-long"></i>
+            <span>こう扱う</span>
+            <input type="text" id="crSubTo" class="cr-sub-input" maxlength="1" placeholder="例: Y">
+            <button type="button" id="crSubAdd" class="btn btn-ghost btn-sm"><i class="fas fa-plus"></i> 追加</button>
+          </div>
+        </div>
+
+        <label class="cr-extract cr-strict-toggle"><input type="checkbox" id="crStrict"><span><b>読み替えでも直せない誤読は空欄（?）にする</b>（未チェックなら、読み取った文字のまま「制約」警告だけ表示）</span></label>
         <label class="cr-extract"><input type="checkbox" id="crExtract"><span>値の前後にある<b>余分な文字を自動で取り除く</b>（ラベルや空白・区切り記号を無視。抽出パターンの代わりになります）</span></label>
         <div class="cr-editor-acts">
           <span class="cr-pos-summary" id="crPosSummary"></span>
