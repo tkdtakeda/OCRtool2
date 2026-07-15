@@ -28,7 +28,10 @@ const PdfImport = (() => {
     const vp = page.getViewport({ scale: useDpi / 72 });
     const c = document.createElement('canvas');
     c.width = Math.round(vp.width); c.height = Math.round(vp.height);
-    const ctx = c.getContext('2d');
+    /* このキャンバスはこの後 OpenCV(cv.imread) に何度も渡され画素を読み出される。
+       willReadFrequentlyを指定しないとGPUバッキングになり、読み出しのたびに
+       GPU→CPU転送が発生して重くなる（DevToolsの警告の直接の原因）。 */
+    const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);   // 透過PDF対策
     await page.render({ canvasContext: ctx, viewport: vp }).promise;
     return c;

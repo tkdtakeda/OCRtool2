@@ -180,7 +180,7 @@ const MatcherEngine = (() => {
     const thumb = document.createElement('canvas');
     thumb.width  = thumbWidth;
     thumb.height = thumbH;
-    const ctx = thumb.getContext('2d');
+    const ctx = thumb.getContext('2d', { willReadFrequently: true });
 
     ctx.drawImage(fullCanvas, 0, 0, thumbWidth, thumbH);
 

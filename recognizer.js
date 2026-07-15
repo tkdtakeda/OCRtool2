@@ -120,7 +120,8 @@ const Recognizer = (() => {
     const c = document.createElement('canvas');
     c.width = Math.max(1, Math.round(canvas.width * scale));
     c.height = Math.max(1, Math.round(canvas.height * scale));
-    const ctx = c.getContext('2d');
+    /* Tesseractがこの直後に画素を読み出すため、GPU→CPU転送を避ける */
+    const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(canvas, 0, 0, c.width, c.height);
     return c;
@@ -230,6 +231,12 @@ const Recognizer = (() => {
     const resMat = proc.mats[3];
     resultCanvas.width  = resMat.cols;
     resultCanvas.height = resMat.rows;
+    /* renderToCanvas内部はcv.imshowで初めてこのcanvasにgetContext('2d')するため、
+       このcanvasはOCR領域ごとに何度も切り出し(drawImage)で読み出される最重要の
+       中間結果でもある。cv.imshowより先にここで一度getContextしてオプションを
+       固定しておく（canvasの2Dコンテキストは最初の生成時のオプションが以後も
+       維持されるため、後からcv.imshowが素のgetContext('2d')を呼んでも上書きされない）。 */
+    resultCanvas.getContext('2d', { willReadFrequently: true });
     LineRemovalProcessor.renderToCanvas(resMat, resultCanvas);
 
     return { angle, transform, resultCanvas, previewMats: proc.mats, error: null, matchQuality };

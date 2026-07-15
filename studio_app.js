@@ -43,8 +43,13 @@
   const dataURLtoImg = url => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('load fail')); i.src = url; });
   const fileToDataURL = file => new Promise((res, rej) => { const r = new FileReader(); r.onload = e => res(e.target.result); r.onerror = () => rej(new Error('read fail')); r.readAsDataURL(file); });
 
-  function canvasFromImg(img) { const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d').drawImage(img, 0, 0); return c; }
-  function thumbURL(canvas, w = 90) { const s = Math.min(1, w / canvas.width); const c = document.createElement('canvas'); c.width = Math.round(canvas.width * s); c.height = Math.round(canvas.height * s); c.getContext('2d').drawImage(canvas, 0, 0, c.width, c.height); return c.toDataURL('image/png'); }
+  /* willReadFrequently: これらのcanvasはOpenCV(cv.imread)やtoDataURLで直後に
+     画素を読み出すため、既定のGPUバッキングだと読み出しのたびにGPU→CPU転送が
+     発生して遅い（DevToolsの「Multiple readback operations…」警告の原因）。
+     生成時点でこのオプションを付けておくと、以後そのcanvasへの参照はずっと
+     ソフトウェアバッキングのまま速く読み出せる。 */
+  function canvasFromImg(img) { const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0); return c; }
+  function thumbURL(canvas, w = 90) { const s = Math.min(1, w / canvas.width); const c = document.createElement('canvas'); c.width = Math.round(canvas.width * s); c.height = Math.round(canvas.height * s); c.getContext('2d', { willReadFrequently: true }).drawImage(canvas, 0, 0, c.width, c.height); return c.toDataURL('image/png'); }
   /* 切り出し画像（PNG dataURL）を保存用に縮小＋JPEG化して容量を抑える。照合での見比べ用。 */
   function shrinkDataURL(dataURL, maxW = 260, quality = 0.72) {
     return new Promise(resolve => {
@@ -55,7 +60,7 @@
         const c = document.createElement('canvas');
         c.width = Math.max(1, Math.round(img.naturalWidth * s));
         c.height = Math.max(1, Math.round(img.naturalHeight * s));
-        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, c.width, c.height);
         resolve(c.toDataURL('image/jpeg', quality));
       };
       img.onerror = () => resolve('');
@@ -181,7 +186,7 @@
         const refX = Math.round((a.refX || 0) * sx), refY = Math.round((a.refY || 0) * sy);
         const w = Math.max(1, Math.round(a.w * sx)), h = Math.max(1, Math.round(a.h * sy));
         const crop = document.createElement('canvas'); crop.width = w; crop.height = h;
-        crop.getContext('2d').drawImage(S.refImg, refX, refY, w, h, 0, 0, w, h);
+        crop.getContext('2d', { willReadFrequently: true }).drawImage(S.refImg, refX, refY, w, h, 0, 0, w, h);
         Object.assign(a, { refX, refY, w, h, dataURL: crop.toDataURL('image/png') });
       });
       S.regions.forEach(r => {
@@ -279,7 +284,7 @@
       const a = S.anchors.find(x => x.id === repos.id);
       if (a) {
         const crop = document.createElement('canvas'); crop.width = p.w; crop.height = p.h;
-        crop.getContext('2d').drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
+        crop.getContext('2d', { willReadFrequently: true }).drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
         Object.assign(a, { name, dataURL: crop.toDataURL('image/png'), w: p.w, h: p.h, refX: p.x, refY: p.y });
       }
       UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
@@ -290,7 +295,7 @@
     } else if (S.drawMode === 'anchor') {
       /* 基準画像から切り出してアンカー画像を生成 */
       const crop = document.createElement('canvas'); crop.width = p.w; crop.height = p.h;
-      crop.getContext('2d').drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
+      crop.getContext('2d', { willReadFrequently: true }).drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
       S.anchors.push({ id: uid(), name, dataURL: crop.toDataURL('image/png'), w: p.w, h: p.h, refX: p.x, refY: p.y });
       UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
     } else {
