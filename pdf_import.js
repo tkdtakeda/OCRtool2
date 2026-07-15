@@ -14,6 +14,7 @@ const PdfImport = (() => {
   const $ = id => document.getElementById(id);
   const PDFJS_VER  = '3.11.174';
   const WORKER_SRC = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/build/pdf.worker.min.js`;
+  const CMAP_URL   = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/cmaps/`;
   const LS_KEY = 'ocrtool_pdf_dpi';
   const DEFAULT_DPI = 200;
 
@@ -85,7 +86,7 @@ const PdfImport = (() => {
     try {
       await ensureLib();
       const buf = await fileToArrayBuffer(file);
-      doc = await window.pdfjsLib.getDocument({ data: buf }).promise;
+      doc = await window.pdfjsLib.getDocument({ data: buf, cMapUrl: CMAP_URL, cMapPacked: true }).promise;
       numPages = doc.numPages; curPage = 1; fileName = file.name || 'PDF';
       dpi = clampDpi(parseInt(localStorage.getItem(LS_KEY), 10) || DEFAULT_DPI);
       assigns = [{ from: 1, to: numPages, formId: '' }];   // 既定=全ページ・自動判定
