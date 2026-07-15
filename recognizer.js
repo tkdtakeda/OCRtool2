@@ -120,7 +120,8 @@ const Recognizer = (() => {
     const c = document.createElement('canvas');
     c.width = Math.max(1, Math.round(canvas.width * scale));
     c.height = Math.max(1, Math.round(canvas.height * scale));
-    const ctx = c.getContext('2d');
+    /* Tesseractがこの直後に画素を読み出すため、GPU→CPU転送を避ける */
+    const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(canvas, 0, 0, c.width, c.height);
     return c;
@@ -141,7 +142,7 @@ const Recognizer = (() => {
     const angleStep  = opts.angleStep  ?? 1;
     const scaleFactors = opts.scaleFactors || CLASSIFY_SCALES;
     const tpls   = await buildAnchorTemplates(forms);
-    const scores = MatcherEngine.matchAll(sourceCanvas, tpls, { angleRange, angleStep, scaleFactors });
+    const scores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angleRange, angleStep, scaleFactors });
     const decision = FormVoting.decide(forms, scores, opts.voting || {});
     return { decision, scores };
   }
@@ -163,11 +164,13 @@ const Recognizer = (() => {
    */
   async function prepare(sourceCanvas, form, matchInfo, cb = {}) {
     const stage = (name, pct) => cb.onStage && cb.onStage(name, pct);
+    const tPrepStart = performance.now();
 
     /* ③ 傾き補正 */
     stage('傾き補正', 0.1);
     const angle = matchInfo.angle || 0;
     const rotated = LineRemovalProcessor.rotateCanvas(sourceCanvas, angle);
+    const tRotate = performance.now();
 
     /* ④ 原点の再ローカライズ: 全アンカーを角度固定で再マッチ → 相似変換を推定
        （複数アンカーが取れればスケール=拡大率と位置ずれを同時に補正） */
@@ -177,7 +180,7 @@ const Recognizer = (() => {
     try {
       const tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, imageElement: await dataURLtoImg(a.dataURL) })));
       /* 角度固定・スケール探索で再マッチ（切り取り倍率の違いを吸収） */
-      const m = MatcherEngine.matchAll(rotated, tpls.map(t => ({ id: t.id, imageElement: t.imageElement })),
+      const m = await MatcherEngine.matchAll(rotated, tpls.map(t => ({ id: t.id, imageElement: t.imageElement })),
         { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES });
       tpls.forEach(t => {
         const r = m.get(t.id); if (!r) return;
@@ -196,23 +199,47 @@ const Recognizer = (() => {
     if (good.length >= 1)        transform = estimateTransform(good);
     else if (allMatches.length)  transform = estimateTransform([allMatches[0]]);
     else                         transform = { sx: 1, sy: 1, tx: 0, ty: 0, n: 0 };
+    const tLocalize = performance.now();
+
+    /* 一致品質の診断: 基準画像と入力画像の縮尺が大きく違うと、ここでの探索
+       （LOCALIZE_SCALES の範囲内）で真の倍率を捉えきれず、OCR領域の位置が
+       ずれたまま気づかれない恐れがある。検出倍率が探索範囲の端に張り付いて
+       いる／信頼できる一致が1つも無い場合は、呼び出し側で警告できるように
+       フラグを返す（例: PDFの読み込みDPIが登録時と違いすぎるケース）。 */
+    const usedMatches = good.length ? good : allMatches.slice(0, 1);
+    const scaleMin = LOCALIZE_SCALES[0], scaleMax = LOCALIZE_SCALES[LOCALIZE_SCALES.length - 1];
+    const matchQuality = {
+      n: transform.n,
+      bestScore: allMatches.length ? allMatches[0].score : 0,
+      bestScale: allMatches.length ? allMatches[0].scale : 1,
+      scaleEdge: usedMatches.some(p => p.scale <= scaleMin || p.scale >= scaleMax),
+      weakMatch: !good.length,
+    };
 
     /* ⑤ 罫線除去（登録された罫線除去パラメータを引き継ぎ） */
     stage('罫線除去', 0.45);
     const params = form.lineRemoval || LineRemovalProcessor.defaultParams();
     const proc   = LineRemovalProcessor.process(rotated, params);
+    const tLineRemoval = performance.now();
+    console.log(`[perf]   prepare: rotate=${(tRotate - tPrepStart).toFixed(0)}ms localize(anchor${anchors.length})=${(tLocalize - tRotate).toFixed(0)}ms lineRemoval=${(tLineRemoval - tLocalize).toFixed(0)}ms`);
     if (proc.error) {
       LineRemovalProcessor.cleanupMats(proc.mats);
-      return { angle, transform, resultCanvas: null, previewMats: [], error: proc.error };
+      return { angle, transform, resultCanvas: null, previewMats: [], error: proc.error, matchQuality };
     }
     /* mats[3] = 罫線除去結果。OCR 入力用に独立キャンバスへ描画 */
     const resultCanvas = document.createElement('canvas');
     const resMat = proc.mats[3];
     resultCanvas.width  = resMat.cols;
     resultCanvas.height = resMat.rows;
+    /* renderToCanvas内部はcv.imshowで初めてこのcanvasにgetContext('2d')するため、
+       このcanvasはOCR領域ごとに何度も切り出し(drawImage)で読み出される最重要の
+       中間結果でもある。cv.imshowより先にここで一度getContextしてオプションを
+       固定しておく（canvasの2Dコンテキストは最初の生成時のオプションが以後も
+       維持されるため、後からcv.imshowが素のgetContext('2d')を呼んでも上書きされない）。 */
+    resultCanvas.getContext('2d', { willReadFrequently: true });
     LineRemovalProcessor.renderToCanvas(resMat, resultCanvas);
 
-    return { angle, transform, resultCanvas, previewMats: proc.mats, error: null };
+    return { angle, transform, resultCanvas, previewMats: proc.mats, error: null, matchQuality };
   }
 
   async function runOcr(sourceCanvas, form, matchInfo, opts = {}, cb = {}) {
@@ -220,7 +247,7 @@ const Recognizer = (() => {
 
     const prep = await prepare(sourceCanvas, form, matchInfo, cb);
     if (prep.error) {
-      return { angle: prep.angle, transform: prep.transform, resultCanvas: null, previewMats: [], fields: [], error: prep.error };
+      return { angle: prep.angle, transform: prep.transform, resultCanvas: null, previewMats: [], fields: [], error: prep.error, matchQuality: prep.matchQuality };
     }
     const { angle, transform, resultCanvas } = prep;
 
@@ -250,12 +277,16 @@ const Recognizer = (() => {
       stage(`OCR ${oi + 1}/${regions.length}`, 0.55 + 0.4 * (oi / Math.max(1, regions.length)));
       const cropCanvas = LineRemovalProcessor.extractRect(resultCanvas, mapRect(region, transform));
       if (!cropCanvas) {
-        fields[i] = { name: region.name, text: '', confidence: 0, error: '領域の切り出しに失敗しました' };
+        fields[i] = { name: region.name, globalName: region.globalName || region.name, text: '', confidence: 0, error: '領域の切り出しに失敗しました' };
         continue;
       }
+      const tFieldStart = performance.now();
       const res = await OcrProcessor.recognize(upscaleForOcr(cropCanvas), psm, prog => {
         cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
       }, useLang, useWl);
+      /* 言語がページ間・領域間で切り替わるとTesseractの言語データ再読み込みが走り
+         大幅に遅くなることがあるため、領域ごとの所要時間と使用言語を記録する。 */
+      console.log(`[perf]   OCR "${region.name}" lang=${useLang} ${(performance.now() - tFieldStart).toFixed(0)}ms`);
       let text = (res.fullText || '').trim();
       if (doNorm) text = OcrProcessor.normalize(text);
       if (doKanji) text = OcrProcessor.kanjiToNum(text);
@@ -268,6 +299,7 @@ const Recognizer = (() => {
       const conf = valueConfidence(text, res.symbols, confOf(res));
       fields[i] = {
         name: region.name,
+        globalName: region.globalName || region.name,
         text,
         raw,
         confidence: conf,
@@ -280,7 +312,7 @@ const Recognizer = (() => {
     }
 
     stage('完了', 1);
-    return { angle, transform, resultCanvas, previewMats: prep.previewMats, fields, error: null };
+    return { angle, transform, resultCanvas, previewMats: prep.previewMats, fields, error: null, matchQuality: prep.matchQuality };
   }
 
   /**

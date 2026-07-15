@@ -270,7 +270,7 @@ const LineRemovalProcessor = (() => {
       const out = document.createElement('canvas');
       out.width  = srcCanvas.width;
       out.height = srcCanvas.height;
-      out.getContext('2d').drawImage(srcCanvas, 0, 0);
+      out.getContext('2d', { willReadFrequently: true }).drawImage(srcCanvas, 0, 0);
       return out;
     }
     let src = null, dst = null, M = null;
@@ -288,6 +288,9 @@ const LineRemovalProcessor = (() => {
       const out = document.createElement('canvas');
       out.width  = srcCanvas.width;
       out.height = srcCanvas.height;
+      /* cv.imshowが内部で素のgetContext('2d')を呼ぶ前に、ここで先にオプション付きで
+         コンテキストを確定させる（このoutは後段でさらにOpenCV/切り出しに読まれる）。 */
+      out.getContext('2d', { willReadFrequently: true });
       cv.imshow(out, dst);
       return out;
     } catch (e) {
@@ -295,7 +298,7 @@ const LineRemovalProcessor = (() => {
       const out = document.createElement('canvas');
       out.width  = srcCanvas.width;
       out.height = srcCanvas.height;
-      out.getContext('2d').drawImage(srcCanvas, 0, 0);
+      out.getContext('2d', { willReadFrequently: true }).drawImage(srcCanvas, 0, 0);
       return out;
     } finally {
       if (src) try { src.delete(); } catch (_) {}
@@ -328,7 +331,7 @@ const LineRemovalProcessor = (() => {
     const out = document.createElement('canvas');
     out.width  = clampedW;
     out.height = clampedH;
-    out.getContext('2d').drawImage(srcCanvas, sx, sy, clampedW, clampedH, 0, 0, clampedW, clampedH);
+    out.getContext('2d', { willReadFrequently: true }).drawImage(srcCanvas, sx, sy, clampedW, clampedH, 0, 0, clampedW, clampedH);
     return out;
   }
 
@@ -349,7 +352,7 @@ const LineRemovalProcessor = (() => {
     if (cw <= 0 || ch <= 0) return null;
     const out = document.createElement('canvas');
     out.width = cw; out.height = ch;
-    out.getContext('2d').drawImage(srcCanvas, sx, sy, cw, ch, 0, 0, cw, ch);
+    out.getContext('2d', { willReadFrequently: true }).drawImage(srcCanvas, sx, sy, cw, ch, 0, 0, cw, ch);
     return out;
   }
 

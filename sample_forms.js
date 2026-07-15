@@ -18,7 +18,7 @@ const SampleForms = (() => {
   }
   function crop(src, x, y, w, h) {
     const c = mkCanvas(w, h);
-    c.getContext('2d').drawImage(src, x, y, w, h, 0, 0, w, h);
+    c.getContext('2d', { willReadFrequently: true }).drawImage(src, x, y, w, h, 0, 0, w, h);
     return c;
   }
   const url = c => c.toDataURL('image/png');
@@ -168,7 +168,7 @@ const SampleForms = (() => {
     const c = drawForm(SPECS[formIndex]);
     if (!angleDeg) return c;
     const out = mkCanvas(c.width, c.height);
-    const ctx = out.getContext('2d');
+    const ctx = out.getContext('2d', { willReadFrequently: true });
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, out.width, out.height);
     ctx.translate(c.width / 2, c.height / 2);
     ctx.rotate(angleDeg * Math.PI / 180);

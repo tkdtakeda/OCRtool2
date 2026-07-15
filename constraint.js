@@ -52,6 +52,7 @@ const CharConstraint = (() => {
     '7': ['T'], 'T': ['7'],
     '8': ['B'], 'B': ['8'],
     '9': ['g', 'q'], 'g': ['9'], 'q': ['9'],
+    'Y': ['V', 'v'], 'V': ['Y'], 'v': ['Y'],
     /* 日本語OCRの数字誤認（漢数字・記号） */
     '一': ['1'], '〇': ['0'], '○': ['0'], '◯': ['0'], '２': ['2'],
   };
@@ -130,22 +131,32 @@ const CharConstraint = (() => {
 
   /**
    * 任意の入力を正規化する。
-   * @returns {{ variable:boolean, len?:number, pos?:string[], set?:string, extract:boolean } | null}
+   * subs/sub: ユーザーが桁ごとに管理できる独自の読み替え（例: OCRが"v"と読んだら"Y"扱い）。
+   *   組み込みのCONFUSEテーブルより優先して参照される。
+   * strict: 読み替え・CONFUSEのどちらでも直せない誤読を、読み取った文字のまま出す
+   *   のではなく「?」に置き換えて必ず気づけるようにするか（桁ごとに指定可）。
+   * @returns {{ variable:boolean, len?:number, pos?:string[], subs?:object[], strict?:boolean[],
+   *             set?:string, sub?:object, extract:boolean } | null}
    */
   function normalize(rule) {
     if (!rule) return null;
     if (typeof rule === 'string') return normalize(fromMask(rule));
     const extract = !!rule.extract;
+    const cloneMap = m => (m && typeof m === 'object') ? { ...m } : {};
     if (rule.variable) {
       const set = typeof rule.set === 'string' ? rule.set : '';
       if (!set) return null;
-      return { variable: true, set, extract };
+      return { variable: true, set, extract, sub: cloneMap(rule.sub), strict: !!rule.strict };
     }
     const len = rule.len | 0;
     if (len <= 0 || !Array.isArray(rule.pos)) return null;
-    const pos = [];
-    for (let i = 0; i < len; i++) pos.push(typeof rule.pos[i] === 'string' ? rule.pos[i] : '');
-    return { variable: false, len, pos, extract };
+    const pos = [], subs = [], strict = [];
+    for (let i = 0; i < len; i++) {
+      pos.push(typeof rule.pos[i] === 'string' ? rule.pos[i] : '');
+      subs.push(cloneMap(rule.subs && rule.subs[i]));
+      strict.push(!!(rule.strict && rule.strict[i]));
+    }
+    return { variable: false, len, pos, subs, strict, extract };
   }
 
   function isActive(rule) { return !!normalize(rule); }
@@ -161,9 +172,19 @@ const CharConstraint = (() => {
     return true;
   }
 
-  /* ── 1文字補正（許可集合に合うように寄せる） ─────────── */
-  function correctChar(c, allow) {
+  /* 空欄プレースホルダ: 読み替え・CONFUSEどちらでも直せず、かつstrict指定の桁で使う。
+     普通の文字と混同されないよう半角記号1文字にする。 */
+  const UNRESOLVED = '?';
+
+  /* ── 1文字補正（許可集合に合うように寄せる） ─────────────
+     customSubs（ユーザーがその桁専用に登録した読み替え）を、組み込みの
+     CONFUSEテーブルより先に見る＝ユーザー設定が常に優先される。 */
+  function correctChar(c, allow, customSubs) {
     if (allow.has(c)) return c;
+    if (customSubs) {
+      const mapped = customSubs[c];
+      if (mapped !== undefined && allow.has(mapped)) return mapped;
+    }
     if (c >= 'a' && c <= 'z' && allow.has(c.toUpperCase())) return c.toUpperCase();
     if (c >= 'A' && c <= 'Z' && allow.has(c.toLowerCase())) return c.toLowerCase();
     for (const cand of (CONFUSE[c] || [])) {
@@ -196,7 +217,7 @@ const CharConstraint = (() => {
     if (r.variable) {
       /* 使える文字（補正で寄せられる文字）だけ残し、区切り・空白などは捨てる */
       const setS = new Set(r.set);
-      return arr.filter(c => correctChar(c, setS) != null).join('');
+      return arr.filter(c => correctChar(c, setS, r.sub) != null).join('');
     }
     /* 固定長: 制約に最も合う len 文字の窓を探す */
     const L = r.len;
@@ -206,7 +227,7 @@ const CharConstraint = (() => {
       let sc = 0;
       for (let k = 0; k < L; k++) {
         const s = r.pos[k];
-        if (!s || correctChar(arr[i + k], new Set(s)) != null) sc++;
+        if (!s || correctChar(arr[i + k], new Set(s), r.subs[k]) != null) sc++;
       }
       if (sc > bestScore) { bestScore = sc; best = i; }
     }
@@ -232,8 +253,8 @@ const CharConstraint = (() => {
       const out = [];
       for (const c of chars) {
         if (numeric && !setS.has(c) && NUM_NOISE.includes(c)) continue;   // 桁区切り等を除去
-        const f = correctChar(c, setS);
-        if (f != null) out.push(f); else { out.push(c); valid = false; }
+        const f = correctChar(c, setS, r.sub);
+        if (f != null) out.push(f); else { out.push(r.strict ? UNRESOLVED : c); valid = false; }
       }
       if (!out.length) valid = false;
       return { text: out.join(''), valid, applied: true };
@@ -245,9 +266,9 @@ const CharConstraint = (() => {
       if (i >= r.len) { out.push(chars[i]); valid = false; continue; }
       const s = r.pos[i];
       if (!s) { out.push(chars[i]); continue; }
-      const fixed = correctChar(chars[i], new Set(s));
+      const fixed = correctChar(chars[i], new Set(s), r.subs[i]);
       if (fixed != null) out.push(fixed);
-      else { out.push(chars[i]); valid = false; }
+      else { out.push(r.strict[i] ? UNRESOLVED : chars[i]); valid = false; }
     }
     if (chars.length < r.len) valid = false;
     return { text: out.join(''), valid, applied: true };
@@ -285,13 +306,19 @@ const CharConstraint = (() => {
     if (!r) return '';
     return r.variable ? '可変長' : `${r.len}桁`;
   }
-  /** ルール全体 → 一行の説明（桁数ラベルとは別に内容のみ） */
+  /** ルール全体 → 一行の説明（桁数ラベルとは別に内容のみ）。
+      独自読み替え・厳格モードを設定していれば、一覧でも気付けるよう件数を添える。 */
   function describe(rule) {
     const r = normalize(rule);
     if (!r) return '制約なし';
     const body = r.variable ? summarizePos(r.set)
                             : r.pos.map((s, i) => `${i + 1}:${summarizePos(s)}`).join(' / ');
-    return r.extract ? `${body}（前後除去）` : body;
+    const subsCount = r.variable ? Object.keys(r.sub).length : r.subs.reduce((n, s) => n + Object.keys(s).length, 0);
+    const hasStrict = r.variable ? r.strict : r.strict.some(Boolean);
+    let out = r.extract ? `${body}（前後除去）` : body;
+    if (subsCount) out += ` ・読替${subsCount}`;
+    if (hasStrict) out += ' ・厳格';
+    return out;
   }
 
   return {

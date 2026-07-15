@@ -23,12 +23,16 @@
     /* 描画 */
     drawMode: 'anchor', zoom: 1, baseScale: 1,
     isDrawing: false, ds: { x: 0, y: 0 }, dc: { x: 0, y: 0 }, pending: null,
+    repositioning: null,   // 登録済みアンカー/OCR領域の範囲を描き直し中: { kind:'anchor'|'region', id }
     /* 認識 */
     recogCanvas: null, lastClassify: null,
     recogFormId: null, recogMatchInfo: null, recogResult: null, rrZoom: 1,
     dbgLoadedFormId: null, patternOverrides: {}, constraintOverrides: {},
-    batchResults: null, batchCancel: false, review: null, rec: null,
+    batchResults: null, batchCancel: false, batchResume: null, review: null, rec: null,
+    batchReviewActive: false, reviewTrustRest: false, reviewGoToReconcileAfterBatch: false,
     recogPageNum: 1, pageNav: null, navReviewMode: false,
+    /* 位置ズレ警告: 帳票id→そのセッションで既に目立つ警告を出したか／件数 */
+    posWarnShown: new Set(), posWarnCounts: {},
   };
 
   /* PSM 比較用パターン */
@@ -39,8 +43,30 @@
   const dataURLtoImg = url => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('load fail')); i.src = url; });
   const fileToDataURL = file => new Promise((res, rej) => { const r = new FileReader(); r.onload = e => res(e.target.result); r.onerror = () => rej(new Error('read fail')); r.readAsDataURL(file); });
 
-  function canvasFromImg(img) { const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d').drawImage(img, 0, 0); return c; }
-  function thumbURL(canvas, w = 90) { const s = Math.min(1, w / canvas.width); const c = document.createElement('canvas'); c.width = Math.round(canvas.width * s); c.height = Math.round(canvas.height * s); c.getContext('2d').drawImage(canvas, 0, 0, c.width, c.height); return c.toDataURL('image/png'); }
+  /* willReadFrequently: これらのcanvasはOpenCV(cv.imread)やtoDataURLで直後に
+     画素を読み出すため、既定のGPUバッキングだと読み出しのたびにGPU→CPU転送が
+     発生して遅い（DevToolsの「Multiple readback operations…」警告の原因）。
+     生成時点でこのオプションを付けておくと、以後そのcanvasへの参照はずっと
+     ソフトウェアバッキングのまま速く読み出せる。 */
+  function canvasFromImg(img) { const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0); return c; }
+  function thumbURL(canvas, w = 90) { const s = Math.min(1, w / canvas.width); const c = document.createElement('canvas'); c.width = Math.round(canvas.width * s); c.height = Math.round(canvas.height * s); c.getContext('2d', { willReadFrequently: true }).drawImage(canvas, 0, 0, c.width, c.height); return c.toDataURL('image/png'); }
+  /* 切り出し画像（PNG dataURL）を保存用に縮小＋JPEG化して容量を抑える。照合での見比べ用。 */
+  function shrinkDataURL(dataURL, maxW = 260, quality = 0.72) {
+    return new Promise(resolve => {
+      if (!dataURL) return resolve('');
+      const img = new Image();
+      img.onload = () => {
+        const s = Math.min(1, maxW / img.naturalWidth);
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(img.naturalWidth * s));
+        c.height = Math.max(1, Math.round(img.naturalHeight * s));
+        c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => resolve('');
+      img.src = dataURL;
+    });
+  }
 
   /* ── 設定（判定しきい値・マッチング探索）。localStorage 永続化 ── */
   const SETTINGS_KEY = 'ocrtool_settings';
@@ -63,7 +89,7 @@
 
   /* ── CV lifecycle ───────────────────────────────────── */
   document.addEventListener('cv-ready', () => { S.cvReady = true; $('loadingOverlay').classList.add('hidden'); UI.toast('OpenCV.js の準備が完了しました', 'success'); });
-  document.addEventListener('cv-error', () => { $('loadingMsg').textContent = '読み込み失敗。インターネット接続を確認してください。'; UI.toast('OpenCV.js の読み込みに失敗しました', 'error', 6000); });
+  document.addEventListener('cv-error', () => { $('loadingMsg').innerHTML = 'OpenCV.js を読み込めませんでした。ネット接続を確認するか、サーバー無しで開く場合は <b>opencv.js</b> を index.html と同じフォルダに置いてください。'; UI.toast('OpenCV.js の読み込みに失敗しました', 'error', 6000); });
 
   /* ── モード切替 ─────────────────────────────────────── */
   function setMode(mode) {
@@ -89,16 +115,18 @@
     S.editingId = null; S.isSampleForm = false;
     S.refImg = null; S.refNatW = 0; S.refNatH = 0; S.refDataURL = null;
     S.anchors = []; S.regions = []; S.pending = null; S.zoom = 1; S.drawMode = 'anchor';
+    S.repositioning = null;
     $('formNameInput').value = '';
     $('refPreview').style.display = 'none'; $('refDropHint').style.display = 'flex';
     $('rectNameInput').value = '';
     applyLineRemovalToUI(LineRemovalProcessor.defaultParams());
     $('regPsm').value = '7'; $('regLang').value = 'eng'; $('regWhitelist').value = ''; $('regNormalize').checked = true; $('regNormalizeKanji').checked = false;
     setDrawMode('anchor');
+    updateRepositionBanner();
     $('regCanvas').style.display = 'none'; $('regCanvasPlaceholder').style.display = 'flex';
     $('editorEmpty').classList.add('hidden'); $('editorForm').classList.remove('hidden');
-    UI.renderAnchorList(S.anchors, removeAnchor);
-    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
+    UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
     refreshSteps();
     setTimeout(() => $('formNameInput').focus(), 50);
   }
@@ -109,14 +137,16 @@
     $('formNameInput').value = f.name || '';
     S.anchors = (f.anchors || []).map(a => ({ ...a }));
     S.regions = (f.ocrRegions || []).map(r => ({ ...r }));
-    S.zoom = 1; S.pending = null;
+    S.zoom = 1; S.pending = null; S.repositioning = null;
+    S.refNatW = 0; S.refNatH = 0;   // 通常読み込みでは自動スケール調整を発動させない（setReference参照）
     applyLineRemovalToUI(f.lineRemoval || LineRemovalProcessor.defaultParams());
     $('regPsm').value = String(f.ocrSettings?.psm ?? 7); $('regLang').value = f.ocrSettings?.lang || 'eng';
     $('regWhitelist').value = f.ocrSettings?.whitelist || ''; $('regNormalize').checked = f.ocrSettings?.normalize !== false; $('regNormalizeKanji').checked = !!f.ocrSettings?.normalizeKanji;
     $('editorEmpty').classList.add('hidden'); $('editorForm').classList.remove('hidden');
     setDrawMode('anchor');
-    UI.renderAnchorList(S.anchors, removeAnchor);
-    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
+    updateRepositionBanner();
+    UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+    UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
     await setReference(f.referenceImage.dataURL);
     refreshSteps();
   }
@@ -138,9 +168,35 @@
   /* ── 基準画像 ───────────────────────────────────────── */
   async function setReference(dataURL) {
     const img = await dataURLtoImg(dataURL);
+    const oldW = S.refNatW, oldH = S.refNatH;
+    const hadRef = !!S.refImg;
     S.refImg = img; S.refNatW = img.naturalWidth; S.refNatH = img.naturalHeight; S.refDataURL = dataURL;
     $('refPreview').src = dataURL; $('refPreview').style.display = 'block'; $('refDropHint').style.display = 'none';
     $('regCanvasPlaceholder').style.display = 'none'; $('regCanvas').style.display = 'block';
+    /* 編集中に基準画像を差し替えた場合（例: DPI不一致を直すため同じPDFを別解像度で
+       読み込み直す）、既存のアンカー/OCR領域はそのままだと座標が合わなくなる。
+       サイズ比から自動的に座標を追随させ、手で描き直す手間を無くす。
+       アンカーは切り出し画像も新しい基準画像から再クロップする（テンプレート
+       マッチングは実ピクセル内容で行うため、座標だけ動かしても不十分）。
+       新規フォーム作成時やeditForm()での通常読み込みではrefNatWが0にリセット
+       されているため、ここには来ない（無関係な拡縮を誤って適用しないため）。 */
+    if (hadRef && oldW && oldH && (oldW !== S.refNatW || oldH !== S.refNatH) && (S.anchors.length || S.regions.length)) {
+      const sx = S.refNatW / oldW, sy = S.refNatH / oldH;
+      S.anchors.forEach(a => {
+        const refX = Math.round((a.refX || 0) * sx), refY = Math.round((a.refY || 0) * sy);
+        const w = Math.max(1, Math.round(a.w * sx)), h = Math.max(1, Math.round(a.h * sy));
+        const crop = document.createElement('canvas'); crop.width = w; crop.height = h;
+        crop.getContext('2d', { willReadFrequently: true }).drawImage(S.refImg, refX, refY, w, h, 0, 0, w, h);
+        Object.assign(a, { refX, refY, w, h, dataURL: crop.toDataURL('image/png') });
+      });
+      S.regions.forEach(r => {
+        r.x = Math.round(r.x * sx); r.y = Math.round(r.y * sy);
+        r.w = Math.max(1, Math.round(r.w * sx)); r.h = Math.max(1, Math.round(r.h * sy));
+      });
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
+      UI.toast(`基準画像のサイズが変わったため、目印${S.anchors.length}件・OCR領域${S.regions.length}件の位置を自動調整しました（${Math.round(sx * 100)}%）`, 'info', 4500);
+    }
     computeBaseScale(); redrawRegCanvas(); refreshSteps();
   }
   function computeBaseScale() {
@@ -221,31 +277,74 @@
     if (!S.pending) { UI.toast('先に画像上でドラッグして範囲を指定してください', 'warning'); return; }
     const name = $('rectNameInput').value.trim();
     if (!name) { UI.toast('名前を入力してください', 'warning'); $('rectNameInput').focus(); return; }
-    if (S.drawMode === 'anchor') {
+    const p = S.pending;
+    const repos = S.repositioning;
+    if (repos && repos.kind === 'anchor') {
+      /* 登録済みアンカーの範囲を描き直し：id・他の設定はそのまま、座標と切り出し画像だけ更新 */
+      const a = S.anchors.find(x => x.id === repos.id);
+      if (a) {
+        const crop = document.createElement('canvas'); crop.width = p.w; crop.height = p.h;
+        crop.getContext('2d', { willReadFrequently: true }).drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
+        Object.assign(a, { name, dataURL: crop.toDataURL('image/png'), w: p.w, h: p.h, refX: p.x, refY: p.y });
+      }
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+    } else if (repos && repos.kind === 'region') {
+      const r = S.regions.find(x => x.id === repos.id);
+      if (r) Object.assign(r, { name, x: p.x, y: p.y, w: p.w, h: p.h });
+      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
+    } else if (S.drawMode === 'anchor') {
       /* 基準画像から切り出してアンカー画像を生成 */
-      const p = S.pending;
       const crop = document.createElement('canvas'); crop.width = p.w; crop.height = p.h;
-      crop.getContext('2d').drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
+      crop.getContext('2d', { willReadFrequently: true }).drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
       S.anchors.push({ id: uid(), name, dataURL: crop.toDataURL('image/png'), w: p.w, h: p.h, refX: p.x, refY: p.y });
-      UI.renderAnchorList(S.anchors, removeAnchor);
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
     } else {
-      const p = S.pending;
       S.regions.push({ id: uid(), name, x: p.x, y: p.y, w: p.w, h: p.h });
-      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
+      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
     }
-    S.pending = null; $('rectNameInput').value = ''; $('btnAddRect').disabled = true;
+    S.repositioning = null; S.pending = null; $('rectNameInput').value = ''; $('btnAddRect').disabled = true;
+    updateRepositionBanner();
     redrawRegCanvas(); refreshSteps();
-    UI.toast(`「${name}」を追加しました`, 'success', 1600);
+    UI.toast(repos ? `「${name}」の範囲を更新しました` : `「${name}」を追加しました`, 'success', 1600);
   }
-  function removeAnchor(id) { S.anchors = S.anchors.filter(a => a.id !== id); UI.renderAnchorList(S.anchors, removeAnchor); redrawRegCanvas(); refreshSteps(); }
-  function removeRegion(id) { S.regions = S.regions.filter(r => r.id !== id); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor); redrawRegCanvas(); refreshSteps(); }
+  function removeAnchor(id) { S.anchors = S.anchors.filter(a => a.id !== id); UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor); redrawRegCanvas(); refreshSteps(); }
+  function removeRegion(id) { S.regions = S.regions.filter(r => r.id !== id); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName); redrawRegCanvas(); refreshSteps(); }
   function setRegionPattern(id, val) { const r = S.regions.find(x => x.id === id); if (r) r.pattern = (val || '').trim(); }
+  function setRegionGlobalName(id, val) { const r = S.regions.find(x => x.id === id); if (r) r.globalName = (val || '').trim(); }
+  function renameAnchor(id, name) { const a = S.anchors.find(x => x.id === id); if (a) { a.name = name; redrawRegCanvas(); } }
+  function renameRegion(id, name) { const r = S.regions.find(x => x.id === id); if (r) { r.name = name; redrawRegCanvas(); } }
   function openRegionConstraintEditor(id) {
     const r = S.regions.find(x => x.id === id); if (!r) return;
     CharRuleEditor.open(r.name, r.charRule || r.constraint, rule => {
       r.charRule = rule; delete r.constraint;   // 旧形式(文字列)は新形式へ移行
-      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
+      UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
     });
+  }
+  /* ── 登録済みアンカー/OCR領域の位置を描き直す ─────────
+     「範囲を描き直す」ボタン押下→次の1回のドラッグを、新規追加ではなく
+     対象の座標更新として扱う。名前欄は現在の名前を保持（そのままドラッグすれば
+     名前は変わらず、書き換えれば改名も同時にできる）。 */
+  function startReposition(kind, id) {
+    const list = kind === 'anchor' ? S.anchors : S.regions;
+    const item = list.find(x => x.id === id); if (!item) return;
+    S.repositioning = { kind, id };
+    setDrawMode(kind === 'anchor' ? 'anchor' : 'ocr');
+    $('rectNameInput').value = item.name;
+    updateRepositionBanner();
+    UI.toast(`「${item.name}」の新しい範囲を画像上でドラッグしてください`, 'info', 3500);
+  }
+  function startRepositionAnchor(id) { startReposition('anchor', id); }
+  function startRepositionRegion(id) { startReposition('region', id); }
+  function cancelReposition() {
+    if (!S.repositioning) return;
+    S.repositioning = null; S.pending = null; $('rectNameInput').value = ''; $('btnAddRect').disabled = true;
+    updateRepositionBanner(); redrawRegCanvas();
+  }
+  function updateRepositionBanner() {
+    const b = $('repositionBanner'); if (!b) return;
+    const active = !!S.repositioning;
+    b.classList.toggle('hidden', !active);
+    if (active) $('repositionBannerText').textContent = `「${$('rectNameInput').value}」の位置を再設定中：画像上でドラッグしてください`;
   }
 
   /* ── 別画像から識別アンカーを自動配置 ───────────────── */
@@ -255,13 +354,13 @@
     try {
       const img = await dataURLtoImg(dataURL);
       const refCanvas = canvasFromImg(S.refImg);
-      const map = MatcherEngine.matchAll(refCanvas, [{ id: '_a', imageElement: img }], { angleRange: 0, angleStep: 1 });
+      const map = await MatcherEngine.matchAll(refCanvas, [{ id: '_a', imageElement: img }], { angleRange: 0, angleStep: 1 });
       const r = map.get('_a') || { score: 0, loc: { x: 0, y: 0 } };
       if (r.score < 0.5) { UI.toast(`基準画像内に見つかりませんでした（スコア ${r.score.toFixed(2)}）`, 'warning', 4000); return; }
       const name = prompt('識別アンカー名を入力', `アンカー${S.anchors.length + 1}`);
       if (name === null) return;
       S.anchors.push({ id: uid(), name: (name || 'アンカー').trim(), dataURL, w: img.naturalWidth, h: img.naturalHeight, refX: r.loc.x, refY: r.loc.y });
-      UI.renderAnchorList(S.anchors, removeAnchor); redrawRegCanvas(); refreshSteps();
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor); redrawRegCanvas(); refreshSteps();
       UI.toast(`自動配置しました（スコア ${r.score.toFixed(2)}, 位置 ${r.loc.x},${r.loc.y}）`, 'success', 3500);
     } catch (e) { UI.toast('処理に失敗しました: ' + e.message, 'error'); }
   }
@@ -366,9 +465,10 @@
         $('closeSampleFormModal').click();
         S.anchors = f.anchors.map(a => ({ ...a, id: uid() }));
         S.regions = f.ocrRegions.map(r => ({ ...r, id: uid() }));
+        S.refNatW = 0; S.refNatH = 0;   // 通常読み込みでは自動スケール調整を発動させない（setReference参照）
         $('formNameInput').value = f.name;
         applyLineRemovalToUI(f.lineRemoval); $('regPsm').value = String(f.ocrSettings.psm);
-        UI.renderAnchorList(S.anchors, removeAnchor); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor);
+        UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
         await setReference(f.referenceImage.dataURL);
         UI.toast('サンプルレイアウトを読み込みました。確認して保存してください', 'info', 4000);
       });
@@ -445,6 +545,31 @@
     return best;
   }
 
+  /* ── 位置ズレ（スケール不一致）の注意喚起 ─────────────
+     基準画像と実際にOCRする画像とで拡大率が大きく違うと（例: 登録時とは
+     別のDPIでPDFを読み込んだ）、原点の再ローカライズが対応できる範囲
+     （およそ0.8〜1.22倍）を超え、OCR領域の位置が気づかれないままずれる。
+     認知心理学的な設計:
+       ・色+アイコンの二重符号化で「よくある成功/情報トースト」と区別する
+       ・具体的な数値と直接の対処法を示し、思い出す負荷を減らす(再認>再生)
+       ・同じ帳票で連発すると慣れて見なくなる(アラーム疲れ)ため、目立つ
+         通知はセッション中その帳票につき最初の1回のみ。以降は件数だけ
+         静かに積算し、バッチ完了時にまとめて知らせる。 */
+  function checkPositionWarning(form, matchQuality) {
+    if (!form || !matchQuality || !(matchQuality.scaleEdge || matchQuality.weakMatch)) return;
+    S.posWarnCounts[form.id] = (S.posWarnCounts[form.id] || 0) + 1;
+    if (S.posWarnShown.has(form.id)) return;
+    S.posWarnShown.add(form.id);
+    const pct = Math.round((matchQuality.bestScale || 1) * 100);
+    const detail = matchQuality.weakMatch
+      ? '目印（アンカー）がうまく見つかりませんでした。'
+      : `検出された倍率が調整可能な範囲の端（${pct}%）に達しており、実際の倍率はそれ以上に違う可能性があります。`;
+    UI.toast(
+      `⚠ 「${form.name}」: OCRの位置がずれているかもしれません。${detail} 基準画像を今回と同じ解像度(DPI)で登録し直すと改善します。`,
+      'warning', 15000
+    );
+  }
+
   /* 帳票を適用 → 設定パネルの値で実行（調整済みの値は保持） */
   async function applyForm(formId) {
     if (!S.lastClassify) return UI.toast('先に「認識を実行」してください', 'warning');
@@ -482,6 +607,7 @@
         onOcr: (i, total, fname, status, pct) => UI.updateRecogProgress(`OCR ${i + 1}/${total}「${fname}」: ${status}`, 0.55 + 0.4 * ((i + (pct || 0)) / total)),
       });
       if (result.error) { UI.showRecogProgress(false); LineRemovalProcessor.cleanupMats(result.previewMats); return UI.toast('処理エラー: ' + result.error, 'error', 5000); }
+      checkPositionWarning(form, result.matchQuality);
 
       UI.setPipeline(null, ['match', 'decide', 'rotate', 'line', 'ocr']);
       UI.showRecogProgress(false);
@@ -510,6 +636,8 @@
      Enter=次へ / Shift+Enter or「すべて完了」=途中でも全件保存。 */
   function openReview(form, result) {
     S.review = { form, result, idx: 0 };
+    $('reviewBatchBar').classList.add('hidden');     // 単一ページ確認では一括用の進捗・ページ表示は出さない
+    $('reviewPageCtx').classList.add('hidden');
     $('reviewModal').classList.remove('hidden');
     reviewRender();
     setTimeout(() => { $('reviewValue').focus(); $('reviewValue').select(); }, 60);
@@ -529,11 +657,27 @@
     $('reviewValue').value = f.error ? '' : (f.text || '');
     $('reviewConf').innerHTML = f.error ? '<span class="conf-badge lo">読取エラー</span>'
       : `信頼度 <span class="conf-badge ${UI.confClass(f.confidence)}">${f.confidence}%</span>`;
+    /* 画像のすぐ下にも読み取り結果を出し、入力欄まで視線を動かさず見比べられるようにする */
+    const rt = $('reviewReadoutText');
+    rt.textContent = f.error ? '読取エラー' : (f.text || '(空欄)');
+    rt.classList.toggle('is-empty', !!f.error || !f.text);
+    $('reviewReadoutConf').textContent = f.error ? '' : `${f.confidence}%`;
+    $('reviewReadoutConf').className = 'conf-badge' + (f.error ? '' : ` ${UI.confClass(f.confidence)}`);
+    /* 文字制約に一致しない（補正でも直せなかった）場合の注意表示。
+       信頼度は高いまま出ることがある（誤読自体は明瞭に写っているケース）ため、
+       信頼度バッジとは別に必ず出す。 */
+    const consWarn = !f.error && f.constraint && f.constraintValid === false && f.text;
+    $('reviewConstraintWarn').classList.toggle('hidden', !consWarn);
+    if (consWarn) $('reviewConstraintWarn').title = `文字制約「${f.constraint}」に一致しません（該当する誤読補正が無いため、読み取った文字のまま表示）`;
     $('reviewSyms').innerHTML = UI.symbolChipsHTML(f.symbols);
     $('reviewPrev').disabled = i === 0;
     const last = i === fields.length - 1;
-    $('reviewNext').innerHTML = last ? '<i class="fas fa-check"></i> 完了（保存）' : '次へ <i class="fas fa-arrow-right"></i>';
+    /* 一括（OCR中確認）では「完了→次ページ」、単一では「完了（保存）」 */
+    const lastLabel = rv.batch ? '<i class="fas fa-check"></i> このページを確定' : '<i class="fas fa-check"></i> 完了（保存）';
+    $('reviewNext').innerHTML = last ? lastLabel : '次へ <i class="fas fa-arrow-right"></i>';
     $('reviewNext').className = 'btn ' + (last ? 'btn-success' : 'btn-primary');
+    $('reviewCancel').textContent = rv.batch ? '中止（ここまで保存）' : 'キャンセル';
+    $('reviewAll').innerHTML = rv.batch ? '<i class="fas fa-check-double"></i> このページを全確定' : '<i class="fas fa-check-double"></i> すべて完了';
   }
   function reviewGo(delta) {
     reviewSaveEdit();
@@ -547,6 +691,9 @@
   async function reviewComplete() {
     reviewSaveEdit();
     const rv = S.review; if (!rv) return;
+    /* 一括（OCR中確認）: このページを確定 → ループ側が保存して次ページへ
+       （次ページが先読み済みなら待ちなしで切り替わる。未完了なら直後にループが「認識中」を出す） */
+    if (rv.batch) { const done = rv.batch.resolve; S.review = null; done('done'); return; }
     const { form, result } = rv;
     reviewHide();
     UI.renderFieldResults(result.fields);   // 修正を画面に反映
@@ -555,8 +702,28 @@
     UI.toast(`確認完了 — ${ok}/${result.fields.length} フィールドをDBへ保存しました`, 'success');
   }
   function reviewCancel() {
+    const rv = S.review;
+    /* 一括（OCR中確認）: 中止 → このページは保存せずループを終了（ここまでは保存済み） */
+    if (rv && rv.batch) { const stop = rv.batch.resolve; S.review = null; stop('stop'); return; }
     reviewHide();
     UI.toast('確認をキャンセルしました（未保存）。結果は画面に表示中です', 'info', 4000);
+  }
+  /* Shift+Enter: 表示中のページ（あれば）を確定し、以降の残りページはOCR結果をそのまま
+     信頼して自動確定し続け、バッチ完了後に照合画面へ自動で進む。
+     認識中（busy）で reviewValue が disabled の間は自身の keydown が拾えないため、
+     document 側のグローバルハンドラからも同じ関数を呼べるようにしてある。 */
+  function reviewTrustRestAndReconcile() {
+    if (!S.batchReviewActive || S.reviewTrustRest) return;
+    S.reviewTrustRest = true;
+    S.reviewGoToReconcileAfterBatch = true;
+    UI.toast('残りはOCR結果を信頼して自動確定します。完了後に照合へ進みます', 'info', 3500);
+    const rv = S.review;
+    if (rv && rv.batch) {
+      reviewSaveEdit();
+      const done = rv.batch.resolve;
+      S.review = null;
+      done('done');
+    }
   }
 
   /* デバッグパネル設定で上書きした帳票を返す */
@@ -790,11 +957,17 @@
 
   /* 認識結果を履歴レコードへ整形（単一ページ・一括の共通処理）。
      DB出力用に page（ページ数）と ocrValues（OCR1, OCR2,… の番号付き値）も保持する。 */
-  function buildResultRecord(form, dec, result, srcCanvas, manual, page) {
+  async function buildResultRecord(form, dec, result, srcCanvas, manual, page) {
     const avgConf = result.fields.length ? Math.round(result.fields.reduce((s, f) => s + (f.confidence || 0), 0) / result.fields.length) : 0;
     /* OCRエリア名 → 値（DB出力・照合用）。名前が無い場合のみ OCRn で補完 */
     const ocrValues = {};
     result.fields.forEach((f, i) => { ocrValues[f.name || ('OCR' + (i + 1))] = f.text || ''; });
+    /* 各フィールドの切り出し画像を縮小JPEGで保持（照合での見比べ用）。OCR時に生成済みなので再計算は不要 */
+    const fields = await Promise.all(result.fields.map(async f => ({
+      name: f.name, globalName: f.globalName || f.name, text: f.text, confidence: f.confidence, error: f.error || null,
+      constraint: f.constraint || '', constraintValid: f.constraintValid !== false,
+      crop: await shrinkDataURL(f.cropDataURL),
+    })));
     return {
       id: uid(),
       formId: form.id, formName: form.name,
@@ -808,14 +981,14 @@
       ocrValues,                                   // { OCR1:'…', OCR2:'…' }（DB出力用）
       voting: { margin: dec.margin, legacySignal: dec.legacySignal, ranking: (dec.ranking || []).map(r => ({ formName: r.formName, peak: r.peak, agg: r.agg, support: r.support })) },
       settings: { ocr: form.ocrSettings, lineRemoval: form.lineRemoval },
-      fields: result.fields.map(f => ({ name: f.name, text: f.text, confidence: f.confidence, error: f.error || null })),
+      fields,
     };
   }
   async function saveResult(form, result) {
     if (S.navReviewMode) return;                 // 一括結果の確認のための再実行は保存しない（重複防止）
     const dec = S.lastClassify.decision;
     const manual = !(dec.best && dec.best.formId === form.id);
-    const record = buildResultRecord(form, dec, result, S.recogCanvas, manual, S.recogPageNum || 1);
+    const record = await buildResultRecord(form, dec, result, S.recogCanvas, manual, S.recogPageNum || 1);
     try { await FormDB.putResult(record); $('saveStatus').innerHTML = `<i class="fas fa-circle-check"></i> IndexedDB に保存しました（平均信頼度 ${record.overallFieldConfidence}%）`; refreshHistory(); }
     catch (e) { $('saveStatus').textContent = '保存に失敗: ' + e.message; }
   }
@@ -830,68 +1003,230 @@
   /* ════════════════════════════════════════════════════
      複数ページ一括OCR（PDFの全ページ）
      ════════════════════════════════════════════════════ */
-  /* 1枚のキャンバスを判定→OCRし、結果と履歴保存まで行う（UIは触らない）。
+  /* 1枚のキャンバスを判定→OCRする（保存はしない／UIは触らない）。
      forcedFormId 指定時はその帳票で必ずOCR。未指定（自動）でも、確信度が低く
-     「要確認」でも best候補があれば停止せずOCRする（複数ページで止まらないように）。 */
-  async function recognizePageQuietly(canvas, page, forcedFormId) {
+     「要確認」でも best候補があれば停止せずOCRする（複数ページで止まらないように）。
+     確認カルーセルで修正してから保存できるよう、保存用の材料を _save に持たせて返す。 */
+  async function ocrPageForBatch(canvas, page, forcedFormId) {
     const thumb = thumbURL(canvas, 120);
+    const t0 = performance.now();
     try {
       const { decision, scores } = await Recognizer.classify(canvas, S.forms, classifyOpts());
+      const t1 = performance.now();
       const candId = decision.best && decision.best.formId;
       const useId = forcedFormId || candId;
       const form = useId ? S.forms.find(f => f.id === useId) : null;
-      if (!form) return { page, decision: decision.decision, formName: '—', fields: [], thumb };
+      if (!form) { console.log(`[perf] p${page} classify=${(t1 - t0).toFixed(0)}ms（帳票不一致）`); return { page, decision: decision.decision, formName: '—', fields: [], thumb }; }
       /* 表示用の判定ラベル: 手動指定=指定どおり採用 / 自動=本来の判定を踏襲 */
       const verdict = forcedFormId ? 'accepted' : decision.decision;
       const res = await Recognizer.runOcr(canvas, form, bestAnchorFor(form, scores), {}, {});
+      const t2 = performance.now();
+      console.log(`[perf] p${page} classify=${(t1 - t0).toFixed(0)}ms runOcr=${(t2 - t1).toFixed(0)}ms total=${(t2 - t0).toFixed(0)}ms fields=${res.fields.length}`);
       if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
+      checkPositionWarning(form, res.matchQuality);
       LineRemovalProcessor.cleanupMats(res.previewMats);
       const manual = forcedFormId ? true : !(candId === form.id);
-      try { await FormDB.putResult(buildResultRecord(form, decision, res, canvas, manual, page)); } catch (_) {}
       const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
-      return { page, decision: verdict, formName: form.name, formId: form.id, forced: !!forcedFormId, avgConf: avg, fields: res.fields, thumb };
+      return {
+        page, decision: verdict, formName: form.name, formId: form.id, forced: !!forcedFormId,
+        avgConf: avg, fields: res.fields, thumb,
+        _save: { form, dec: decision, res, canvas, manual, page },   // 確認後に putResult する材料
+      };
     } catch (e) {
       return { page, decision: 'error', formName: '—', error: e.message || String(e), thumb };
     }
   }
 
+  /* 一括結果1ページ分を履歴(IndexedDB)へ保存。確認カルーセルでの修正は
+     res.fields[].text に反映済みなので、そのまま buildResultRecord が拾う。 */
+  async function persistBatchRecord(r) {
+    if (!r || !r._save) return;
+    const s = r._save;
+    try { await FormDB.putResult(await buildResultRecord(s.form, s.dec, s.res, s.canvas, s.manual, s.page)); } catch (_) {}
+    r._save = null;   // ページ全体の canvas/結果への参照を解放（大量ページでもメモリ一定に保つ）
+  }
+
+  /* 経過時間を「30秒」「2分」のような読みやすい形式にする */
+  function formatDuration(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return `${s}秒`;
+    const m = Math.floor(s / 60), rs = s % 60;
+    return `${m}分${rs ? rs + '秒' : ''}`;
+  }
+
   /* 指定範囲のページを順に一括OCR（pageSource = { pages:[n…], total, getPage(n), done() }）。
      大量ページでも 1枚ずつ描画→OCR→破棄するためメモリは一定。中止可能。 */
-  async function runBatchPdf(src) {
+  async function runBatchPdf(src, opts) {
     if (!S.cvReady) { src.done && src.done(); return UI.toast('OpenCV.js 読み込み中です', 'warning'); }
     if (!S.forms.length) { src.done && src.done(); return UI.toast('先に帳票を登録してください', 'warning'); }
-    releasePageNav();                            // 前回の一括結果ナビゲーションを解放
+    const posWarnBefore = { ...S.posWarnCounts };   // このバッチ中に増えた件数だけをサマリで報告するため
+    const resuming = !!(opts && opts.resuming);
+    const priorResults = resuming ? (S.batchResults || []) : [];
+    if (!resuming) { releasePageNav(); S.batchResume = null; }   // 新規アップロード時は前回の「続きから」を無効化（PDFハンドルが破棄されるため）
     const pages = src.pages || [];
     const total = src.total || pages.length;
-    UI.openBatchModal(total);
+    const review = !!src.review;                 // OCR中に1ページずつカルーセルで確認するか
     S.batchCancel = false;
+    S.batchReviewActive = review;
+    S.reviewTrustRest = false;                   // Shift+Enterで「残りは信頼して照合へ」が押されたか
+    S.reviewGoToReconcileAfterBatch = false;
     const results = [];
     let cancelled = false;
-    try {
-      for (let idx = 0; idx < pages.length; idx++) {
-        if (S.batchCancel) { cancelled = true; break; }
-        const p = pages[idx];
-        UI.updateBatchProgress(`ページ ${p}（${idx + 1}/${total}）を認識中…`, idx / Math.max(1, total));
-        await new Promise(r => setTimeout(r, 5));   // 進捗描画・中止受付の隙間
+    if (review) reviewBatchOpen(total); else UI.openBatchModal(total, resuming);
+
+    /* 1ページ分のラスタライズ＋OCRを開始し、完了フラグ付きで返す（先読み用に await しない）。
+       確認中に次ページを裏でOCRしておくことで、確定→次ページの待ち時間をなくす。 */
+    const ocrAt = i => {
+      if (i < 0 || i >= pages.length) return null;
+      const p = pages[i];
+      const forcedFormId = src.formFor ? src.formFor(p) : '';
+      const entry = { page: p, ready: false };
+      entry.promise = (async () => {
+        const t0 = performance.now();
         let canvas;
         try { canvas = await src.getPage(p); }
-        catch (_) { results.push({ page: p, decision: 'error', formName: '—', error: 'ページ描画に失敗', thumb: '' }); continue; }
-        const forcedFormId = src.formFor ? src.formFor(p) : '';
-        results.push(await recognizePageQuietly(canvas, p, forcedFormId));
+        catch (_) { return { page: p, decision: 'error', formName: '—', error: 'ページ描画に失敗', thumb: '' }; }
+        const t1 = performance.now();
+        const r = await ocrPageForBatch(canvas, p, forcedFormId);
+        /* どこで時間が掛かっているか比較できるよう、ページごとの内訳をコンソールに出す
+           （ラスタライズ=PDF描画、以降はocrPageForBatch内で計測してconsole出力済み）。
+           hidden=true が長い区間はタブがバックグラウンドだった可能性が高い。 */
+        console.log(`[perf] p${p} rasterize=${(t1 - t0).toFixed(0)}ms hidden=${document.hidden}`);
+        return r;
+      })();
+      entry.promise.then(() => { entry.ready = true; }, () => { entry.ready = true; });
+      return entry;
+    };
+
+    const batchStartTime = Date.now();
+    /* idx件処理済み時点での「残り推定時間」の文字列（実測が無い最初の1件目は算出不可） */
+    const etaText = idx => idx < 1 ? '' : `（残り約${formatDuration((Date.now() - batchStartTime) / idx * (total - idx))}）`;
+    /* タブを離れて放置した場合にChromeのバックグラウンドタイマー間引きが起きていないか
+       ログで裏付けられるよう、一括処理中だけ可視状態の変化を記録する。 */
+    const onVisChange = () => console.log(`[perf] visibilitychange hidden=${document.hidden} at ${Date.now() - batchStartTime}ms`);
+    document.addEventListener('visibilitychange', onVisChange);
+
+    let cur = ocrAt(0);                          // 先頭ページのOCRを先行開始
+    try {
+      for (let idx = 0; idx < pages.length; idx++) {
+        if (!cur || S.batchCancel) { if (S.batchCancel) cancelled = true; break; }
+        const p = pages[idx], pct = idx / Math.max(1, total);
+        if (!cur.ready) {                        // 先読みが間に合っていない時だけ「認識中」を出す
+          const msg = `ページ ${p}（${idx + 1}/${total}）を認識中…${etaText(idx)}`;
+          if (review) { reviewBatchBusy(true); reviewBatchProgress(msg, pct); }
+          else UI.updateBatchProgress(msg, pct);
+          /* 進捗描画・中止受付の隙間は、直後の await cur.promise（未解決＝必ず一度サスペンドする）
+             が既に与えてくれるため、ここで独自に setTimeout は挟まない。
+             タブがバックグラウンドで非表示になるとChromeのタイマー間引き（Intensive
+             Throttling）でsetTimeoutが最大1分/回まで遅延することがあり、一括処理を
+             放置した際に毎ページこの遅延を踏んで極端に遅くなる原因になり得るため。 */
+        }
+        const r = await cur.promise;
+        const nextEntry = ocrAt(idx + 1);        // ★先読み: 確認している間に次ページを裏でOCR
+        /* review: OCR結果を1ページずつ写真と見比べ→修正→確認してから保存。
+           「残りは信頼して照合へ」(Shift+Enter)が押された後は、このスキップ判定により
+           以降のページはOCR結果をそのまま採用し、確認カルーセルは出さない。 */
+        if (review && !S.reviewTrustRest && r._save && r.fields && r.fields.length) {
+          const action = await reviewBatchPage(r, idx, total);
+          if (action === 'stop') { cancelled = true; break; }   // 中止: このページは保存しない
+        }
+        await persistBatchRecord(r);
+        results.push(r);
+        cur = nextEntry;
       }
-    } finally { /* 詳細ペインでのページ送り用に PDF を保持するため、ここでは破棄しない */ }
-    S.batchResults = results;
+    } finally {
+      document.removeEventListener('visibilitychange', onVisChange);
+      /* 詳細ペインでのページ送り用に PDF を保持するため、ここでは破棄しない */
+    }
+    if (review) reviewBatchClose();              // 確認カルーセルを閉じてからサマリを出す（重なり防止）
+    S.batchReviewActive = false;
+    const combined = priorResults.concat(results);   // 「続きから実行」の場合は前回分と合算
+    S.batchResults = combined;
+    /* 中止していて未処理ページが残っていれば、同じPDFハンドルのまま「続きから実行」
+       できるよう保持する（再アップロード不要）。formFor/review/dpi は元のまま引き継ぐ。 */
+    const remainingPages = cancelled ? pages.slice(results.length) : [];
+    S.batchResume = remainingPages.length
+      ? { pages: remainingPages, total: remainingPages.length, getPage: src.getPage, done: src.done, formFor: src.formFor, review: src.review, fileName: src.fileName }
+      : null;
     /* 処理済みページを詳細ペインで1枚ずつ確認できるよう、PDFソースを保持
-       （次の一括/新規読み込み時に releasePageNav で破棄）。 */
-    if (src.getPage && results.length) {
-      S.pageNav = { pages: results.map(r => r.page), idx: 0, started: false, getPage: src.getPage, done: src.done, fileName: src.fileName };
+       （次の一括/新規読み込み時に releasePageNav で破棄）。「続きから」用に残す場合も破棄しない。 */
+    if (src.getPage && combined.length) {
+      S.pageNav = { pages: combined.map(r => r.page), idx: 0, started: false, getPage: src.getPage, done: src.done, fileName: src.fileName };
       updatePageNavUI();                       // 詳細ペインにページ送りバーを表示（モーダルを閉じても使える）
-    } else if (src.done) { try { src.done(); } catch (_) {} }
+    }
+    if (!S.pageNav && !S.batchResume && src.done) { try { src.done(); } catch (_) {} }
+    if (review) UI.openBatchModal(total, resuming);   // 確認後にサマリ（CSV出力など）を表示
     UI.updateBatchProgress('完了', 1);
-    UI.renderBatchResults(results, { hasNav: !!S.pageNav });
+    UI.renderBatchResults(combined, { hasNav: !!S.pageNav, canResume: !!S.batchResume, resumeCount: remainingPages.length });
     refreshHistory();
-    const ok = results.filter(r => r.decision === 'accepted').length;
-    UI.toast(`一括OCR${cancelled ? '中止' : '完了'} — ${results.length}/${total}ページ処理・${ok}件採用、履歴に保存`, cancelled ? 'warning' : 'success', 4500);
+    const ok = combined.filter(r => r.decision === 'accepted').length;
+    const doneCount = combined.length, wholeTotal = priorResults.length + total;
+    UI.toast(`一括OCR${cancelled ? '中止' : '完了'} — ${doneCount}/${wholeTotal}ページ処理・${ok}件採用、履歴に保存`, cancelled ? 'warning' : 'success', 4500);
+    /* 位置ズレ警告は帳票ごとに初回のみ目立つ通知にしているため、バッチ完了時に
+       このバッチ内で増えた件数をまとめて知らせる（アラーム疲れの回避と、
+       規模の把握を両立させる）。 */
+    const posWarnLines = Object.keys(S.posWarnCounts)
+      .map(fid => ({ form: S.forms.find(f => f.id === fid), delta: S.posWarnCounts[fid] - (posWarnBefore[fid] || 0) }))
+      .filter(e => e.form && e.delta > 0);
+    if (posWarnLines.length) {
+      const text = posWarnLines.map(e => `「${e.form.name}」${e.delta}件`).join('、');
+      UI.toast(`⚠ 位置ズレの可能性があるページ: ${text}。基準画像の解像度を確認してください`, 'warning', 12000);
+    }
+    /* Shift+Enterで「残りは信頼して照合へ」が押されていたら、サマリを出さずそのまま照合へ */
+    if (S.reviewGoToReconcileAfterBatch) {
+      S.reviewGoToReconcileAfterBatch = false;
+      UI.closeBatchModal();
+      openReconcile();
+    }
+  }
+
+  /* ── OCR中カルーセル確認（一括OCRで review=ON）──────────
+     reviewModal を確認のホストに流用。ページOCR中は進捗バー＋「認識中」を出し、
+     OCR完了でそのページのフィールドをカルーセル表示→修正→確認（保存はループ側）。 */
+  function reviewBatchOpen(total) {
+    S.review = null;
+    $('reviewModal').classList.remove('hidden');
+    $('reviewBatchBar').classList.remove('hidden');
+    $('reviewPageCtx').classList.add('hidden');
+    reviewBatchProgress(`全 ${total} ページを認識します…`, 0);
+    reviewBatchBusy(true);
+  }
+  function reviewBatchProgress(msg, pct) {
+    $('reviewBatchFill').style.width = `${Math.round((pct || 0) * 100)}%`;
+    $('reviewBatchMsg').textContent = msg || '処理中…';
+  }
+  /* 認識中はカードを伏せて操作を止める（次ページのOCR待ち表示） */
+  function reviewBatchBusy(busy) {
+    ['reviewValue', 'reviewPrev', 'reviewNext', 'reviewAll'].forEach(id => { const el = $(id); if (el) el.disabled = !!busy; });
+    if (busy) {
+      $('reviewFieldName').textContent = '認識中…';
+      $('reviewCrop').src = '';
+      $('reviewValue').value = '';
+      $('reviewConf').innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> ページを認識しています…';
+      $('reviewSyms').innerHTML = '';
+      $('reviewProgress').textContent = '';
+      $('reviewReadoutText').textContent = ''; $('reviewReadoutText').classList.remove('is-empty');
+      $('reviewReadoutConf').textContent = ''; $('reviewReadoutConf').className = 'conf-badge';
+      $('reviewConstraintWarn').classList.add('hidden');
+    }
+  }
+  function reviewBatchClose() {
+    $('reviewBatchBar').classList.add('hidden');
+    $('reviewPageCtx').classList.add('hidden');
+    $('reviewModal').classList.add('hidden');
+    S.review = null;
+  }
+  /* 1ページ分のカルーセルを開き、確認完了('done')／中止('stop')を待つ */
+  function reviewBatchPage(r, idx, total) {
+    return new Promise(resolve => {
+      reviewBatchBusy(false);
+      reviewBatchProgress(`ページ ${r.page}（${idx + 1}/${total}）を確認中…`, (idx + 0.5) / Math.max(1, total));
+      $('reviewPageCtx').textContent = `ページ ${r.page}（${idx + 1}/${total}）`;
+      $('reviewPageCtx').classList.remove('hidden');
+      S.review = { form: r._save.form, result: r._save.res, idx: 0, batch: { resolve } };
+      reviewRender();
+      setTimeout(() => { $('reviewValue').focus(); $('reviewValue').select(); }, 60);
+    });
   }
 
   /* ── 一括OCR結果のページ送り（詳細ペインで1枚ずつ拡大確認） ──
@@ -1177,77 +1512,381 @@
     const bad = s => (s.match(/�/g) || []).length;     // 置換文字が少ない方を採用
     return bad(b) < bad(a) ? b : a;
   }
-  function recSplitLine(line, delim) {
-    if (delim === 'comma') {     // 引用符対応の簡易CSV
-      const out = []; let cur = '', q = false;
-      for (let i = 0; i < line.length; i++) {
-        const c = line[i];
-        if (q) { if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
-        else if (c === '"') q = true;
-        else if (c === ',') { out.push(cur); cur = ''; }
-        else cur += c;
-      }
-      out.push(cur); return out.map(s => s.trim());
+  /* 区切り文字の自動判定は1行目だけでなく複数行を見て多数決で決める。
+     実ファイルはタイトル等で1行目に区切り文字が無いことがあり、1行目だけで判定すると
+     ファイル全体が誤って1列扱いになってしまうため。判定用のサンプリングは簡易な行分割で
+     十分（多少ずれても多数決の結果への影響は軽微）。 */
+  function recDetectDelim(text) {
+    const sample = text.split('\n').filter(l => l.trim().length).slice(0, 30);
+    const score = ch => sample.filter(l => l.includes(ch)).length;
+    const candidates = [['tab', '\t'], ['comma', ','], ['semicolon', ';']];
+    let best = null, bestScore = 0;
+    candidates.forEach(([name, ch]) => { const s = score(ch); if (s > bestScore) { bestScore = s; best = name; } });
+    return best || 'space';
+  }
+  /* テキスト全体を1回で走査し、行→セルへ分解する（引用符はRFC4180に近い扱い）。
+     「まず改行で行に割ってから列分割する」実装だと、Excel等でセル内に改行を含む値が
+     "…\n…" のように引用符で囲まれている場合、その改行で本来1行のレコードが2行に分裂し、
+     閉じ損ねた引用符が次の行のカンマ等まで1セルに巻き込んでしまう
+     （見出しが1列に潰れて見える不具合の原因だった）。改行の意味（行区切りか、引用符内の
+     値の一部か）は列区切り文字が分かっていないと判断できないため、行分割と列分割を同時に
+     1パスで行う。引用符はフィールドの先頭にある時だけ「引用開始」として扱う（フィールド
+     途中の"はただの文字）。'space' は簡易のため引用符を考慮しない従来通りの動作。 */
+  function recParseRows(text, delimSel) {
+    const norm = text.replace(/\r\n?/g, '\n');
+    const delim = delimSel === 'auto' ? recDetectDelim(norm) : delimSel;
+    if (delim === 'space') {
+      const rows = norm.split('\n').map(l => l.trim()).filter(l => l.length).map(l => l.split(/\s+/));
+      return { delim, rows };
     }
-    if (delim === 'space') return line.trim().split(/\s+/);
-    const sep = delim === 'tab' ? '\t' : ';';
-    return line.split(sep).map(s => s.trim());
+    const sep = delim === 'tab' ? '\t' : delim === 'semicolon' ? ';' : ',';
+    const rows = [];
+    let row = [], cur = '', q = false, sawContent = false;
+    const endRow = () => {
+      row.push(cur.trim());
+      if (sawContent) rows.push(row);           // 完全に空白だけの行は破棄（区切り文字があれば「空白の行」として残す）
+      row = []; cur = ''; sawContent = false;
+    };
+    for (let i = 0; i < norm.length; i++) {
+      const c = norm[i];
+      if (q) {
+        sawContent = true;
+        if (c === '"') { if (norm[i + 1] === '"') { cur += '"'; i++; } else q = false; }
+        else cur += c;
+      } else if (c === '"' && cur === '') {
+        q = true; sawContent = true;
+      } else if (c === sep) {
+        sawContent = true;
+        row.push(cur.trim()); cur = '';
+      } else if (c === '\n') {
+        endRow();
+      } else {
+        if (!/\s/.test(c)) sawContent = true;
+        cur += c;
+      }
+    }
+    endRow();   // 末尾に改行が無い最終行を確定
+    return { delim, rows };
   }
-  function recParseText(text, delim) {
-    const lines = text.replace(/\r\n?/g, '\n').split('\n').filter(l => l.trim().length);
-    if (!lines.length) return [];
-    let d = delim;
-    if (d === 'auto') { const f = lines[0]; d = f.includes('\t') ? 'tab' : f.includes(',') ? 'comma' : f.includes(';') ? 'semicolon' : 'space'; }
-    return lines.map(l => recSplitLine(l, d));
-  }
+  const _recSearchSelectSync = {};   // selId -> 表示テキストをselectの現在値に合わせて再同期する関数
   function recFill(id, opts) {
     const s = $(id); s.innerHTML = '';
     opts.forEach(o => { const op = document.createElement('option'); op.value = o; op.textContent = o; s.appendChild(op); });
+    if (_recSearchSelectSync[id]) _recSearchSelectSync[id]();   // 選択肢が変わったら検索コンボボックスの表示も合わせる
+  }
+  /* 既存の<select>に「入力して候補を絞り込み選択」できるコンボボックスUIを重ねる。
+     値の出所は元のselectのまま（既存のrecFill/.value読み取り/changeイベントは一切変えずに使える）。
+     選択肢が多い/名前を覚えていない場合でも、タイプして絞り込めるようにする。 */
+  function makeSearchableSelect(selId) {
+    const sel = $(selId); if (!sel || sel.dataset.searchable) return;
+    sel.dataset.searchable = '1';
+    const wrap = document.createElement('div'); wrap.className = 'rec-search-select';
+    const input = document.createElement('input');
+    input.type = 'text'; input.className = 'pselect rec-search-input'; input.autocomplete = 'off'; input.spellcheck = false;
+    const list = document.createElement('div'); list.className = 'rec-search-list hidden';
+    sel.parentNode.insertBefore(wrap, sel);
+    wrap.appendChild(input); wrap.appendChild(list); wrap.appendChild(sel);
+    sel.classList.add('rec-native-select-hidden');   // 見た目は隠すが値の出所として残す
+
+    const optsOf = () => Array.from(sel.options).map(o => o.value);
+    function renderList(filter) {
+      const f = (filter || '').trim().toLowerCase();
+      const items = optsOf().filter(o => !f || o.toLowerCase().includes(f));
+      list.innerHTML = items.length
+        ? items.map(o => `<div class="rec-search-item${o === sel.value ? ' is-selected' : ''}" data-v="${recHtml(o)}">${recHtml(o) || '(空欄)'}</div>`).join('')
+        : '<div class="rec-search-empty">該当なし</div>';
+      list.classList.remove('hidden');
+    }
+    function pick(v) {
+      sel.value = v; input.value = v;
+      list.classList.add('hidden');
+      sel.dispatchEvent(new Event('change', { bubbles: true }));   // 既存のchangeリスナーを発火させる
+    }
+    function resync() { input.value = sel.value; }
+    input.addEventListener('focus', () => renderList(''));
+    input.addEventListener('input', () => renderList(input.value));
+    list.addEventListener('mousedown', e => {   // blurより先にmousedownで拾う
+      const item = e.target.closest('.rec-search-item'); if (!item) return;
+      e.preventDefault(); pick(item.dataset.v);
+    });
+    input.addEventListener('blur', () => { setTimeout(() => { list.classList.add('hidden'); resync(); }, 120); });
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { list.classList.add('hidden'); input.blur(); }
+      else if (e.key === 'Enter') { e.preventDefault(); const first = list.querySelector('.rec-search-item'); if (first) pick(first.dataset.v); }
+    });
+    resync();
+    _recSearchSelectSync[selId] = resync;
+  }
+  /* 履歴が複数帳票にまたがっていると、OCR側の項目名が帳票をまたいで和集合になり
+     （例: 帳票Aの2項目＋帳票Bの2項目＝4項目）「2つのはずが4つ出る」ように見える。
+     対象の帳票を1つに絞り込めるようにし、既定は最新の結果が属する帳票にする。 */
+  function recFormList(rows) {
+    const seen = new Map();
+    rows.forEach(r => { const id = r.formId || ''; if (!seen.has(id)) seen.set(id, { id, name: r.formName || '(不明な帳票)', count: 0 }); seen.get(id).count++; });
+    return [...seen.values()];
+  }
+  function recRebuildOcrSide(formId) {
+    const rows = formId ? S.rec.allRows.filter(r => (r.formId || '') === formId) : S.rec.allRows;
+    const cols = [];
+    /* 複数帳票をまたいだ照合キーの統一のため、帳票固有の項目名(name)ではなく
+       帳票編集で設定できる共通名(globalName)を列のキーにする
+       （共通名未設定ならnameをそのまま使うので、単一帳票では従来どおりの挙動）。 */
+    const keyOf = f => f.globalName || f.name;
+    rows.forEach(r => (r.fields || []).forEach(f => { const key = keyOf(f); if (key && !cols.includes(key)) cols.push(key); }));
+    S.rec.formId = formId;
+    S.rec.ocr = rows.map(r => {
+      const values = {}, crops = {};
+      (r.fields || []).forEach(f => { const key = keyOf(f); if (!key) return; values[key] = f.text || ''; if (f.crop) crops[key] = f.crop; });
+      return { page: r.page || 1, formName: r.formName || '', values, crops, raw: r };
+    });
+    S.rec.ocrCols = cols;
+    const ocrOpts = ['ページ', '帳票', ...cols];
+    recFill('recOcrKey', ocrOpts);
+    recFill('recOcrVal', ['(なし)', ...ocrOpts]);
+    $('recResult').innerHTML = ''; $('recSummary').classList.add('hidden'); $('recExport').disabled = true;
+    updateRecOcrSamples();
+  }
+  /* OCR側フィールドが実際に何を指すか分かるよう、選んだ項目のサンプル切り出し画像を出す
+     （履歴の中で最初に見つかった、その項目名を持つ切り出し画像を代表として使う）。 */
+  function recOcrSampleCrop(name) {
+    if (!S.rec || !S.rec.ocr || !name || name === 'ページ' || name === '帳票' || name === '(なし)') return '';
+    const rec = S.rec.ocr.find(r => r.crops && r.crops[name]);
+    return rec ? rec.crops[name] : '';
+  }
+  function updateRecOcrSamples() {
+    [['recOcrKey', 'recOcrKeySample'], ['recOcrVal', 'recOcrValSample']].forEach(([selId, boxId]) => {
+      const box = $(boxId); if (!box) return;
+      const crop = recOcrSampleCrop($(selId).value);
+      box.innerHTML = crop ? `<img src="${crop}" alt="サンプル" class="rec-ocr-sample-img">` : '<span class="rec-ocr-sample-empty">(この項目のサンプル画像はありません)</span>';
+    });
   }
   async function openReconcile() {
     let rows = [];
     try { rows = await FormDB.getAllResults(100000); } catch (_) {}
-    const cols = [];
-    rows.forEach(r => (r.fields || []).forEach(f => { if (f.name && !cols.includes(f.name)) cols.push(f.name); }));
     if (!rows.length) return UI.toast('照合する認識結果がありません（先にOCRを実行）', 'warning');
-    S.rec = {
-      ocr: rows.map(r => { const values = {}; (r.fields || []).forEach(f => { values[f.name] = f.text || ''; }); return { page: r.page || 1, formName: r.formName || '', values }; }),
-      ocrCols: cols, ext: null, result: null,
-    };
-    const ocrOpts = ['ページ', '帳票', ...cols];
-    recFill('recOcrKey', ocrOpts);
-    recFill('recOcrVal', ['(なし)', ...ocrOpts]);
+    const forms = recFormList(rows);
+    S.rec = { allRows: rows, ext: null, result: null };
+    const row = $('recFormRow'), sel = $('recFormFilter');
+    if (forms.length > 1) {
+      row.classList.remove('hidden');
+      sel.innerHTML = '';
+      forms.forEach(f => { const o = document.createElement('option'); o.value = f.id; o.textContent = `${f.name}（${f.count}件）`; sel.appendChild(o); });
+      const allOpt = document.createElement('option'); allOpt.value = ''; allOpt.textContent = `すべての帳票（${rows.length}件・共通名(任意)を設定した項目はまとめて照合できます）`;
+      sel.appendChild(allOpt);
+      sel.value = forms[0].id;   // 既定は最新の結果が属する帳票（rowsは新しい順）
+    } else {
+      row.classList.add('hidden');
+    }
+    recRebuildOcrSide(forms.length > 1 ? forms[0].id : '');
     recFill('recExtKey', []); recFill('recExtVal', ['(なし)']);
     $('recPreview').innerHTML = ''; $('recResult').innerHTML = ''; $('recSummary').classList.add('hidden'); $('recExport').disabled = true;
+    $('recPreviewInfo').textContent = ''; $('recPreviewExpand').disabled = true;
     $('reconcileModal').classList.remove('hidden');
   }
   function closeReconcile() { $('reconcileModal').classList.add('hidden'); }
+  const REC_PREVIEW_ROWS = 8;        // このモーダル内の簡易プレビューはここまで（全件は別モーダルで確認・整形）
+  const REC_TABLE_ROW_CAP = 5000;    // 全件表示モーダルでも重くなりすぎないための上限
+  const recRowBlank = r => r.every(c => !c || !c.trim());
+  function recFindFirstNonBlank(rows, from) {
+    for (let i = from; i < rows.length; i++) if (!recRowBlank(rows[i])) return i;
+    return from;
+  }
   function recParse() {
     if (!S.rec) return;
     const text = $('recPaste').value;
     if (!text.trim()) return UI.toast('比較データを貼り付けるかファイルを読み込んでください', 'warning');
-    const rows = recParseText(text, $('recDelim').value);
+    const delimSel = $('recDelim').value;
+    const { delim, rows } = recParseRows(text, delimSel);
     if (!rows.length) return UI.toast('データを解析できませんでした', 'warning');
     const hasHeader = $('recHasHeader').checked;
-    const header = (hasHeader ? rows[0] : rows[0]).map((h, i) => (hasHeader && h) ? h : `列${i + 1}`);
-    const data = hasHeader ? rows.slice(1) : rows;
+    /* 生のテキストを保持し、区切りパターンは「テーブルで確認・整形」内でいつでも変えて
+       見比べられるようにする。見出し行/削除行もここでは確定せず、暫定で「先頭の空白でない
+       行」を見出しにし、実ファイルにありがちな「見出しが4行目から」等は同モーダルで選び
+       直せるようにする。 */
+    S.rec.raw = { text, delimSel, delim, rows, excluded: new Set(), headerIdx: hasHeader ? recFindFirstNonBlank(rows, 0) : -1 };
+    applyRecShape();
+    const n = S.rec.ext.rows.length;
+    UI.toast(`比較データ ${n} 行 × ${S.rec.ext.header.length} 列を読み込みました`, 'success', 2500);
+  }
+  /* 削除された行が見出し行だった場合は選び直しを促す（headerIdxを未選択に戻す） */
+  function recExcludeRow(idx) {
+    const raw = S.rec.raw; if (!raw) return;
+    raw.excluded.add(idx);
+    if (raw.headerIdx === idx) raw.headerIdx = -1;
+  }
+  /* S.rec.raw（生の行・見出し行・削除行）から S.rec.ext（header, rows）を再構成し、
+     照合の設定セレクトや簡易プレビューへ反映する。「テーブルで確認・整形」の適用時と
+     初回パース時の両方から呼ばれる。 */
+  function applyRecShape() {
+    const raw = S.rec.raw; if (!raw) return;
+    const { rows, excluded, headerIdx } = raw;
+    let header;
+    if (headerIdx >= 0) {
+      header = rows[headerIdx].map((h, i) => (h && h.trim()) ? h : `列${i + 1}`);
+    } else {
+      /* 見出し行が無い場合、列数は先頭行ではなく残っている行の最大セル数から決める
+         （特定の行だけ列が少ないために他行の末尾が切れるのを防ぐ） */
+      const maxCols = rows.reduce((m, r, i) => (excluded.has(i) ? m : Math.max(m, r.length)), 0);
+      header = Array.from({ length: maxCols }, (_, i) => `列${i + 1}`);
+    }
+    const data = [];
+    rows.forEach((r, i) => {
+      if (i === headerIdx) return;                       // 見出し行自体はデータに含めない
+      if (headerIdx >= 0 && i < headerIdx) return;        // 見出しより上は無視
+      if (excluded.has(i)) return;                        // 個別削除・空白行削除
+      data.push(r);
+    });
     S.rec.ext = { header, rows: data };
     recFill('recExtKey', header);
     recFill('recExtVal', ['(なし)', ...header]);
     renderRecPreview(header, data);
-    UI.toast(`比較データ ${data.length} 行 × ${header.length} 列を読み込みました`, 'success', 2500);
+    $('recPreviewInfo').textContent = `${data.length} 行 × ${header.length} 列を読み込みました`;
+    $('recPreviewExpand').disabled = false;
   }
+  /* 外部側キー/値は、設定カードのドロップダウンだけでなく、この列見出しの
+     🔑/＝ボタンをクリックしても選べるようにする（テーブルを見ながら直感的に選べるように）。 */
   function renderRecPreview(header, data) {
-    const head = '<tr>' + header.map(h => `<th>${recHtml(h)}</th>`).join('') + '</tr>';
-    const body = data.slice(0, 8).map(r => '<tr>' + header.map((_, i) => `<td>${recHtml(r[i] ?? '')}</td>`).join('') + '</tr>').join('');
+    const keyName = $('recExtKey').value, valName = $('recExtVal').value;
+    const head = '<tr>' + header.map(h => {
+      const hh = recHtml(h);
+      const cls = [h === keyName ? 'rec-th-iskey' : '', h === valName ? 'rec-th-isval' : ''].filter(Boolean).join(' ');
+      return `<th class="${cls}"><span class="rec-th-name">${hh}</span>`
+        + `<button type="button" class="rec-th-pick rec-th-pick--key" data-col="${hh}" title="外部側キーに設定"><i class="fas fa-key"></i></button>`
+        + `<button type="button" class="rec-th-pick rec-th-pick--val" data-col="${hh}" title="外部側値に設定"><i class="fas fa-equals"></i></button>`
+        + '</th>';
+    }).join('') + '</tr>';
+    const body = data.slice(0, REC_PREVIEW_ROWS).map(r => '<tr>' + header.map((_, i) => `<td>${recHtml(r[i] ?? '')}</td>`).join('') + '</tr>').join('');
     $('recPreview').innerHTML = `<div class="rec-tbl-wrap"><table class="rec-tbl">${head}${body}</table></div>`
-      + (data.length > 8 ? `<div class="rec-more">… 他 ${data.length - 8} 行</div>` : '');
+      + (data.length > REC_PREVIEW_ROWS ? `<div class="rec-more">… 他 ${data.length - REC_PREVIEW_ROWS} 行（「テーブルで確認・整形」で全件を表示できます／列見出しの🔑＝でキー・値を選べます）</div>` : '');
   }
+  function recPreviewPickClick(e) {
+    const btn = e.target.closest('.rec-th-pick'); if (!btn || !S.rec || !S.rec.ext) return;
+    const col = btn.dataset.col;
+    const targetId = btn.classList.contains('rec-th-pick--key') ? 'recExtKey' : 'recExtVal';
+    $(targetId).value = col;
+    if (_recSearchSelectSync[targetId]) _recSearchSelectSync[targetId]();   // 検索コンボボックスの表示テキストも合わせる
+    renderRecPreview(S.rec.ext.header, S.rec.ext.rows);   // 選択状態(ハイライト)を反映
+  }
+  /* 比較データの全件を別モーダルの大きな表で確認・整形する。
+     行頭のラジオボタンで見出し行を選び直せる（データがどの行から始まるか目視で決める）。
+     ✕で個別削除、「空白の行を削除」で全セル空白の行を一括削除できる。「適用」を押すまで
+     S.rec.ext（実際に照合で使うデータ）は変わらない。 */
+  function openRecTableModal() {
+    if (!S.rec || !S.rec.raw) return;
+    renderRecTableModalBody();
+    $('recTableModal').classList.remove('hidden');
+  }
+  function renderRecTableModalBody() {
+    const raw = S.rec.raw; if (!raw) return;
+    const { rows, excluded, headerIdx } = raw;
+    $('recTableDelim').value = raw.delimSel;
+    /* 列数は「見出し行」に選んだ行のセル数で決める（適用時と同じ基準）。見出し未選択なら
+       除外していない行の最大セル数。それを超える分は「余分」として別枠で見える化する
+       （見出し行より列が多い行があり、適用すると末尾が捨てられることに気づけるように）。 */
+    const headerCols = headerIdx >= 0
+      ? rows[headerIdx].length
+      : rows.reduce((m, r, i) => (excluded.has(i) ? m : Math.max(m, r.length)), 0);
+    const maxCols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+    $('recTableCount').textContent = `(${rows.length} 行 × ${headerCols} 列${maxCols > headerCols ? `＋余分 最大${maxCols - headerCols}列` : ''})`;
+    const mainHead = Array.from({ length: headerCols }, (_, i) => `<th>列${i + 1}</th>`).join('');
+    const extraHead = Array.from({ length: Math.max(0, maxCols - headerCols) }, (_, i) => `<th class="rec-th-extra">余分${i + 1}</th>`).join('');
+    const head = `<tr><th class="rec-tbl-rownum">#</th><th class="rec-tbl-hdrcol">見出し行</th><th class="rec-tbl-delcol"></th>${mainHead}${extraHead}</tr>`;
+    const shown = rows.slice(0, REC_TABLE_ROW_CAP);
+    const body = shown.map((r, i) => {
+      const cls = [
+        i === headerIdx ? 'rec-row-header' : '',
+        headerIdx >= 0 && i < headerIdx ? 'rec-row-above' : '',
+        recRowBlank(r) ? 'rec-row-blank' : '',
+        excluded.has(i) ? 'rec-row-excluded' : '',
+      ].filter(Boolean).join(' ');
+      const mainCells = Array.from({ length: headerCols }, (_, ci) => `<td>${recHtml(r[ci] ?? '')}</td>`).join('');
+      const extraCells = Array.from({ length: Math.max(0, maxCols - headerCols) }, (_, k) => `<td class="rec-td-extra">${recHtml(r[headerCols + k] ?? '')}</td>`).join('');
+      return `<tr class="${cls}" data-idx="${i}">`
+        + `<td class="rec-tbl-rownum">${i + 1}</td>`
+        + `<td class="rec-tbl-hdrcol"><input type="radio" name="recHeaderRadio" data-idx="${i}"${i === headerIdx ? ' checked' : ''} title="この行を見出しにする"></td>`
+        + `<td class="rec-tbl-delcol"><button type="button" class="rec-row-del" data-idx="${i}" title="この行を削除"><i class="fas fa-xmark"></i></button></td>`
+        + mainCells + extraCells + '</tr>';
+    }).join('');
+    $('recTableFull').innerHTML = `<table class="rec-tbl rec-edit-tbl">${head}${body}</table>`
+      + (rows.length > REC_TABLE_ROW_CAP ? `<div class="rec-more">… 表示・編集は先頭 ${REC_TABLE_ROW_CAP} 行のみ（全 ${rows.length} 行）</div>` : '');
+  }
+  /* テーブル内で区切りパターンを変更 → 同じ行数のまま列だけ切り直して再描画（見出し選択・
+     削除はindex基準なので保たれる）。見出し行を変えた時に列数が追従しないという声から、
+     どちらもここで即座に反映されるようにした。 */
+  function recTableDelimChange() {
+    const raw = S.rec && S.rec.raw; if (!raw) return;
+    const delimSel = $('recTableDelim').value;
+    const { delim, rows } = recParseRows(raw.text, delimSel);
+    /* 引用符付きセル内の改行の扱いにより、ごく稀に区切りを変えると行数自体が変わることが
+       ある。その場合は行削除/見出し選択のindexが無意味になるためリセットする。 */
+    if (rows.length !== raw.rows.length) { raw.excluded = new Set(); raw.headerIdx = -1; }
+    raw.delimSel = delimSel; raw.delim = delim; raw.rows = rows;
+    renderRecTableModalBody();
+  }
+  function recTableRowRadioChange(e) {
+    const radio = e.target.closest('input[name="recHeaderRadio"]'); if (!radio) return;
+    S.rec.raw.headerIdx = parseInt(radio.dataset.idx, 10);
+    renderRecTableModalBody();
+  }
+  function recTableRowDelClick(e) {
+    const btn = e.target.closest('.rec-row-del'); if (!btn) return;
+    recExcludeRow(parseInt(btn.dataset.idx, 10));
+    renderRecTableModalBody();
+  }
+  function recRemoveBlankRows() {
+    const raw = S.rec && S.rec.raw; if (!raw) return;
+    let n = 0;
+    raw.rows.forEach((r, i) => { if (recRowBlank(r) && !raw.excluded.has(i)) { recExcludeRow(i); n++; } });
+    renderRecTableModalBody();
+    UI.toast(n ? `空白の行を ${n} 件削除しました` : '空白の行はありませんでした', n ? 'success' : 'info', 2500);
+  }
+  function recResetRowExclusions() {
+    const raw = S.rec && S.rec.raw; if (!raw) return;
+    raw.excluded.clear();   // 削除の取り消しのみ。見出し行の選択はそのまま（未選択なら手動で選び直す）
+    renderRecTableModalBody();
+  }
+  function recTableApply() {
+    applyRecShape();
+    closeRecTableModal();
+    UI.toast(`${S.rec.ext.rows.length} 行 × ${S.rec.ext.header.length} 列を適用しました`, 'success', 2500);
+  }
+  function closeRecTableModal() { $('recTableModal').classList.add('hidden'); }
   function recReadFile(file) {
     const r = new FileReader();
     r.onload = () => { $('recPaste').value = recDecode(r.result, $('recEnc').value); recParse(); };
     r.onerror = () => UI.toast('ファイルの読み込みに失敗しました', 'error');
     r.readAsArrayBuffer(file);
+  }
+  const recNorm = s => recEsc(s).trim().replace(/\s+/g, '');
+  const recNumNorm = s => { const n = parseFloat(recEsc(s).replace(/[,\s¥￥$]/g, '')); return isFinite(n) ? n : null; };
+  const recGetOcr = (r, col) => col === 'ページ' ? r.page : col === '帳票' ? r.formName : (r.values[col] ?? '');
+  /* OCR結果1件分の判定を計算する（recRunでの一括計算・照合結果テーブルでの
+     インライン修正後の再計算の両方から使う）。 */
+  function recComputeRow(r, ocrIdx, params) {
+    const { ocrKey, extMap, ocrValCol, extValIdx, numeric } = params;
+    const compareVals = ocrValCol !== '(なし)' && extValIdx >= 0;
+    const keyVal = recGetOcr(r, ocrKey);
+    const ext = extMap.get(recNorm(keyVal));
+    let verdict, extShown = '';
+    if (!ext) verdict = '該当なし';
+    else if (compareVals) {
+      const ocrShown = recGetOcr(r, ocrValCol); extShown = ext[extValIdx] ?? '';
+      const eq = numeric ? (() => { const a = recNumNorm(ocrShown), b = recNumNorm(extShown); return a != null && b != null && a === b; })()
+                         : recNorm(ocrShown) === recNorm(extShown);
+      verdict = eq ? '〇' : '×';
+    } else { verdict = '〇'; extShown = ext.join(' '); }
+    /* この記録が持つOCR項目すべての値+切り出し画像を並べる（キー/比較値だけでなく
+       その帳票のOCR項目全部を出し、見比べやすくする）。 */
+    const ocrFields = S.rec.ocrCols.map(name => ({ name, value: r.values[name] ?? '', crop: (r.crops && r.crops[name]) || '' }));
+    return { ocrIdx, page: r.page, ocrFields, ext: extShown, verdict, compareVals, ocrKeyName: ocrKey, ocrValName: compareVals ? ocrValCol : '' };
+  }
+  function recSummarize(out) {
+    return {
+      nMatch: out.filter(r => r.verdict === '〇').length,
+      nNo: out.filter(r => r.verdict === '×').length,
+      nMiss: out.filter(r => r.verdict === '該当なし').length,
+      compareVals: out.length ? out[0].compareVals : false,
+    };
   }
   function recRun() {
     if (!S.rec || !S.rec.ext) return UI.toast('先に比較データを読み込んでください', 'warning');
@@ -1256,49 +1895,148 @@
     const ocrValCol = $('recOcrVal').value, extValName = $('recExtVal').value;
     const extValIdx = S.rec.ext.header.indexOf(extValName);
     const numeric = $('recNumeric').checked;
-    const compareVals = ocrValCol !== '(なし)' && extValName !== '(なし)' && extValIdx >= 0;
-    const norm = s => recEsc(s).trim().replace(/\s+/g, '');
-    const numNorm = s => { const n = parseFloat(recEsc(s).replace(/[,\s¥￥$]/g, '')); return isFinite(n) ? n : null; };
-    const getOcr = (r, col) => col === 'ページ' ? r.page : col === '帳票' ? r.formName : (r.values[col] ?? '');
     const extMap = new Map();
-    S.rec.ext.rows.forEach(row => { const k = norm(row[extKeyIdx]); if (k && !extMap.has(k)) extMap.set(k, row); });
-    let nMatch = 0, nNo = 0, nMiss = 0;
-    const out = S.rec.ocr.map(r => {
-      const keyVal = getOcr(r, ocrKey);
-      const ext = extMap.get(norm(keyVal));
-      let verdict, ocrShown = '', extShown = '';
-      if (!ext) { verdict = '該当なし'; nMiss++; }
-      else if (compareVals) {
-        ocrShown = getOcr(r, ocrValCol); extShown = ext[extValIdx] ?? '';
-        const eq = numeric ? (() => { const a = numNorm(ocrShown), b = numNorm(extShown); return a != null && b != null && a === b; })()
-                           : norm(ocrShown) === norm(extShown);
-        verdict = eq ? '〇' : '×'; eq ? nMatch++ : nNo++;
-      } else { verdict = '〇'; extShown = ext.join(' '); nMatch++; }
-      return { page: r.page, key: keyVal, ocr: ocrShown, ext: extShown, verdict, compareVals };
-    });
+    S.rec.ext.rows.forEach(row => { const k = recNorm(row[extKeyIdx]); if (k && !extMap.has(k)) extMap.set(k, row); });
+    S.rec.runParams = { ocrKey, extMap, ocrValCol, extValIdx, numeric };
+    const out = S.rec.ocr.map((r, i) => recComputeRow(r, i, S.rec.runParams));
     S.rec.result = out;
-    renderRecResult(out, { nMatch, nNo, nMiss, compareVals });
+    const st = recSummarize(out);
+    renderRecResult(out, st);
     $('recExport').disabled = false;
+    recAutoSaveResult(out, st);   // 後から参照できるよう履歴に保存（バックグラウンド）
   }
-  function renderRecResult(out, st) {
+  /* 照合結果を後から参照できるよう保存する。切り出し画像も含めて自己完結させる
+     （元のOCR履歴が後で編集/削除されても、保存時点の見た目のまま確認できるように）。 */
+  async function recAutoSaveResult(out, st) {
+    if (!out.length) return;
+    const forms = S.rec.allRows ? recFormList(S.rec.allRows) : [];
+    /* S.rec.formId が空なのは「すべての帳票」を選んだ場合と、帳票が1つしか無く
+       フィルタ自体を出していない場合の両方があるので、後者は実際の帳票名を使う。 */
+    const formEntry = forms.find(f => f.id === (S.rec.formId || '')) || (forms.length === 1 ? forms[0] : null);
+    const rec = {
+      id: uid(), createdAt: Date.now(),
+      formId: S.rec.formId || (forms.length === 1 ? forms[0].id : ''), formName: formEntry ? formEntry.name : 'すべての帳票',
+      settings: {
+        ocrKey: $('recOcrKey').value, extKey: $('recExtKey').value,
+        ocrVal: $('recOcrVal').value, extVal: $('recExtVal').value,
+        numeric: $('recNumeric').checked,
+      },
+      summary: { total: out.length, nMatch: st.nMatch, nNo: st.nNo, nMiss: st.nMiss, compareVals: st.compareVals },
+      rows: out.map(r => ({ page: r.page, ocrFields: r.ocrFields, ext: r.ext, verdict: r.verdict, compareVals: r.compareVals, ocrKeyName: r.ocrKeyName, ocrValName: r.ocrValName })),
+    };
+    try { await FormDB.putReconcile(rec); } catch (_) {}
+  }
+  /* 照合結果テーブルでOCR値を修正 → その行の判定を再計算し、元のOCR履歴レコードにも
+     反映して保存する（後で見返した時・再照合した時も直った値になるように）。 */
+  function recPersistOcrValueFix(ocrIdx, name, newVal) {
+    const entry = S.rec.ocr[ocrIdx]; if (!entry || !entry.raw) return;
+    const raw = entry.raw;
+    /* nameは共通名(globalName)の場合があるため、globalName優先→帳票固有名の順で対象欄を探す */
+    const f = (raw.fields || []).find(x => (x.globalName || x.name) === name);
+    if (f) {
+      f.text = newVal;
+      if (raw.ocrValues) raw.ocrValues[f.name] = newVal;
+    }
+    FormDB.putResult(raw).then(refreshHistory).catch(() => {});
+  }
+  function recResultValueChange(e) {
+    const inp = e.target.closest('.rec-ocr-edit'); if (!inp) return;
+    const rowIdx = parseInt(inp.dataset.row, 10), name = inp.dataset.field;
+    const entry = S.rec.ocr[rowIdx]; if (!entry) return;
+    const newVal = inp.value;
+    if ((entry.values[name] ?? '') === newVal) return;   // 変化なしなら何もしない
+    entry.values[name] = newVal;
+    recPersistOcrValueFix(rowIdx, name, newVal);
+    if (!S.rec.runParams) return;
+    S.rec.result[rowIdx] = recComputeRow(entry, rowIdx, S.rec.runParams);
+    renderRecResult(S.rec.result, recSummarize(S.rec.result));
+    UI.toast('OCR値を修正し、判定を再計算しました', 'success', 2000);
+  }
+  /* 照合結果テーブル: OCR項目ごとに「値・切り出し画像」を交互に並べ、その帳票の
+     OCR項目すべてを見比べられるようにする。該当なし/不一致は行全体を色付けして目立たせる。
+     readOnly指定時（保存済みの照合結果を後から見る場合）はOCR値を編集不可にする
+     （行番号(ocrIdx)が今のS.rec.ocrと対応しないデータのため、誤って別データを書き換えないように）。 */
+  function renderRecResult(out, st, opts) {
+    const readOnly = !!(opts && opts.readOnly);
     const sum = $('recSummary'); sum.classList.remove('hidden');
     sum.innerHTML = st.compareVals
       ? `${out.length}件 ・ <span class="bs-ok">一致 ${st.nMatch}</span> / <span class="bs-rj">不一致 ${st.nNo}</span> / <span class="bs-er">該当なし ${st.nMiss}</span>`
       : `${out.length}件 ・ <span class="bs-ok">キー一致 ${st.nMatch}</span> / <span class="bs-er">該当なし ${st.nMiss}</span>`;
-    const head = `<tr><th>ページ</th><th>キー</th>${st.compareVals ? '<th>OCR値</th><th>外部値</th>' : '<th>外部データ</th>'}<th>判定</th></tr>`;
+    const names = (out[0] && out[0].ocrFields.map(f => f.name)) || [];
+    const hasAnyCrop = out.some(r => r.ocrFields.some(f => f.crop));   // 旧データ（切り出し未保存）では画像列を出さない
+    const first = out[0] || {};
+    const tagFor = name => name === first.ocrKeyName ? '<span class="rec-th-tag rec-th-tag--key">キー</span>'
+      : (first.compareVals && name === first.ocrValName) ? '<span class="rec-th-tag rec-th-tag--val">比較</span>' : '';
+    const fieldHead = names.map(name => `<th>OCR値: ${recHtml(name)} ${tagFor(name)}</th>` + (hasAnyCrop ? '<th>切り出し画像</th>' : '')).join('');
+    const head = `<tr><th>ページ</th>${fieldHead}${st.compareVals ? '<th>外部値</th>' : '<th>外部データ</th>'}<th>判定</th></tr>`;
     const cls = v => v === '〇' ? 'rv-ok' : v === '×' ? 'rv-no' : 'rv-miss';
-    const body = out.map(r => `<tr><td>${recHtml(r.page)}</td><td>${recHtml(r.key)}</td>`
-      + (st.compareVals ? `<td>${recHtml(r.ocr)}</td><td>${recHtml(r.ext)}</td>` : `<td>${recHtml(r.ext)}</td>`)
-      + `<td class="${cls(r.verdict)}">${r.verdict}</td></tr>`).join('');
-    $('recResult').innerHTML = `<div class="rec-tbl-wrap"><table class="rec-tbl rec-result-tbl">${head}${body}</table></div>`;
+    const rowCls = v => v === '該当なし' ? 'rec-row-miss' : v === '×' ? 'rec-row-bad' : '';
+    const body = out.map(r => {
+      /* OCR値は照合時にその場で修正できる（誤読の手直し）。修正するとその行の判定を
+         再計算し、元のOCR履歴レコードにも反映して保存する。 */
+      const fieldCells = r.ocrFields.map(f => (readOnly
+        ? `<td>${recHtml(f.value)}</td>`
+        : `<td><input type="text" class="rec-ocr-edit" data-row="${r.ocrIdx}" data-field="${recHtml(f.name)}" value="${recHtml(f.value)}" title="クリックしてOCR値を修正"></td>`)
+        + (hasAnyCrop ? `<td class="rec-crop-cell">${f.crop ? `<img class="rec-crop" src="${f.crop}" alt="切り出し" loading="lazy">` : ''}</td>` : '')).join('');
+      return `<tr class="${rowCls(r.verdict)}"><td>${recHtml(r.page)}</td>${fieldCells}<td>${recHtml(r.ext)}</td><td class="${cls(r.verdict)}">${r.verdict}</td></tr>`;
+    }).join('');
+    $('recResult').innerHTML = `<div class="rec-tbl-wrap rec-result-wrap"><table class="rec-tbl rec-result-tbl">${head}${body}</table></div>`;
   }
   function recExport() {
     const out = S.rec && S.rec.result; if (!out || !out.length) return;
     const cmp = out[0].compareVals;
     const esc = v => /[",\n]/.test(v) ? `"${recEsc(v).replace(/"/g, '""')}"` : recEsc(v);
-    const head = ['ページ', 'キー', ...(cmp ? ['OCR値', '外部値'] : ['外部データ']), '判定'];
-    const lines = out.map(r => [r.page, r.key, ...(cmp ? [r.ocr, r.ext] : [r.ext]), r.verdict].map(esc).join(','));
+    const names = S.rec.ocrCols;
+    const head = ['ページ', ...names.map(n => `OCR値:${n}`), ...(cmp ? ['外部値'] : ['外部データ']), '判定'];
+    const lines = out.map(r => [r.page, ...r.ocrFields.map(f => f.value), r.ext, r.verdict].map(esc).join(','));
     downloadCsv([head.map(esc).join(','), ...lines].join('\n'), `reconcile_${Date.now()}.csv`);
+  }
+
+  /* ── 照合結果の履歴（後から参照） ─────────────────────── */
+  async function openReconcileHist() {
+    let rows = [];
+    try { rows = await FormDB.getAllReconciles(50); } catch (_) {}
+    renderRecHistList(rows);
+    $('recHistModal').classList.remove('hidden');
+  }
+  function closeReconcileHist() { $('recHistModal').classList.add('hidden'); }
+  function renderRecHistList(rows) {
+    const box = $('recHistList');
+    if (!rows.length) { box.innerHTML = '<p class="hint-text">保存された照合結果はまだありません。「照合を実行」すると自動的にここに保存されます。</p>'; return; }
+    box.innerHTML = rows.map(rec => {
+      const st = rec.summary || {};
+      const statsHtml = st.compareVals
+        ? `<span class="bs-ok">一致 ${st.nMatch}</span> / <span class="bs-rj">不一致 ${st.nNo}</span> / <span class="bs-er">該当なし ${st.nMiss}</span>`
+        : `<span class="bs-ok">キー一致 ${st.nMatch}</span> / <span class="bs-er">該当なし ${st.nMiss}</span>`;
+      return `<div class="rec-hist-item" data-id="${rec.id}">
+        <div class="rec-hist-main">
+          <span class="rec-hist-date">${new Date(rec.createdAt).toLocaleString('ja-JP')}</span>
+          <span class="rec-hist-form">${recHtml(rec.formName || 'すべての帳票')}</span>
+          <span class="rec-hist-stats">${st.total ?? (rec.rows || []).length}件 ・ ${statsHtml}</span>
+        </div>
+        <div class="rec-hist-acts">
+          <button type="button" class="btn btn-outline btn-sm rec-hist-view" data-id="${rec.id}"><i class="fas fa-eye"></i> 表示</button>
+          <button type="button" class="btn btn-ghost btn-sm rec-hist-del" data-id="${rec.id}"><i class="fas fa-trash-can"></i></button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+  async function recHistListClick(e) {
+    const viewBtn = e.target.closest('.rec-hist-view');
+    const delBtn = e.target.closest('.rec-hist-del');
+    if (viewBtn) {
+      const id = viewBtn.dataset.id;
+      const rows = await FormDB.getAllReconciles(50);
+      const rec = rows.find(r => r.id === id); if (!rec) return;
+      closeReconcileHist();
+      renderRecResult(rec.rows, { nMatch: rec.summary.nMatch, nNo: rec.summary.nNo, nMiss: rec.summary.nMiss, compareVals: rec.summary.compareVals }, { readOnly: true });
+      $('recExport').disabled = true;   // 保存済みスナップショットは今の照合設定と対応しないためCSV出力対象外
+      UI.toast(`保存済みの照合結果（${new Date(rec.createdAt).toLocaleString('ja-JP')}）を表示しています（読み取り専用）`, 'info', 4000);
+    } else if (delBtn) {
+      const id = delBtn.dataset.id;
+      await FormDB.deleteReconcile(id);
+      openReconcileHist();
+    }
   }
 
   /* ── Init ───────────────────────────────────────────── */
@@ -1306,6 +2044,7 @@
     initAccordions(); initRegSliders(); initRegCanvasEvents(); initDbgControls(); initRrPan();
     CharRuleEditor.init();
     PdfImport.init();
+    ['recOcrKey', 'recExtKey', 'recOcrVal', 'recExtVal'].forEach(makeSearchableSelect);
 
     /* モード切替 */
     $('modeRegister').addEventListener('click', () => setMode('register'));
@@ -1329,8 +2068,12 @@
     $('regBinaryMethod').addEventListener('change', updateBinaryRows);
 
     /* 描画 */
-    document.querySelectorAll('#drawModeSwitch .dm-btn').forEach(b => b.addEventListener('click', () => setDrawMode(b.dataset.dm)));
+    document.querySelectorAll('#drawModeSwitch .dm-btn').forEach(b => b.addEventListener('click', () => {
+      if (S.repositioning) cancelReposition();   // モードを手動で切り替えたら描き直し待ちは解除する
+      setDrawMode(b.dataset.dm);
+    }));
     $('rectNameInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commitPending(); } });
+    $('repositionCancelBtn').addEventListener('click', cancelReposition);
     $('btnAddRect').addEventListener('click', commitPending);
     $('btnZoomIn').addEventListener('click', () => { S.zoom = Math.min(8, S.zoom * 1.3); redrawRegCanvas(); $('zoomLabel').textContent = Math.round(activeScale() * 100) + '%'; });
     $('btnZoomOut').addEventListener('click', () => { S.zoom = Math.max(0.2, S.zoom / 1.3); redrawRegCanvas(); $('zoomLabel').textContent = Math.round(activeScale() * 100) + '%'; });
@@ -1342,7 +2085,7 @@
 
     /* OCR工程（画像・PDF 共通の入口。PDFは複数ページの一括OCRも可。
        一括では「ページ範囲ごとに使う帳票」を割り当てられる） */
-    const recogOpts = { onBatch: runBatchPdf, allowBatch: true, getForms: () => S.forms.map(f => ({ id: f.id, name: f.name })) };
+    const recogOpts = { onBatch: runBatchPdf, allowBatch: true, getForms: () => S.forms.map(f => ({ id: f.id, name: f.name })), getReviewDefault: () => !!($('recogReviewMode') && $('recogReviewMode').checked) };
     setupDrop('recogDrop', f => acceptFile(f, loadRecogImage, recogOpts), 'recogFileInput');
     $('recogFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) acceptFile(f, loadRecogImage, recogOpts); e.target.value = ''; });
     $('batchClose').addEventListener('click', () => UI.closeBatchModal());
@@ -1351,6 +2094,16 @@
     $('batchCsvDl').addEventListener('click', downloadBatchCsv);
     $('batchCancel').addEventListener('click', () => { S.batchCancel = true; UI.updateBatchProgress('中止しています…', 1); });
     $('batchReview').addEventListener('click', () => { if (S.pageNav) { UI.closeBatchModal(); navLoadPage(S.pageNav.idx || 0); } });
+    $('batchReconcile').addEventListener('click', () => { UI.closeBatchModal(); openReconcile(); });
+    $('batchResume').addEventListener('click', () => {
+      const r = S.batchResume; if (!r) return;
+      S.batchResume = null;
+      /* 同じPDFハンドルを続けて使うので、詳細ペインのページ送り(pageNav)はdone()を
+         呼ばず参照だけ外す（呼ぶとハンドルごと破棄されてしまう）。 */
+      S.pageNav = null;
+      const bar = $('rrPageNav'); if (bar) bar.classList.add('hidden');
+      runBatchPdf(r, { resuming: true });
+    });
     $('btnRecogSample').addEventListener('click', () => loadRecogImage(SampleForms.sampleInputCanvas(0, 1.5)));
     $('btnRunRecognize').addEventListener('click', runRecognize);
     $('btnApplyForm').addEventListener('click', () => applyForm($('dpFormSelect').value));
@@ -1360,14 +2113,35 @@
 
     /* 照合（OCR結果 × 外部データ） */
     $('btnReconcile').addEventListener('click', openReconcile);
+    $('recFormFilter').addEventListener('change', e => recRebuildOcrSide(e.target.value));
+    $('recOcrKey').addEventListener('change', updateRecOcrSamples);
+    $('recOcrVal').addEventListener('change', updateRecOcrSamples);
+    $('recResult').addEventListener('change', recResultValueChange);
+    $('recResult').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.classList.contains('rec-ocr-edit')) e.target.blur(); });
     $('reconcileClose').addEventListener('click', closeReconcile);
     $('reconcileCloseBtn').addEventListener('click', closeReconcile);
     $('reconcileModal').addEventListener('click', e => { if (e.target === $('reconcileModal')) closeReconcile(); });
     $('recParse').addEventListener('click', recParse);
     $('recRun').addEventListener('click', recRun);
     $('recExport').addEventListener('click', recExport);
+    $('recHistBtn').addEventListener('click', openReconcileHist);
+    $('recHistClose').addEventListener('click', closeReconcileHist);
+    $('recHistCloseBtn').addEventListener('click', closeReconcileHist);
+    $('recHistModal').addEventListener('click', e => { if (e.target === $('recHistModal')) closeReconcileHist(); });
+    $('recHistList').addEventListener('click', recHistListClick);
     $('recFileBtn').addEventListener('click', () => $('recFileInput').click());
     $('recFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) recReadFile(f); e.target.value = ''; });
+    $('recPreviewExpand').addEventListener('click', openRecTableModal);
+    $('recPreview').addEventListener('click', recPreviewPickClick);
+    $('recTableClose').addEventListener('click', closeRecTableModal);
+    $('recTableCloseBtn').addEventListener('click', closeRecTableModal);
+    $('recTableModal').addEventListener('click', e => { if (e.target === $('recTableModal')) closeRecTableModal(); });
+    $('recTableApply').addEventListener('click', recTableApply);
+    $('recRemoveBlankRows').addEventListener('click', recRemoveBlankRows);
+    $('recResetRows').addEventListener('click', recResetRowExclusions);
+    $('recTableFull').addEventListener('change', recTableRowRadioChange);
+    $('recTableFull').addEventListener('click', recTableRowDelClick);
+    $('recTableDelim').addEventListener('change', recTableDelimChange);
     /* テキストエリアへファイルをドロップ */
     const rp = $('recPaste');
     rp.addEventListener('dragover', e => { if (Array.from(e.dataTransfer?.types || []).includes('Files')) { e.preventDefault(); rp.classList.add('drag-over'); } });
@@ -1402,7 +2176,20 @@
     $('btnHelp').addEventListener('click', () => $('helpModal').classList.remove('hidden'));
     $('closeHelpModal').addEventListener('click', () => $('helpModal').classList.add('hidden'));
     $('helpModal').addEventListener('click', e => { if (e.target === $('helpModal')) $('helpModal').classList.add('hidden'); });
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => m.classList.add('hidden')); });
+    document.addEventListener('keydown', e => {
+      /* 認識中(busy)は reviewValue が disabled で自身の keydown を拾えないため、
+         document側でも Shift+Enter の「残りは信頼して照合へ」を受け付ける。 */
+      if (e.key === 'Enter' && e.shiftKey && S.batchReviewActive && !S.review) {
+        e.preventDefault(); reviewTrustRestAndReconcile(); return;
+      }
+      if (e.key !== 'Escape') return;
+      /* アンカー/OCR領域の位置描き直し待ち中はそれを優先してキャンセル */
+      if (S.repositioning) { cancelReposition(); return; }
+      /* 一括の確認カルーセル中は中止として扱う（ただ閉じるとOCRループが止まったままになる） */
+      if (S.review && S.review.batch) { reviewCancel(); return; }
+      /* PDF読み込みモーダルは×以外で閉じない（誤操作でのキャンセル・読み込み直しを防ぐ） */
+      document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => { if (m.id !== 'pdfModal') m.classList.add('hidden'); });
+    });
 
     /* はじめての方向けガイド（初回のみ表示・閉じたら記憶） */
     try { if (!localStorage.getItem('ocrtool_onboard_dismissed')) $('onboardBar').classList.remove('hidden'); } catch (_) {}
@@ -1423,9 +2210,22 @@
     $('reviewCancel').addEventListener('click', reviewCancel);
     $('reviewClose').addEventListener('click', reviewCancel);
     $('reviewValue').addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); if (e.shiftKey) reviewComplete(); else reviewGo(1); }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (e.shiftKey) { if (S.batchReviewActive) reviewTrustRestAndReconcile(); else reviewComplete(); }
+        else reviewGo(1);
+      }
       else if (e.key === 'ArrowUp') { e.preventDefault(); reviewGo(-1); }
       else if (e.key === 'ArrowDown') { e.preventDefault(); reviewGo(1); }
+    });
+    /* 画像直下の読み取り結果表示も、修正に合わせて追従させる */
+    $('reviewValue').addEventListener('input', e => {
+      const rt = $('reviewReadoutText');
+      rt.textContent = e.target.value || '(空欄)';
+      rt.classList.toggle('is-empty', !e.target.value);
+      /* 手直しを始めた時点で警告の役目は済んでいるので隠す（直した後も
+         古い警告が残って混乱するのを防ぐ。再照合はしない簡易対応） */
+      $('reviewConstraintWarn').classList.add('hidden');
     });
     [['setAcceptConf', 'setValAcceptConf', 2], ['setNearExact', 'setValNearExact', 2], ['setAcceptFloor', 'setValAcceptFloor', 2], ['setMarginMin', 'setValMarginMin', 2], ['setAngleRange', 'setValAngle', 0]]
       .forEach(([sl, lb, d]) => $(sl).addEventListener('input', () => { $(lb).textContent = Number($(sl).value).toFixed(d); }));

@@ -95,7 +95,18 @@ const MatcherEngine = (() => {
    *   loc:   {x:number, y:number}
    * }>}  テンプレート id → ベストスコア情報
    */
-  function matchAll(fullCanvas, templates, opts = {}) {
+  /* 角度×スケールの組ごとに一度だけイベントループへ制御を返す。
+     matchAllは角度×スケール×テンプレート数ぶんcv.matchTemplateを呼ぶ完全同期処理で、
+     テンプレート(アンカー)数が多い帳票構成では合計で数秒〜十数秒に達することがある。
+     その間ずっとメインスレッドを専有すると、クリック/キー入力が処理されず
+     ブラウザが固まって見える（DevTools計測で「Input delay」が長時間・
+     「Processing duration」がほぼ0として現れる状態）。
+     setTimeout(0)を使う。タブがアクティブな間はほぼ即座に発火し、
+     requestAnimationFrameと違ってバックグラウンドタブでも（間引かれつつ）
+     いずれ発火するため、離席中でも処理が完全に止まったままにならない。 */
+  const yieldToUI = () => new Promise(resolve => setTimeout(resolve, 0));
+
+  async function matchAll(fullCanvas, templates, opts = {}) {
     const angleRange = opts.angleRange ?? 2;
     const angleStep  = Math.max(0.1, opts.angleStep ?? 1);
     /* スケール探索係数（f = 入力に写る帳票の倍率 / 基準）。既定は等倍のみ */
@@ -135,9 +146,9 @@ const MatcherEngine = (() => {
     }
 
     /* 角度 × スケール ごとに入力を変換 → 全テンプレートに照合 */
-    angles.forEach(angle => {
+    for (const angle of angles) {
       const rotated = rotateMat(fullGray, angle);
-      scaleFactors.forEach(f => {
+      for (const f of scaleFactors) {
         /* 入力を 1/f に縮小すると、f 倍で写った帳票が基準寸法のテンプレートと一致 */
         const scaled = (Math.abs(f - 1) < 1e-6) ? rotated : resizeMat(rotated, 1 / f);
         tplMats.forEach(tm => {
@@ -149,9 +160,10 @@ const MatcherEngine = (() => {
           }
         });
         if (scaled !== rotated) scaled.delete();
-      });
+        await yieldToUI();
+      }
       rotated.delete();
-    });
+    }
 
     /* クリーンアップ */
     fullGray.delete();
@@ -180,7 +192,7 @@ const MatcherEngine = (() => {
     const thumb = document.createElement('canvas');
     thumb.width  = thumbWidth;
     thumb.height = thumbH;
-    const ctx = thumb.getContext('2d');
+    const ctx = thumb.getContext('2d', { willReadFrequently: true });
 
     ctx.drawImage(fullCanvas, 0, 0, thumbWidth, thumbH);
 

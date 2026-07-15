@@ -113,7 +113,7 @@
             <div class="modal-drop-zone modal-drop-zone--sm" id="refDropZone">
               <div id="refDropHint" class="drop-hint-inner">
                 <i class="fas fa-file-image"></i>
-                <p>画像/PDF を ドロップ／クリック<br><small>OCR座標の基準となる帳票全体（PDFは1ページを取り込み）</small></p>
+                <p>画像/PDF を ドロップ／クリック<br><small>OCR座標の基準となる帳票全体。PDFはページ・DPIを選んで取込めます（実際にOCRするDPIに合わせると位置ズレを防げます）。差し替えても目印/OCR領域は自動で追随します。</small></p>
               </div>
               <img id="refPreview" alt="" style="display:none;max-height:120px;max-width:100%;object-fit:contain;">
             </div>
@@ -129,7 +129,7 @@
             <div class="modal-drop-zone modal-drop-zone--xs" id="anchorDropZone">
               <div id="anchorDropHint" class="drop-hint-inner">
                 <i class="fas fa-image"></i>
-                <p>特徴画像をドロップ/貼付<br><small>基準画像内の位置を自動検出</small></p>
+                <p>特徴画像をドロップ/貼付<br><small>基準画像内の位置を自動検出（PDFの場合はページ・DPIを選べます）</small></p>
               </div>
             </div>
             <input type="file" id="anchorFileInput" accept="image/*,application/pdf" style="display:none">
@@ -208,6 +208,11 @@
               <button id="btnZoomIn" class="btn btn-ghost btn-sm" title="拡大"><i class="fas fa-magnifying-glass-plus"></i></button>
               <button id="btnZoomFit" class="btn btn-ghost btn-sm" title="フィット"><i class="fas fa-compress"></i></button>
             </div>
+          </div>
+          <div class="reposition-banner hidden" id="repositionBanner">
+            <i class="fas fa-vector-square"></i>
+            <span id="repositionBannerText"></span>
+            <button type="button" class="reposition-banner-cancel" id="repositionCancelBtn">キャンセル</button>
           </div>
           <div class="reg-name-row">
             <input type="text" id="rectNameInput" class="cs-name-input" placeholder="矩形を描いてから名前を入力（先入力も可）" autocomplete="off">
@@ -555,6 +560,16 @@
     </div>
     <div class="modal-bdy">
       <p class="hint-text">①<b>文字数</b>を決め（桁数が決まっていなければ <b>可変長</b>）、②各桁（可変長は全桁共通）の<b>使える文字</b>を指定します。字種ボタンで一括指定し、パレットの文字をクリックで除外/追加できます（例：2桁目で <b>O</b> を消す／区切りのある番号は該当桁に「<b>記号</b>」の <b>-</b> を追加／金額は「可変長＋数字」）。</p>
+      <div class="cr-strict-note">
+        <i class="fas fa-triangle-exclamation"></i>
+        <div class="cr-strict-note-body">
+          <p><b>指定した文字だけに強制的に制限するわけではありません。</b></p>
+          <ul>
+            <li>指定外の文字が出た場合：<b>O↔0・1↔I・Y↔V</b> などのよくある誤読なら自動で補正</li>
+            <li>補正できない場合：元の文字のまま「<b>制約</b>」警告を表示（値は変えず、確認画面などで知らせるだけ）</li>
+          </ul>
+        </div>
+      </div>
 
       <!-- ① 桁数 -->
       <div class="cr-lenctl">
@@ -589,6 +604,22 @@
         </div>
         <div class="cr-palette" id="crPalette"></div>
         <p class="cr-any-note" id="crAnyNote">任意（すべて許可）の状態です。特定の文字だけ除外したいときは、上の字種ボタンを選んでからパレットでクリックしてください。</p>
+
+        <!-- ユーザー独自の読み替えルール（この桁だけに適用） -->
+        <div class="cr-subs">
+          <div class="cr-subs-hdr"><i class="fas fa-right-left"></i> この桁だけの読み替えルール<span class="cr-subs-hdr-sub">（例：OCRが誤って「v」と読んだら「Y」として扱う）</span></div>
+          <div class="cr-subs-list" id="crSubsList"></div>
+          <div class="cr-subs-add">
+            <span>OCRがこう読んだら</span>
+            <input type="text" id="crSubFrom" class="cr-sub-input" maxlength="1" placeholder="例: v">
+            <i class="fas fa-arrow-right-long"></i>
+            <span>こう扱う</span>
+            <input type="text" id="crSubTo" class="cr-sub-input" maxlength="1" placeholder="例: Y">
+            <button type="button" id="crSubAdd" class="btn btn-ghost btn-sm"><i class="fas fa-plus"></i> 追加</button>
+          </div>
+        </div>
+
+        <label class="cr-extract cr-strict-toggle"><input type="checkbox" id="crStrict"><span><b>読み替えでも直せない誤読は空欄（?）にする</b>（未チェックなら、読み取った文字のまま「制約」警告だけ表示）</span></label>
         <label class="cr-extract"><input type="checkbox" id="crExtract"><span>値の前後にある<b>余分な文字を自動で取り除く</b>（ラベルや空白・区切り記号を無視。抽出パターンの代わりになります）</span></label>
         <div class="cr-editor-acts">
           <span class="cr-pos-summary" id="crPosSummary"></span>
@@ -621,16 +652,22 @@
         <span class="pdf-ctl-lbl"><i class="fas fa-gauge-high"></i> 解像度（DPI）</span>
         <div class="pdf-dpi-btns" id="pdfDpiBtns">
           <button type="button" data-dpi="100"><b>100</b><small>速い</small></button>
-          <button type="button" data-dpi="150"><b>150</b><small>推奨</small></button>
-          <button type="button" data-dpi="200"><b>200</b><small>高精度</small></button>
+          <button type="button" data-dpi="150"><b>150</b><small>標準</small></button>
+          <button type="button" data-dpi="200"><b>200</b><small>推奨</small></button>
           <button type="button" data-dpi="300"><b>300</b><small>最高・重い</small></button>
         </div>
       </div>
       <p class="pdf-out" id="pdfOutInfo"></p>
       <div class="pdf-pagenav" id="pdfPageNav">
-        <button type="button" id="pdfPrev" class="cr-stepper" title="前のページ">◀</button>
-        <span id="pdfPageLabel">1 / 1</span>
-        <button type="button" id="pdfNext" class="cr-stepper" title="次のページ">▶</button>
+        <input type="range" id="pdfPageSlider" class="pdf-page-slider" min="1" max="1" value="1" title="ドラッグしてページを探す（離すと移動）">
+        <div class="pdf-pagenav-row">
+          <button type="button" id="pdfPrev" class="cr-stepper" title="前のページ">◀</button>
+          <span class="pdf-page-jump">
+            <input type="number" id="pdfPageInput" class="pdf-page-input" min="1" value="1" title="ページ番号を入力してEnter">
+            <span id="pdfPageTotal">/ 1</span>
+          </span>
+          <button type="button" id="pdfNext" class="cr-stepper" title="次のページ">▶</button>
+        </div>
       </div>
       <div class="pdf-preview"><canvas id="pdfPreviewCanvas"></canvas></div>
       <div class="pdf-assign" id="pdfBatchAssign" style="display:none">
@@ -640,8 +677,9 @@
         </div>
         <div class="pdf-assign-rows" id="pdfAssignRows"></div>
         <p class="pdf-assign-hint">「ページ 1–3 → 帳票A、4–6 → 帳票B」のように指定できます。<b>自動判定</b>はページごとに帳票を推定（要確認でも停止せずOCR）。重なった範囲は後の行が優先。</p>
+        <label class="recog-review-toggle pdf-review-toggle"><input type="checkbox" id="pdfBatchReview"><span><i class="fas fa-clipboard-check"></i> OCR中に <b>1ページずつ写真と見比べて確認</b>する（カルーセル）</span></label>
       </div>
-      <p class="hint-text">DPIが高いほど文字は鮮明になり認識精度が上がりますが、処理は重くなります。迷ったら<b>150（推奨）</b>。複数ページは範囲を指定して一括OCRできます。</p>
+      <p class="hint-text">DPIが高いほど文字は鮮明になり認識精度が上がりますが、処理は重くなります。150では文字が潰れて読めないことがあるため、迷ったら<b>200（推奨）</b>。複数ページは範囲を指定して一括OCRできます。</p>
     </div>
     <div class="cr-ftr">
       <button type="button" id="pdfCancel" class="btn btn-ghost">キャンセル</button>
@@ -659,6 +697,12 @@
       <button class="modal-close" id="reconcileClose"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="modal-bdy">
+      <div class="rec-form-row hidden" id="recFormRow">
+        <label class="rec-form-lbl"><i class="fas fa-file-invoice"></i> 対象の帳票
+          <select id="recFormFilter" class="pselect"></select>
+        </label>
+        <span class="hint-text rec-form-hint">複数の帳票の認識結果が履歴にあるため、OCR側の項目を絞り込めます。</span>
+      </div>
       <div class="rec-step-ttl">① 比較データを読み込む（貼り付け / ファイル）</div>
       <div class="rec-input-row">
         <textarea id="recPaste" class="rec-paste" placeholder="ここに Ctrl+V で貼り付け（Excel/CSV/テキスト）、または右の「ファイル選択」／ここへドロップ" spellcheck="false"></textarea>
@@ -681,25 +725,94 @@
           <button id="recParse" class="btn btn-primary btn-sm"><i class="fas fa-table"></i> 読み込む</button>
         </div>
       </div>
+      <div class="rec-preview-bar">
+        <span id="recPreviewInfo" class="rec-preview-info"></span>
+        <button type="button" id="recPreviewExpand" class="btn btn-outline btn-sm" disabled><i class="fas fa-expand"></i> テーブルで確認・整形</button>
+      </div>
       <div id="recPreview" class="rec-preview"></div>
 
       <div class="rec-step-ttl">② 照合の設定</div>
-      <div class="rec-map">
-        <label>OCR側キー <select id="recOcrKey" class="pselect"></select></label>
-        <label>外部側キー <select id="recExtKey" class="pselect"></select></label>
-        <span class="rec-sep">値の比較(任意)：</span>
-        <label>OCR側値 <select id="recOcrVal" class="pselect"></select></label>
-        <label>外部側値 <select id="recExtVal" class="pselect"></select></label>
-        <label class="rec-check"><input type="checkbox" id="recNumeric" checked> 数値として比較</label>
-        <button id="recRun" class="btn btn-success btn-sm"><i class="fas fa-play"></i> 照合を実行</button>
+      <div class="rec-settings">
+        <div class="rec-card rec-card--key">
+          <div class="rec-card-ttl"><i class="fas fa-key"></i> 行を対応させるキー <span class="rec-badge rec-badge--req">必須</span></div>
+          <p class="rec-card-hint">両方のデータで同じ値（伝票番号など）を持つ行どうしを1件ずつ対応させます。</p>
+          <div class="rec-pair">
+            <label>OCR側 <select id="recOcrKey" class="pselect"></select></label>
+            <span class="rec-eq">=</span>
+            <label>外部側 <select id="recExtKey" class="pselect"></select></label>
+          </div>
+          <div class="rec-ocr-sample" id="recOcrKeySample"></div>
+        </div>
+        <div class="rec-card rec-card--val">
+          <div class="rec-card-ttl"><i class="fas fa-equals"></i> 値を比較する <span class="rec-badge rec-badge--opt">任意</span></div>
+          <p class="rec-card-hint">指定すると対応した行どうしの値が一致するか判定します。未指定なら「キーが見つかったか」だけを判定します。</p>
+          <div class="rec-pair">
+            <label>OCR側 <select id="recOcrVal" class="pselect"></select></label>
+            <span class="rec-eq">=</span>
+            <label>外部側 <select id="recExtVal" class="pselect"></select></label>
+          </div>
+          <div class="rec-ocr-sample" id="recOcrValSample"></div>
+          <label class="rec-check"><input type="checkbox" id="recNumeric" checked> 数値として比較（カンマ・空白・単位を無視）</label>
+        </div>
+      </div>
+      <div class="rec-run-row">
+        <button id="recRun" class="btn btn-success"><i class="fas fa-play"></i> 照合を実行</button>
       </div>
 
       <div id="recSummary" class="rec-summary hidden"></div>
       <div id="recResult" class="rec-result"></div>
     </div>
     <div class="cr-ftr">
+      <button id="recHistBtn" class="btn btn-outline"><i class="fas fa-clock-rotate-left"></i> 過去の照合結果</button>
       <button id="recExport" class="btn btn-outline" disabled><i class="fas fa-download"></i> 結果をCSV出力</button>
       <button id="reconcileCloseBtn" class="btn btn-primary">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 照合結果の履歴（後から参照） -->
+<div class="modal-overlay hidden" id="recHistModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr">
+      <h2><i class="fas fa-clock-rotate-left"></i> 過去の照合結果</h2>
+      <button class="modal-close" id="recHistClose"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <div id="recHistList" class="rec-hist-list"></div>
+    </div>
+    <div class="cr-ftr">
+      <button type="button" id="recHistCloseBtn" class="btn btn-primary">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 比較データの全件テーブル表示・整形（見出し行の選び直し／空白行の削除） -->
+<div class="modal-overlay hidden" id="recTableModal">
+  <div class="modal modal--full">
+    <div class="modal-hdr">
+      <h2><i class="fas fa-table"></i> 比較データの確認・整形 <span id="recTableCount" class="review-progress"></span></h2>
+      <button class="modal-close" id="recTableClose"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <p class="hint-text rec-tbl-hint"><i class="fas fa-circle-info"></i> 「見出し行」で選んだ行より下がデータになります（それより上の行は無視されます）。列数はその行のセル数で決まり、それを超える分は「余分」として右側に表示されます。行頭の <i class="fas fa-xmark"></i> で個別に削除、または下のボタンで空白の行をまとめて削除できます。</p>
+      <div class="rec-tbl-toolbar">
+        <label class="rec-tbl-delim">区切り
+          <select id="recTableDelim" class="pselect">
+            <option value="auto">自動判定</option>
+            <option value="comma">カンマ ,</option>
+            <option value="tab">タブ</option>
+            <option value="space">スペース</option>
+            <option value="semicolon">セミコロン ;</option>
+          </select>
+        </label>
+        <button type="button" id="recRemoveBlankRows" class="btn btn-outline btn-sm"><i class="fas fa-broom"></i> 空白の行を削除</button>
+        <button type="button" id="recResetRows" class="btn btn-ghost btn-sm"><i class="fas fa-rotate-left"></i> 削除をリセット</button>
+      </div>
+      <div id="recTableFull" class="rec-tbl-wrap rec-tbl-wrap--full"></div>
+    </div>
+    <div class="cr-ftr">
+      <button type="button" id="recTableApply" class="btn btn-success"><i class="fas fa-check"></i> この内容で適用</button>
+      <button type="button" id="recTableCloseBtn" class="btn btn-ghost">閉じる</button>
     </div>
   </div>
 </div>
@@ -708,14 +821,23 @@
 <div class="modal-overlay hidden" id="reviewModal">
   <div class="modal modal--lg">
     <div class="modal-hdr">
-      <h2><i class="fas fa-clipboard-check"></i> 結果の確認 <span id="reviewProgress" class="review-progress"></span></h2>
+      <h2><i class="fas fa-clipboard-check"></i> 結果の確認 <span id="reviewProgress" class="review-progress"></span> <span id="reviewPageCtx" class="review-page-ctx hidden"></span></h2>
       <button class="modal-close" id="reviewClose"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="modal-bdy">
+      <div id="reviewBatchBar" class="review-batch-bar hidden">
+        <div class="ocr-progress-track"><div id="reviewBatchFill" class="ocr-progress-fill"></div></div>
+        <span id="reviewBatchMsg" class="ocr-progress-msg"></span>
+      </div>
       <div class="review-card">
         <div class="review-img-wrap">
           <span class="review-field-name" id="reviewFieldName"></span>
           <img id="reviewCrop" class="review-crop" alt="">
+        </div>
+        <div class="review-readout">
+          <span id="reviewReadoutText" class="review-readout-text"></span>
+          <span id="reviewReadoutConf" class="conf-badge"></span>
+          <span id="reviewConstraintWarn" class="conf-badge lo hidden"><i class="fas fa-triangle-exclamation"></i> 制約</span>
         </div>
         <div class="review-edit">
           <label class="review-lbl">OCR結果（必要なら修正）</label>
@@ -791,9 +913,11 @@
     </div>
     <div class="cr-ftr">
       <button type="button" id="batchReview" class="btn btn-outline" style="display:none"><i class="fas fa-magnifying-glass-plus"></i> 詳細ペインで確認</button>
+      <button type="button" id="batchResume" class="btn btn-primary" style="display:none"><i class="fas fa-play"></i> 続きから実行</button>
       <button type="button" id="batchCsvDl" class="btn btn-outline"><i class="fas fa-download"></i> CSV出力</button>
       <button type="button" id="batchCsv" class="btn btn-outline"><i class="fas fa-file-csv"></i> CSVコピー</button>
-      <button type="button" id="batchCloseBtn" class="btn btn-primary">閉じる</button>
+      <button type="button" id="batchReconcile" class="btn btn-success"><i class="fas fa-code-compare"></i> この結果を照合する</button>
+      <button type="button" id="batchCloseBtn" class="btn btn-ghost">閉じる</button>
     </div>
   </div>
 </div>
@@ -801,10 +925,71 @@
 <!-- Toast -->
 <div id="toastContainer" class="toast-container"></div>
 <script>
-  var Module = { onRuntimeInitialized: function () { document.dispatchEvent(new CustomEvent('cv-ready')); } };
+/* OpenCV.js ローダー（file:// でサーバー無しでも開けるようにする）
+   従来使っていた docs.opencv.org の opencv.js は、file:// で直接開いた（＝ローカル
+   サーバー無しの）ページからは読み込めない（Cross-Origin-Resource-Policy 由来の
+   net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin。加えて 403/ACAO無しで fetch も不可）。
+   そこで jsDelivr 配信の opencv.js を使う（jsDelivr は CORP:cross-origin を返すため
+   file:// でも <script src> で読める。tesseract/pdf.js が動くのと同じ理由）。
+   @techstark/opencv-js は wasm を data URI で内包した単一ファイルで、グローバル cv に
+   「初期化完了で解決する Promise」を入れる。従来の docs 版（グローバル Module を読み
+   onRuntimeInitialized を呼ぶクラシック型）も、ローカルに opencv.js を置いた場合に
+   備えて両対応する。読み込みは各ソースにつき ①<script src> ②失敗時 fetch→Blob 注入
+   （CORP は no-cors 埋め込みのみ制限。ACAO があれば file:// でも取得でき回避）の順。 */
+var Module = { onRuntimeInitialized: function () { document.dispatchEvent(new CustomEvent('cv-ready')); } };
+(function () {
+  var SOURCES = [
+    'opencv.js',                                                                    // ローカル同梱（あれば最優先）
+    'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.8.0-release.10/dist/opencv.js',
+  ];
+  var idx = 0, settled = false;
+  document.addEventListener('cv-ready', function () { settled = true; }, { once: true });
+  function ready() { if (!settled) document.dispatchEvent(new CustomEvent('cv-ready')); }
+
+  /* ロード直後、ビルド種別に応じて初期化完了を cv-ready に橋渡しする。
+     戻り値 true=このロードで解決処理を担当した / false=クラシック型なので
+     事前定義の Module.onRuntimeInitialized に任せる。 */
+  function wireInit() {
+    var c = window.cv;
+    if (c && typeof c.then === 'function') {          // techstark: Promise を解決してから公開
+      c.then(function (resolved) { window.cv = resolved; ready(); }, function () { nextSource(); });
+      return true;
+    }
+    if (c && c.Mat) { ready(); return true; }         // 既に初期化済み
+    return false;                                     // クラシック型は Module.onRuntimeInitialized 経由
+  }
+  function injectBlob(code) {
+    var url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+    var s = document.createElement('script');
+    s.src = url;
+    s.onload = function () { setTimeout(function () { URL.revokeObjectURL(url); }, 0); wireInit(); };
+    s.onerror = nextSource;                           // 注入したのに実行できなければ次のソースへ
+    document.body.appendChild(s);
+  }
+  function nextSource() {
+    if (settled) return;
+    if (idx >= SOURCES.length) { document.dispatchEvent(new CustomEvent('cv-error')); return; }
+    var url = SOURCES[idx++];
+    var s = document.createElement('script');
+    s.async = true; s.src = url;
+    s.onload = function () { wireInit(); };
+    s.onerror = function () {
+      if (settled) return;
+      /* fetch() での再取得は http(s) の場合のみ意味がある（CORPでの<script src>ブロックを
+         fetch+Blob注入で回避できるのはCORS越しの取得ができるケースだけ）。ローカル同梱
+         ファイル（相対パス）が無い場合の404はここでは再取得しても無意味（file:// への
+         fetch はブラウザ仕様上ブロックされるため）なので、余計なエラーを console に出さず
+         次のソースへ進む。 */
+      if (!/^https?:\/\//i.test(url)) { nextSource(); return; }
+      fetch(url).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+                .then(injectBlob)
+                .catch(nextSource);                   // 取得も不可 → 次のソースへ
+    };
+    document.body.appendChild(s);
+  }
+  nextSource();
+})();
 </script>
-<script async src="https://docs.opencv.org/4.8.0/opencv.js"
-  onerror="document.dispatchEvent(new CustomEvent('cv-error'))"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
 <!-- engines -->

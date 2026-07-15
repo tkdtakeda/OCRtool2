@@ -13,10 +13,11 @@
 const FormDB = (() => {
 
   const DB_NAME    = 'chouhyou_ocr';
-  const DB_VERSION = 2;
-  const STORE_FORMS   = 'forms';
-  const STORE_RESULTS = 'results';
-  const STORE_PRESETS = 'presets';
+  const DB_VERSION = 3;
+  const STORE_FORMS      = 'forms';
+  const STORE_RESULTS    = 'results';
+  const STORE_PRESETS    = 'presets';
+  const STORE_RECONCILES = 'reconciles';
 
   let _dbPromise = null;
 
@@ -52,6 +53,10 @@ const FormDB = (() => {
           const pr = db.createObjectStore(STORE_PRESETS, { keyPath: 'id' });
           pr.createIndex('createdAt', 'createdAt', { unique: false });
           pr.createIndex('name',      'name',      { unique: false });
+        }
+        if (!db.objectStoreNames.contains(STORE_RECONCILES)) {
+          const rc = db.createObjectStore(STORE_RECONCILES, { keyPath: 'id' });
+          rc.createIndex('createdAt', 'createdAt', { unique: false });
         }
       };
       req.onsuccess = e => {
@@ -126,6 +131,14 @@ const FormDB = (() => {
   function deleteResult(id)          { return tx(STORE_RESULTS, 'readwrite', os => os.delete(id)); }
   function clearResults()            { return tx(STORE_RESULTS, 'readwrite', os => os.clear()); }
 
+  /* ── reconciles（照合結果。後から参照できるよう保存） ── */
+  function putReconcile(rec) {
+    if (!rec.createdAt) rec.createdAt = Date.now();
+    return tx(STORE_RECONCILES, 'readwrite', os => os.put(rec)).then(() => rec);
+  }
+  function getAllReconciles(limit = 50) { return getAllFromStore(STORE_RECONCILES, 'createdAt', 'prev', limit); }
+  function deleteReconcile(id)          { return tx(STORE_RECONCILES, 'readwrite', os => os.delete(id)); }
+
   /* ── presets（OCR/罫線除去設定のプリセット） ────────── */
   function putPreset(p) {
     if (!p.createdAt) p.createdAt = Date.now();
@@ -139,6 +152,7 @@ const FormDB = (() => {
     open,
     putForm, getForm, getAllForms, deleteForm, clearForms,
     putResult, getAllResults, deleteResult, clearResults,
+    putReconcile, getAllReconciles, deleteReconcile,
     putPreset, getAllPresets, deletePreset,
   };
 
