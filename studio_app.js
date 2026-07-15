@@ -658,6 +658,12 @@
     rt.classList.toggle('is-empty', !!f.error || !f.text);
     $('reviewReadoutConf').textContent = f.error ? '' : `${f.confidence}%`;
     $('reviewReadoutConf').className = 'conf-badge' + (f.error ? '' : ` ${UI.confClass(f.confidence)}`);
+    /* 文字制約に一致しない（補正でも直せなかった）場合の注意表示。
+       信頼度は高いまま出ることがある（誤読自体は明瞭に写っているケース）ため、
+       信頼度バッジとは別に必ず出す。 */
+    const consWarn = !f.error && f.constraint && f.constraintValid === false && f.text;
+    $('reviewConstraintWarn').classList.toggle('hidden', !consWarn);
+    if (consWarn) $('reviewConstraintWarn').title = `文字制約「${f.constraint}」に一致しません（該当する誤読補正が無いため、読み取った文字のまま表示）`;
     $('reviewSyms').innerHTML = UI.symbolChipsHTML(f.symbols);
     $('reviewPrev').disabled = i === 0;
     const last = i === fields.length - 1;
@@ -954,6 +960,7 @@
     /* 各フィールドの切り出し画像を縮小JPEGで保持（照合での見比べ用）。OCR時に生成済みなので再計算は不要 */
     const fields = await Promise.all(result.fields.map(async f => ({
       name: f.name, globalName: f.globalName || f.name, text: f.text, confidence: f.confidence, error: f.error || null,
+      constraint: f.constraint || '', constraintValid: f.constraintValid !== false,
       crop: await shrinkDataURL(f.cropDataURL),
     })));
     return {
@@ -1195,6 +1202,7 @@
       $('reviewProgress').textContent = '';
       $('reviewReadoutText').textContent = ''; $('reviewReadoutText').classList.remove('is-empty');
       $('reviewReadoutConf').textContent = ''; $('reviewReadoutConf').className = 'conf-badge';
+      $('reviewConstraintWarn').classList.add('hidden');
     }
   }
   function reviewBatchClose() {
@@ -2210,6 +2218,9 @@
       const rt = $('reviewReadoutText');
       rt.textContent = e.target.value || '(空欄)';
       rt.classList.toggle('is-empty', !e.target.value);
+      /* 手直しを始めた時点で警告の役目は済んでいるので隠す（直した後も
+         古い警告が残って混乱するのを防ぐ。再照合はしない簡易対応） */
+      $('reviewConstraintWarn').classList.add('hidden');
     });
     [['setAcceptConf', 'setValAcceptConf', 2], ['setNearExact', 'setValNearExact', 2], ['setAcceptFloor', 'setValAcceptFloor', 2], ['setMarginMin', 'setValMarginMin', 2], ['setAngleRange', 'setValAngle', 0]]
       .forEach(([sl, lb, d]) => $(sl).addEventListener('input', () => { $(lb).textContent = Number($(sl).value).toFixed(d); }));

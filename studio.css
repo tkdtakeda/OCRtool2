@@ -297,6 +297,8 @@
 .hist-field .hf-text { flex: 1; font-family: 'IBM Plex Mono', monospace; color: var(--c-text); text-align: right; word-break: break-all; }
 .hist-field .hf-conf { font-family: 'IBM Plex Mono', monospace; font-size: .68rem; flex-shrink: 0; }
 .hint-text { font-size: .7rem; color: var(--c-text-3); line-height: 1.5; }
+.cr-strict-note { display: flex; align-items: flex-start; gap: 6px; padding: 6px 9px; margin-top: 4px; border: 1px solid #F5CB8B; border-radius: var(--r-sm); background: #FEF3E2; color: var(--c-warn); }
+.cr-strict-note i { flex-shrink: 0; margin-top: .15em; }
 
 @media (max-width: 1100px) {
   .recog-top { grid-template-columns: 1fr; }

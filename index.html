@@ -560,6 +560,7 @@
     </div>
     <div class="modal-bdy">
       <p class="hint-text">①<b>文字数</b>を決め（桁数が決まっていなければ <b>可変長</b>）、②各桁（可変長は全桁共通）の<b>使える文字</b>を指定します。字種ボタンで一括指定し、パレットの文字をクリックで除外/追加できます（例：2桁目で <b>O</b> を消す／区切りのある番号は該当桁に「<b>記号</b>」の <b>-</b> を追加／金額は「可変長＋数字」）。</p>
+      <p class="hint-text cr-strict-note"><i class="fas fa-triangle-exclamation"></i> ここでの指定は「禁止文字を強制的にブロックする」ものではありません。指定外の文字が出たときは、O↔0・1↔I・Y↔V のようなよくある誤読パターンに一致すれば自動で近い文字へ補正し、一致する候補が無ければ<b>元の文字のまま</b>「制約」警告を付けて表示します（確認画面・フィールド結果に表示。値そのものは変えずに知らせる設計）。</p>
 
       <!-- ① 桁数 -->
       <div class="cr-lenctl">
@@ -811,6 +812,7 @@
         <div class="review-readout">
           <span id="reviewReadoutText" class="review-readout-text"></span>
           <span id="reviewReadoutConf" class="conf-badge"></span>
+          <span id="reviewConstraintWarn" class="conf-badge lo hidden"><i class="fas fa-triangle-exclamation"></i> 制約</span>
         </div>
         <div class="review-edit">
           <label class="review-lbl">OCR結果（必要なら修正）</label>
