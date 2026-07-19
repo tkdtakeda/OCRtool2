@@ -841,10 +841,13 @@
     catch (e) { UI.toast('保存に失敗しました: ' + e.message, 'error'); }
   }
 
-  /* ── プリセット（OCR/罫線除去設定の保存・呼び出し） ── */
+  /* ── プリセット（OCR/罫線除去設定の保存・呼び出し） ──
+     照合設定のプリセット（kind:'reconcile'）とストアを共有するため除外して読み込む。
+     kind未設定の既存プリセット（旧データ）はOCR側として扱う。 */
   async function loadPresets() {
     let presets = [];
     try { presets = await FormDB.getAllPresets(); } catch (_) {}
+    presets = presets.filter(p => p.kind !== 'reconcile');
     S.presets = presets;
     const sel = $('presetSelect'); const cur = sel.value;
     sel.innerHTML = '<option value="">（プリセットを選択）</option>';
@@ -865,7 +868,7 @@
   async function savePreset() {
     const name = prompt('プリセット名を入力', `設定 ${new Date().toLocaleString('ja-JP')}`);
     if (name === null) return;
-    const preset = { id: uid(), name: (name || '無題').trim(), ...currentDbgPreset(), createdAt: Date.now() };
+    const preset = { id: uid(), name: (name || '無題').trim(), kind: 'ocr', ...currentDbgPreset(), createdAt: Date.now() };
     try { await FormDB.putPreset(preset); await loadPresets(); $('presetSelect').value = preset.id; UI.toast(`プリセット「${preset.name}」を保存しました`, 'success'); }
     catch (e) { UI.toast('保存に失敗しました: ' + e.message, 'error'); }
   }
@@ -1574,6 +1577,16 @@
     opts.forEach(o => { const op = document.createElement('option'); op.value = o; op.textContent = o; s.appendChild(op); });
     if (_recSearchSelectSync[id]) _recSearchSelectSync[id]();   // 選択肢が変わったら検索コンボボックスの表示も合わせる
   }
+  /* 指定値が今の選択肢に存在すればselectへ反映する（無ければ何もせず既定のままにする）。
+     前回設定の復元・プリセット適用の両方から使う。 */
+  function recSetSelectValue(id, value) {
+    if (value === undefined || value === null) return false;
+    const sel = $(id); if (!sel) return false;
+    if (!Array.from(sel.options).some(o => o.value === value)) return false;
+    sel.value = value;
+    if (_recSearchSelectSync[id]) _recSearchSelectSync[id]();
+    return true;
+  }
   /* 既存の<select>に「入力して候補を絞り込み選択」できるコンボボックスUIを重ねる。
      値の出所は元のselectのまま（既存のrecFill/.value読み取り/changeイベントは一切変えずに使える）。
      選択肢が多い/名前を覚えていない場合でも、タイプして絞り込めるようにする。 */
@@ -1643,6 +1656,11 @@
     const ocrOpts = ['ページ', '帳票', ...cols];
     recFill('recOcrKey', ocrOpts);
     recFill('recOcrVal', ['(なし)', ...ocrOpts]);
+    /* 前回使ったキー設定を、同じ名前の項目が今回もあれば自動で復元する */
+    if (S.recLastSettings) {
+      recSetSelectValue('recOcrKey', S.recLastSettings.ocrKey);
+      recSetSelectValue('recOcrVal', S.recLastSettings.ocrVal);
+    }
     $('recResult').innerHTML = ''; $('recSummary').classList.add('hidden'); $('recExport').disabled = true;
     updateRecOcrSamples();
   }
@@ -1679,6 +1697,7 @@
     }
     recRebuildOcrSide(forms.length > 1 ? forms[0].id : '');
     recFill('recExtKey', []); recFill('recExtVal', ['(なし)']);
+    if (S.recLastSettings) $('recNumeric').checked = !!S.recLastSettings.numeric;
     $('recPreview').innerHTML = ''; $('recResult').innerHTML = ''; $('recSummary').classList.add('hidden'); $('recExport').disabled = true;
     $('recPreviewInfo').textContent = ''; $('recPreviewExpand').disabled = true;
     $('reconcileModal').classList.remove('hidden');
@@ -1739,6 +1758,11 @@
     S.rec.ext = { header, rows: data };
     recFill('recExtKey', header);
     recFill('recExtVal', ['(なし)', ...header]);
+    /* 前回使ったキー設定を、同じ名前の列が今回の比較データにもあれば自動で復元する */
+    if (S.recLastSettings) {
+      recSetSelectValue('recExtKey', S.recLastSettings.extKey);
+      recSetSelectValue('recExtVal', S.recLastSettings.extVal);
+    }
     renderRecPreview(header, data);
     $('recPreviewInfo').textContent = `${data.length} 行 × ${header.length} 列を読み込みました`;
     $('recPreviewExpand').disabled = false;
@@ -1888,6 +1912,15 @@
       compareVals: out.length ? out[0].compareVals : false,
     };
   }
+  /* 照合の設定（②のキー/値の対応づけ）を今のUIから読み出す。プリセット保存・
+     前回設定の記憶・照合結果の履歴保存の3箇所で共通に使う。 */
+  function currentRecSettings() {
+    return {
+      ocrKey: $('recOcrKey').value, extKey: $('recExtKey').value,
+      ocrVal: $('recOcrVal').value, extVal: $('recExtVal').value,
+      numeric: $('recNumeric').checked,
+    };
+  }
   function recRun() {
     if (!S.rec || !S.rec.ext) return UI.toast('先に比較データを読み込んでください', 'warning');
     const ocrKey = $('recOcrKey').value;
@@ -1904,6 +1937,7 @@
     renderRecResult(out, st);
     $('recExport').disabled = false;
     recAutoSaveResult(out, st);   // 後から参照できるよう履歴に保存（バックグラウンド）
+    persistRecLastSettings(currentRecSettings());   // 次回このキー設定を自動で復元する
   }
   /* 照合結果を後から参照できるよう保存する。切り出し画像も含めて自己完結させる
      （元のOCR履歴が後で編集/削除されても、保存時点の見た目のまま確認できるように）。 */
@@ -1916,15 +1950,60 @@
     const rec = {
       id: uid(), createdAt: Date.now(),
       formId: S.rec.formId || (forms.length === 1 ? forms[0].id : ''), formName: formEntry ? formEntry.name : 'すべての帳票',
-      settings: {
-        ocrKey: $('recOcrKey').value, extKey: $('recExtKey').value,
-        ocrVal: $('recOcrVal').value, extVal: $('recExtVal').value,
-        numeric: $('recNumeric').checked,
-      },
+      settings: currentRecSettings(),
       summary: { total: out.length, nMatch: st.nMatch, nNo: st.nNo, nMiss: st.nMiss, compareVals: st.compareVals },
       rows: out.map(r => ({ page: r.page, ocrFields: r.ocrFields, ext: r.ext, verdict: r.verdict, compareVals: r.compareVals, ocrKeyName: r.ocrKeyName, ocrValName: r.ocrValName })),
     };
     try { await FormDB.putReconcile(rec); } catch (_) {}
+  }
+  /* ── 照合設定の記憶（localStorage）＋プリセット（IndexedDB） ──
+     「毎回キーを選び直すのが面倒」に対応: 実行するたびに設定を記憶し、次回モーダルを
+     開いた時・比較データを読み込んだ時に同名の項目があれば自動で復元する。よく使う
+     組み合わせは名前を付けてプリセット保存もできる（OCR/罫線除去のプリセットと同じ
+     presets ストアを共有し、kind:'reconcile' で区別）。 */
+  const REC_LAST_KEY = 'ocrtool_reconcile_last';
+  function loadRecLastSettings() {
+    try { S.recLastSettings = JSON.parse(localStorage.getItem(REC_LAST_KEY) || 'null') || null; }
+    catch (_) { S.recLastSettings = null; }
+  }
+  function persistRecLastSettings(s) {
+    S.recLastSettings = s;
+    try { localStorage.setItem(REC_LAST_KEY, JSON.stringify(s)); } catch (_) {}
+  }
+  async function loadRecPresets() {
+    let all = [];
+    try { all = await FormDB.getAllPresets(); } catch (_) {}
+    S.recPresets = all.filter(p => p.kind === 'reconcile');
+    const sel = $('recPresetSelect'); const cur = sel.value;
+    sel.innerHTML = '<option value="">（プリセットを選択）</option>';
+    S.recPresets.forEach(p => { const o = document.createElement('option'); o.value = p.id; o.textContent = p.name; sel.appendChild(o); });
+    if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  }
+  async function saveRecPreset() {
+    const name = prompt('プリセット名を入力', `照合設定 ${new Date().toLocaleString('ja-JP')}`);
+    if (name === null) return;
+    const preset = { id: uid(), name: (name || '無題').trim(), kind: 'reconcile', settings: currentRecSettings(), createdAt: Date.now() };
+    try { await FormDB.putPreset(preset); await loadRecPresets(); $('recPresetSelect').value = preset.id; UI.toast(`プリセット「${preset.name}」を保存しました`, 'success'); }
+    catch (e) { UI.toast('保存に失敗しました: ' + e.message, 'error'); }
+  }
+  function applyRecPreset() {
+    const id = $('recPresetSelect').value; if (!id) return UI.toast('プリセットを選択してください', 'warning');
+    const p = (S.recPresets || []).find(x => x.id === id); if (!p) return;
+    const s = p.settings || {};
+    recSetSelectValue('recOcrKey', s.ocrKey); recSetSelectValue('recOcrVal', s.ocrVal);
+    recSetSelectValue('recExtKey', s.extKey); recSetSelectValue('recExtVal', s.extVal);
+    $('recNumeric').checked = !!s.numeric;
+    updateRecOcrSamples();
+    if (S.rec && S.rec.ext) renderRecPreview(S.rec.ext.header, S.rec.ext.rows);
+    persistRecLastSettings(s);
+    UI.toast(`プリセット「${p.name}」を反映しました`, 'info', 3000);
+  }
+  async function deleteRecPreset() {
+    const id = $('recPresetSelect').value; if (!id) return UI.toast('プリセットを選択してください', 'warning');
+    const p = (S.recPresets || []).find(x => x.id === id);
+    if (!confirm(`プリセット「${p ? p.name : ''}」を削除しますか？`)) return;
+    try { await FormDB.deletePreset(id); await loadRecPresets(); UI.toast('プリセットを削除しました', 'info'); }
+    catch (e) { UI.toast('削除に失敗しました: ' + e.message, 'error'); }
   }
   /* 照合結果テーブルでOCR値を修正 → その行の判定を再計算し、元のOCR履歴レコードにも
      反映して保存する（後で見返した時・再照合した時も直った値になるように）。 */
@@ -2116,6 +2195,9 @@
     $('recFormFilter').addEventListener('change', e => recRebuildOcrSide(e.target.value));
     $('recOcrKey').addEventListener('change', updateRecOcrSamples);
     $('recOcrVal').addEventListener('change', updateRecOcrSamples);
+    $('btnRecApplyPreset').addEventListener('click', applyRecPreset);
+    $('btnRecSavePreset').addEventListener('click', saveRecPreset);
+    $('btnRecDeletePreset').addEventListener('click', deleteRecPreset);
     $('recResult').addEventListener('change', recResultValueChange);
     $('recResult').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.classList.contains('rec-ocr-edit')) e.target.blur(); });
     $('reconcileClose').addEventListener('click', closeReconcile);
@@ -2238,8 +2320,10 @@
 
     document.addEventListener('paste', handlePaste);
 
-    /* 初期データ + IndexedDB 可用性チェック（file:// の Safari 等で無効な場合に通知） */
-    setMode('register');
+    /* 初期データ + IndexedDB 可用性チェック（file:// の Safari 等で無効な場合に通知）
+       このツールの主目的はOCR実行（レイアウト登録は事前準備）なので、既定表示は②OCR実行。
+       setMode('recognize') が履歴読み込み(refreshHistory)も兼ねる。 */
+    setMode('recognize');
     if (!window.indexedDB) {
       UI.toast('このブラウザでは IndexedDB が無効のため帳票・履歴を保存できません（Chrome/Edge/Firefox 推奨）', 'warning', 8000);
     } else {
@@ -2247,8 +2331,9 @@
     }
     loadSettings();
     loadForms();
-    refreshHistory();
     loadPresets();
+    loadRecPresets();
+    loadRecLastSettings();
   }
 
   document.addEventListener('DOMContentLoaded', init);

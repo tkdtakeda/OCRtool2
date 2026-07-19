@@ -30,10 +30,10 @@
 
   <!-- モード切替（Hick の法則: 上位選択は2つに絞る） -->
   <div class="mode-switch" id="modeSwitch" role="tablist">
-    <button class="mode-btn is-active" id="modeRegister" role="tab" data-mode="register">
+    <button class="mode-btn" id="modeRegister" role="tab" data-mode="register">
       <i class="fas fa-pen-ruler"></i> ① レイアウト登録
     </button>
-    <button class="mode-btn" id="modeRecognize" role="tab" data-mode="recognize">
+    <button class="mode-btn is-active" id="modeRecognize" role="tab" data-mode="recognize">
       <i class="fas fa-wand-magic-sparkles"></i> ② OCR実行
     </button>
   </div>
@@ -59,7 +59,7 @@
 <!-- ════════════════════════════════════════════════════
      VIEW A : レイアウト登録工程
      ════════════════════════════════════════════════════ -->
-<main class="app-main view" id="viewRegister">
+<main class="app-main view hidden" id="viewRegister">
 
   <!-- 左: 帳票ライブラリ（IndexedDB に永続化） -->
   <aside class="library-panel" id="libraryPanel">
@@ -246,7 +246,7 @@
 <!-- ════════════════════════════════════════════════════
      VIEW B : OCR実行工程
      ════════════════════════════════════════════════════ -->
-<main class="app-main view hidden" id="viewRecognize">
+<main class="app-main view" id="viewRecognize">
   <section class="recog-main">
 
     <!-- 入力 + パイプライン状態 -->
@@ -669,7 +669,12 @@
           <button type="button" id="pdfNext" class="cr-stepper" title="次のページ">▶</button>
         </div>
       </div>
-      <div class="pdf-preview"><canvas id="pdfPreviewCanvas"></canvas></div>
+      <div class="acc pdf-preview-acc">
+        <button type="button" class="acc-hdr" data-acc="pdfPreviewBody"><span><i class="fas fa-image"></i> ページプレビュー</span><i class="fas fa-chevron-down acc-caret"></i></button>
+        <div class="acc-body is-collapsed" id="pdfPreviewBody">
+          <div class="pdf-preview"><canvas id="pdfPreviewCanvas"></canvas></div>
+        </div>
+      </div>
       <div class="pdf-assign" id="pdfBatchAssign" style="display:none">
         <div class="pdf-assign-hdr">
           <span class="pdf-ctl-lbl"><i class="fas fa-list-ol"></i> 一括OCRの範囲と帳票</span>
@@ -732,6 +737,14 @@
       <div id="recPreview" class="rec-preview"></div>
 
       <div class="rec-step-ttl">② 照合の設定</div>
+      <div class="preset-bar">
+        <span class="preset-lbl"><i class="fas fa-bookmark"></i> プリセット</span>
+        <select id="recPresetSelect" class="pselect"><option value="">（プリセットを選択）</option></select>
+        <button id="btnRecApplyPreset" class="btn btn-ghost btn-sm" title="選択中のプリセットを反映"><i class="fas fa-arrow-down"></i> 適用</button>
+        <button id="btnRecSavePreset" class="btn btn-outline btn-sm" title="現在の設定をプリセットとして保存"><i class="fas fa-plus"></i> 現在値を保存</button>
+        <button id="btnRecDeletePreset" class="btn btn-ghost btn-sm" title="選択中のプリセットを削除"><i class="fas fa-trash-can"></i></button>
+        <span class="hint-text">前回使ったキー設定は次回も自動で復元されます</span>
+      </div>
       <div class="rec-settings">
         <div class="rec-card rec-card--key">
           <div class="rec-card-ttl"><i class="fas fa-key"></i> 行を対応させるキー <span class="rec-badge rec-badge--req">必須</span></div>

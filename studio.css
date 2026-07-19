@@ -241,7 +241,7 @@
 /* プリセットバー */
 .preset-bar { display: flex; align-items: center; gap: 7px; padding: 8px 10px; margin-bottom: 10px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); flex-wrap: wrap; }
 .preset-lbl { font-size: .76rem; font-weight: 700; color: var(--c-text-2); display: flex; align-items: center; gap: 5px; }
-.preset-bar #presetSelect { min-width: 150px; flex: 1; max-width: 280px; }
+.preset-bar #presetSelect, .preset-bar #recPresetSelect { min-width: 150px; flex: 1; max-width: 280px; }
 
 /* PSM 比較 */
 .psm-ctl { display: flex; align-items: center; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
