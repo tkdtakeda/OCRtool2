@@ -77,6 +77,13 @@ const MatcherEngine = (() => {
 
   /* ── メイン: 傾き補正付き一括マッチング ────────────── */
 
+  /* matchTemplate は画素数にほぼ比例して遅くなる。高DPIスキャンやカメラ写真
+     （数千px級）をそのまま 角度×倍率×アンカー数 分繰り返すと致命的に遅くなる
+     ため、探索は長辺 MAX_WORKING_DIM 以下に縮小した画像で行い、結果座標のみ
+     原寸へ戻す（テンプレート自体は縮小しない＝既存の scaleFactors 探索と同じ
+     考え方で、入力側だけを縮めるので精度への影響は小さい）。 */
+  const MAX_WORKING_DIM = 1800;
+
   /**
    * 「角度ごとに全画像を 1 回だけ回転 → 全テンプレートを一括照合」
    * という戦略で回転コストを最小化する。
@@ -131,9 +138,15 @@ const MatcherEngine = (() => {
     });
 
     /* 入力画像をグレースケールに変換 */
-    const fullSrc  = cv.imread(fullCanvas);
-    const fullGray = toGray(fullSrc);
+    const fullSrc      = cv.imread(fullCanvas);
+    const fullGrayFull = toGray(fullSrc);
     fullSrc.delete();
+
+    /* 大きすぎる入力は探索用に縮小（結果座標は最後に原寸へ戻す） */
+    const longSide  = Math.max(fullGrayFull.cols, fullGrayFull.rows);
+    const workScale = longSide > MAX_WORKING_DIM ? MAX_WORKING_DIM / longSide : 1;
+    const fullGray  = workScale < 1 ? resizeMat(fullGrayFull, workScale) : fullGrayFull;
+    if (workScale < 1) fullGrayFull.delete();
 
     /* 角度リスト生成（0° を必ず含む） */
     const angles = [];
@@ -155,8 +168,8 @@ const MatcherEngine = (() => {
           const r   = runMatch(scaled, tm.mat);
           const cur = results.get(tm.id);
           if (r.score > cur.score) {
-            /* 縮小画像上の loc を元の入力座標へ戻す（× f） */
-            results.set(tm.id, { score: r.score, angle, scale: f, loc: { x: Math.round(r.loc.x * f), y: Math.round(r.loc.y * f) } });
+            /* 縮小探索画像上の loc を原寸入力座標へ戻す（f: 倍率探索分 ÷ workScale: 探索縮小分） */
+            results.set(tm.id, { score: r.score, angle, scale: f, loc: { x: Math.round(r.loc.x * f / workScale), y: Math.round(r.loc.y * f / workScale) } });
           }
         });
         if (scaled !== rotated) scaled.delete();

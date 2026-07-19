@@ -22,15 +22,10 @@ const Recognizer = (() => {
     });
   }
 
-  /** 帳票配列から「全アンカー」を matcher 用テンプレート配列へ展開 */
+  /** 帳票配列から「全アンカー」を matcher 用テンプレート配列へ展開（並列読み込み） */
   async function buildAnchorTemplates(forms) {
-    const list = [];
-    for (const form of forms) {
-      for (const a of (form.anchors || [])) {
-        list.push({ id: a.id, imageElement: await dataURLtoImg(a.dataURL) });
-      }
-    }
-    return list;
+    const anchors = forms.flatMap(form => form.anchors || []);
+    return Promise.all(anchors.map(async a => ({ id: a.id, imageElement: await dataURLtoImg(a.dataURL) })));
   }
 
   /* ── 幾何: 複数アンカーから軸ごとの拡大率＋平行移動を推定 ── */

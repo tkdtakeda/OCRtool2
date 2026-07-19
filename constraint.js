@@ -24,7 +24,7 @@ const CharConstraint = (() => {
   const UPPER  = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   const LOWER  = 'abcdefghijklmnopqrstuvwxyz';
   const ORDER  = DIGITS + UPPER + LOWER;   // 正規順（要約・整列に使用）
-  const NUM_NOISE = ', 　，¥￥$\t';         // 数字欄で出るノイズ（桁区切り・空白・通貨）
+  const NUM_NOISE = ', 　，¥￥$\t+-';       // 数字欄で出るノイズ（桁区切り・空白・通貨・符号の誤認）
 
   /** ベース字種 → 文字集合（任意は ''） */
   function presetSet(type) {
