@@ -104,14 +104,23 @@ const MatcherEngine = (() => {
    */
   /* 角度×スケールの組ごとに一度だけイベントループへ制御を返す。
      matchAllは角度×スケール×テンプレート数ぶんcv.matchTemplateを呼ぶ完全同期処理で、
-     テンプレート(アンカー)数が多い帳票構成では合計で数秒〜十数秒に達することがある。
      その間ずっとメインスレッドを専有すると、クリック/キー入力が処理されず
      ブラウザが固まって見える（DevTools計測で「Input delay」が長時間・
      「Processing duration」がほぼ0として現れる状態）。
-     setTimeout(0)を使う。タブがアクティブな間はほぼ即座に発火し、
-     requestAnimationFrameと違ってバックグラウンドタブでも（間引かれつつ）
-     いずれ発火するため、離席中でも処理が完全に止まったままにならない。 */
-  const yieldToUI = () => new Promise(resolve => setTimeout(resolve, 0));
+
+     ただし setTimeout(0) は【非表示タブで重度にスロットリングされる】。Chromeは
+     バックグラウンドで最短1秒、数分放置すると最悪1回/分まで間引くため、一括処理を
+     裏に回して離席すると、matchAll が譲るたびに数十秒〜数分寝かされ、1回の classify
+     が数百秒に膨れ上がる（実測 classify=528秒。実演算は数秒）。
+     対策:
+      ・表示中は setTimeout(0) で譲り、クリック/キー入力の応答性(INP)を確保する。
+      ・非表示中は応答性が不要なので、スロットルされないマイクロタスクで即時に継続し
+        全速で回す（PDFラスタライズやOCRワーカ待ちなど本来の await では通常どおり
+        マクロタスクへ譲るため、ワーカのメッセージ処理は妨げない）。 */
+  const yieldToUI = () =>
+    (typeof document !== 'undefined' && document.hidden)
+      ? Promise.resolve()
+      : new Promise(resolve => setTimeout(resolve, 0));
 
   async function matchAll(fullCanvas, templates, opts = {}) {
     const angleRange = opts.angleRange ?? 2;
