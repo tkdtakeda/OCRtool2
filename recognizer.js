@@ -122,6 +122,127 @@ const Recognizer = (() => {
     return c;
   }
 
+  /* ── OCR前処理: 二値化＋主要行の抽出（①②） ──────────────
+     英数字・記号のみの「単一値」欄（金額・コード等）専用。切り出しに写り込んだ
+     薄いゴースト行（罫線除去の残像・隣接行）を落とし、太字の値の行だけを
+     Tesseractへ渡す。日本語欄・自由記述欄・複数行欄には適用しない
+     （呼び出し側でゲート）。誤検出で精度を落とさないよう、退化ケース
+     （ほぼ空白／ほぼ真っ黒／細い単一バンドのみ）では元キャンバスをそのまま返す。 */
+
+  /** キャンバスを白地に合成したグレースケール輝度配列(0-255)へ変換 */
+  function toGrayOverWhite(canvas) {
+    const w = canvas.width, h = canvas.height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const d = ctx.getImageData(0, 0, w, h).data;
+    const gray = new Uint8ClampedArray(w * h);
+    for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
+      const a = d[i + 3] / 255;
+      const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      gray[p] = Math.round(lum * a + 255 * (1 - a));   // 透明画素は白地に合成
+    }
+    return gray;
+  }
+
+  /** 大津の二値化しきい値（クラス間分散最大化） */
+  function otsuThreshold(gray) {
+    const hist = new Array(256).fill(0);
+    for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
+    const total = gray.length;
+    let sum = 0; for (let t = 0; t < 256; t++) sum += t * hist[t];
+    let sumB = 0, wB = 0, maxVar = -1, thr = 127;
+    for (let t = 0; t < 256; t++) {
+      wB += hist[t]; if (wB === 0) continue;
+      const wF = total - wB; if (wF === 0) break;
+      sumB += t * hist[t];
+      const mB = sumB / wB, mF = (sum - sumB) / wF;
+      const between = wB * wF * (mB - mF) * (mB - mF);
+      if (between > maxVar) { maxVar = between; thr = t; }
+    }
+    return thr;
+  }
+
+  /**
+   * 単一値欄の切り出しを二値化し、主要な文字行（バンド）だけを残して返す。
+   * 安全策として、判断がつかない／悪化しそうなケースでは元キャンバスを返す。
+   * @param {HTMLCanvasElement} canvas
+   * @returns {HTMLCanvasElement}
+   */
+  function preprocessSingleLine(canvas) {
+    const w = canvas.width, h = canvas.height;
+    if (w < 3 || h < 3) return canvas;
+    const gray = toGrayOverWhite(canvas);
+    const thr  = otsuThreshold(gray);
+
+    /* 行ごとのインク量（暗画素数）と総インク量 */
+    const rowInk = new Int32Array(h);
+    let totalInk = 0, maxRow = 0;
+    for (let y = 0; y < h; y++) {
+      let c = 0; const base = y * w;
+      for (let x = 0; x < w; x++) if (gray[base + x] < thr) c++;
+      rowInk[y] = c; totalInk += c;
+      if (c > maxRow) maxRow = c;
+    }
+    const inkFrac = totalInk / (w * h);
+    /* 退化: ほぼ空白／ほぼ真っ黒 → 触らない（現状の挙動を維持） */
+    if (maxRow === 0 || inkFrac < 0.003 || inkFrac > 0.55) return canvas;
+
+    /* 主要行バンドの検出（小さな行間の隙間は結合して1バンド扱い） */
+    const rowThr   = Math.max(1, maxRow * 0.12);
+    const mergeGap = Math.max(1, Math.round(h * 0.05));
+    const bands = [];
+    let cur = null, gap = 0;
+    for (let y = 0; y < h; y++) {
+      if (rowInk[y] >= rowThr) {
+        if (!cur) cur = { top: y, bottom: y, ink: 0 };
+        cur.bottom = y; cur.ink += rowInk[y]; gap = 0;
+      } else if (cur && ++gap > mergeGap) { bands.push(cur); cur = null; }
+    }
+    if (cur) bands.push(cur);
+    if (!bands.length) return canvas;
+
+    /* インク量が最大のバンド＝太字の値の行。他の（薄い）バンドは切り落とす */
+    let best = bands[0];
+    for (const b of bands) if (b.ink > best.ink) best = b;
+
+    /* 上下に少しだけ余白を付けて切り出す */
+    const pad    = Math.max(2, Math.round((best.bottom - best.top + 1) * 0.18));
+    const top    = Math.max(0, best.top - pad);
+    const bottom = Math.min(h - 1, best.bottom + pad);
+    const bh     = bottom - top + 1;
+    if (bh < 6) return canvas;   // 細すぎ＝ノイズの疑い。触らない
+
+    /* 二値化（黒字・白地）しつつ主要バンドのみ描画 */
+    const out = document.createElement('canvas');
+    out.width = w; out.height = bh;
+    const octx = out.getContext('2d', { willReadFrequently: true });
+    const oimg = octx.createImageData(w, bh);
+    for (let y = 0; y < bh; y++) {
+      const srcBase = (top + y) * w, dstBase = y * w;
+      for (let x = 0; x < w; x++) {
+        const v = gray[srcBase + x] < thr ? 0 : 255;
+        const o = (dstBase + x) * 4;
+        oimg.data[o] = v; oimg.data[o + 1] = v; oimg.data[o + 2] = v; oimg.data[o + 3] = 255;
+      }
+    }
+    octx.putImageData(oimg, 0, 0);
+    return out;
+  }
+
+  /** 構造化された「英数字・記号のみの単一値」欄か。
+      true の欄にだけ 二値化＋主要行抽出（①②）と PSM=単一行（③）を適用する。 */
+  function isSingleValueField(rule) {
+    return CharConstraint.isActive(rule) && CharConstraint.isLatinOnly(rule);
+  }
+
+  /** OCR入力キャンバスを構築する。単一値欄は前処理（①②）を挟み、それ以外は従来通り拡大のみ。 */
+  function ocrInputCanvas(cropCanvas, single) {
+    return upscaleForOcr(single ? preprocessSingleLine(cropCanvas) : cropCanvas);
+  }
+
+  /* PSM: 単一値欄は「単一テキスト行」(7) で読む（レイアウト解析の誤爆を避ける）。
+     複数行になり得る一般欄は従来通りフォーム設定の PSM を使う。 */
+  const SINGLE_LINE_PSM = 7;
+
   /**
    * マッチング + 自動判定のみを実行（採用前に結果を提示するため分離）。
    * @returns {{ decision, scores: Map, forms }}
@@ -261,14 +382,15 @@ const Recognizer = (() => {
     const plan = regions.map(region => {
       const rule = region.charRule || region.constraint;
       const p = recogParamsFor(rule, lang, whitelist);
-      return { region, rule, active: CharConstraint.isActive(rule), lang: p.lang, whitelist: p.whitelist };
+      const single = isSingleValueField(rule);   // 単一値欄は前処理＋単一行PSM
+      return { region, rule, active: CharConstraint.isActive(rule), single, lang: p.lang, whitelist: p.whitelist, psm: single ? SINGLE_LINE_PSM : psm };
     });
     /* 言語切替（worker再初期化）を最小化するため同一言語をまとめて処理する */
     const order = plan.map((_, i) => i).sort((a, b) => (plan[a].lang < plan[b].lang ? -1 : plan[a].lang > plan[b].lang ? 1 : 0));
     const fields = new Array(regions.length);
     for (let oi = 0; oi < order.length; oi++) {
       const i = order[oi];
-      const { region, rule, active, lang: useLang, whitelist: useWl } = plan[i];
+      const { region, rule, active, single, lang: useLang, whitelist: useWl, psm: usePsm } = plan[i];
       stage(`OCR ${oi + 1}/${regions.length}`, 0.55 + 0.4 * (oi / Math.max(1, regions.length)));
       const cropCanvas = LineRemovalProcessor.extractRect(resultCanvas, mapRect(region, transform));
       if (!cropCanvas) {
@@ -276,7 +398,7 @@ const Recognizer = (() => {
         continue;
       }
       const tFieldStart = performance.now();
-      const res = await OcrProcessor.recognize(upscaleForOcr(cropCanvas), psm, prog => {
+      const res = await OcrProcessor.recognize(ocrInputCanvas(cropCanvas, single), usePsm, prog => {
         cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
       }, useLang, useWl);
       /* 言語がページ間・領域間で切り替わるとTesseractの言語データ再読み込みが走り
@@ -325,14 +447,17 @@ const Recognizer = (() => {
     /* 領域の文字制約を PSM 比較にも反映（本認識と同じ言語・字種判定を使用） */
     const rule = region.charRule || region.constraint;
     const ruleActive = CharConstraint.isActive(rule);
+    const single = isSingleValueField(rule);   // 本認識と同じ前処理を比較にも反映
     const { lang: useLang, whitelist: regWhitelist } = recogParamsFor(rule, lang, whitelist);
     const crop = LineRemovalProcessor.extractRect(resultCanvas, mapRect(region, transform));
+    /* 前処理結果は PSM に依らず同一なので一度だけ構築して使い回す */
+    const input = crop ? ocrInputCanvas(crop, single) : null;
     const out = [];
     for (let i = 0; i < psmList.length; i++) {
       const psm = psmList[i];
       if (onProg) onProg(i, psmList.length, psm);
       if (!crop) { out.push({ psm, text: '', confidence: 0, error: '領域切り出し失敗' }); continue; }
-      const res = await OcrProcessor.recognize(upscaleForOcr(crop), psm, () => {}, useLang, regWhitelist);
+      const res = await OcrProcessor.recognize(input, psm, () => {}, useLang, regWhitelist);
       const conf = confOf(res);
       let text = (res.fullText || '').trim();
       if (normalize) text = OcrProcessor.normalize(text);
