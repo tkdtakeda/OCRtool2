@@ -49,7 +49,7 @@ const Recognizer = (() => {
       let mr = 0, mi = 0; pairs.forEach(p => { mr += gr(p); mi += gi(p); }); mr /= n; mi /= n;
       let num = 0, den = 0; pairs.forEach(p => { const dr = gr(p) - mr, di = gi(p) - mi; num += dr * di; den += dr * dr; });
       let s = den > 1e-6 ? num / den : 1;
-      if (!isFinite(s) || s < 0.5 || s > 2) s = 1;   // 異常値・分母過小はスケール1へ
+      if (!isFinite(s) || s < 0.4 || s > 2.5) s = 1;   // 異常値・分母過小はスケール1へ（拡大2倍程度まで許容）
       return { s, t: mi - s * mr };
     };
     const X = lin(p => p.refX, p => p.inX);
@@ -251,8 +251,16 @@ const Recognizer = (() => {
   /* 帳票判定用のスケール探索（切り取り倍率の違いに対応）。粗めで高速に
      （判定は帳票の選択が目的。精密な倍率は prepare 側で細かく探索する） */
   const CLASSIFY_SCALES = [0.85, 1.0, 1.15];
-  /* 原点ローカライズ用（精密）。細かめに探索して位置精度を上げる */
-  const LOCALIZE_SCALES = [0.8, 0.87, 0.93, 1.0, 1.07, 1.14, 1.22];
+  /* 原点ローカライズ用（粗・広）。拡大/縮小された帳票も取りこぼさないよう 0.6〜2.0 を
+     幾何級数的に並べる。従来は 0.8〜1.22（±22%）しか無く、それ以上拡大された帳票で
+     倍率が範囲端に張り付き、アンカーから離れたOCR欄ほど位置がずれていた。
+     真の倍率は後段の細探索(fineScalesAround)と、複数アンカーの相対位置
+     (estimateTransform) で詰める。 */
+  const LOCALIZE_SCALES = [0.6, 0.71, 0.85, 1.0, 1.19, 1.42, 1.68, 2.0];
+  /* 暫定倍率の周辺を細かく探索（±9%を3%刻み）。粗ステップの隙間を埋め、単一アンカー
+     でも位置精度を確保する。複数アンカーがあれば相対位置でさらに精密化される。 */
+  const fineScalesAround = s => [0.91, 0.94, 0.97, 1.0, 1.03, 1.06, 1.09]
+    .map(k => Math.max(0.4, Math.min(2.5, Math.round(s * k * 1000) / 1000)));
 
   async function classify(sourceCanvas, forms, opts = {}) {
     const angleRange = opts.angleRange ?? 2;
@@ -296,11 +304,23 @@ const Recognizer = (() => {
     const allMatches = [];
     try {
       const tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, imageElement: await dataURLtoImg(a.dataURL) })));
-      /* 角度固定・スケール探索で再マッチ（切り取り倍率の違いを吸収） */
-      const m = await MatcherEngine.matchAll(rotated, tpls.map(t => ({ id: t.id, imageElement: t.imageElement })),
+      const tplList = tpls.map(t => ({ id: t.id, imageElement: t.imageElement }));
+      /* 粗→細のスケール探索で「拡大・縮小された帳票」を正しく捉える。
+         ① 粗く広い範囲(0.6〜2.0)でアンカーを発見し、最良スコアの倍率を暫定採用。
+         ② その暫定倍率の周辺(±6%)を細かく再探索し、位置精度を上げる。
+         狭い固定範囲だと大きく拡大された帳票でアンカーを取り逃がすか倍率が範囲端に
+         張り付き、離れたOCR欄ほどずれていた。細探索を角度固定・少数スケールで足すだけ
+         なので追加コストは小さい。 */
+      const coarse = await MatcherEngine.matchAll(rotated, tplList,
         { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES });
+      let provScale = 1, provBest = -Infinity;
+      tpls.forEach(t => { const r = coarse.get(t.id); if (r && r.score > provBest) { provBest = r.score; provScale = r.scale || 1; } });
+      const fine = await MatcherEngine.matchAll(rotated, tplList,
+        { angleRange: 0, angleStep: 1, scaleFactors: fineScalesAround(provScale) });
       tpls.forEach(t => {
-        const r = m.get(t.id); if (!r) return;
+        const rc = coarse.get(t.id), rf = fine.get(t.id);
+        const r = (rf && (!rc || rf.score >= rc.score)) ? rf : rc;   // 粗・細で高スコア側を採用
+        if (!r) return;
         const f = r.scale || 1;
         allMatches.push({
           refX: (t.a.refX || 0) + t.a.w / 2, refY: (t.a.refY || 0) + t.a.h / 2,         // 基準中心
