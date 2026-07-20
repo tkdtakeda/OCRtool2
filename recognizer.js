@@ -196,51 +196,22 @@ const Recognizer = (() => {
     /* 退化: ほぼ空白／ほぼ真っ黒 → 触らない（現状の挙動を維持） */
     if (maxRow === 0 || inkFrac < 0.003 || inkFrac > 0.55) return canvas;
 
-    /* 主要行バンドの検出（小さな行間の隙間は結合して1バンド扱い） */
-    const rowThr   = Math.max(1, maxRow * 0.12);
-    const mergeGap = Math.max(1, Math.round(h * 0.05));
-    const bands = [];
-    let cur = null, gap = 0;
-    for (let y = 0; y < h; y++) {
-      if (rowInk[y] >= rowThr) {
-        if (!cur) cur = { top: y, bottom: y };
-        cur.bottom = y; gap = 0;
-      } else if (cur && ++gap > mergeGap) { bands.push(cur); cur = null; }
-    }
-    if (cur) bands.push(cur);
-    if (!bands.length) return canvas;
+    /* 上下の空白マージンだけを削る。「値の行」を推定して1行だけ残す方式は、
+       罫線除去のゴースト（薄いヘッダー行）を値と誤認して数字ごと切り落とす
+       事故が起きるため採らない。インクのある範囲は全て残す＝数字を絶対に落と
+       さない。淡いゴーストは二値化で閾値以下となりインクに数えられないため、
+       トリム範囲からも自然に外れる。濃く残るヘッダー等は残るが、数字欄は
+       whitelist（数字のみ許可）で数字以外を出力しないため実害が出ない。 */
+    const rowThr = Math.max(1, maxRow * 0.08);
+    let top = 0;        while (top < h && rowInk[top] < rowThr) top++;
+    let bottom = h - 1; while (bottom > top && rowInk[bottom] < rowThr) bottom--;
+    if (top > bottom) return canvas;
+    top    = Math.max(0, top - 2);
+    bottom = Math.min(h - 1, bottom + 2);
+    const bh = bottom - top + 1;
+    if (bh < 6) return canvas;   // 実質空 → 触らない
 
-    /* 各バンドの「濃さ」を評価する。罫線除去のゴースト行は淡い（グレー値が閾値
-       付近）のに全幅に広がるため、インク総量では太字の値より大きくなり得る。
-       総量ではなく暗画素の平均グレー値（小さいほど濃い）で選び、値の行を拾う。
-       小さすぎるバンド（点ノイズ）は最大バンドの一定割合未満として除外する。 */
-    let maxDark = 0;
-    for (const b of bands) {
-      let sum = 0, cnt = 0;
-      for (let y = b.top; y <= b.bottom; y++) {
-        const base = y * w;
-        for (let x = 0; x < w; x++) { const g = gray[base + x]; if (g < thr) { sum += g; cnt++; } }
-      }
-      b.darkCount = cnt;
-      b.meanGray  = cnt ? sum / cnt : 255;
-      if (cnt > maxDark) maxDark = cnt;
-    }
-    const floor = Math.max(4, maxDark * 0.12);
-    let best = null;
-    for (const b of bands) {
-      if (b.darkCount < floor) continue;                   // 点ノイズ相当は無視
-      if (!best || b.meanGray < best.meanGray) best = b;    // 最も濃いバンド＝値の行
-    }
-    if (!best) return canvas;
-
-    /* 上下に少しだけ余白を付けて切り出す */
-    const pad    = Math.max(2, Math.round((best.bottom - best.top + 1) * 0.18));
-    const top    = Math.max(0, best.top - pad);
-    const bottom = Math.min(h - 1, best.bottom + pad);
-    const bh     = bottom - top + 1;
-    if (bh < 6) return canvas;   // 細すぎ＝ノイズの疑い。触らない
-
-    /* 二値化（黒字・白地）しつつ主要バンドのみ描画 */
+    /* 二値化（黒字・白地）してトリム範囲を描画 */
     const out = document.createElement('canvas');
     out.width = w; out.height = bh;
     const octx = out.getContext('2d', { willReadFrequently: true });
@@ -268,9 +239,10 @@ const Recognizer = (() => {
     return upscaleForOcr(single ? preprocessSingleLine(cropCanvas) : cropCanvas);
   }
 
-  /* PSM: 単一値欄は「単一テキスト行」(7) で読む（レイアウト解析の誤爆を避ける）。
-     複数行になり得る一般欄は従来通りフォーム設定の PSM を使う。 */
-  const SINGLE_LINE_PSM = 7;
+  /* PSM: 単一値欄は「単一の均一ブロック」(6) で読む。単一行(7)は最上行だけを読むため、
+     ゴーストのヘッダー行が上に残ると値（下段の数字）を取りこぼす。6なら全行を読み、
+     数字以外はwhitelistで落ちるので値だけが残る。一般欄は従来通りフォーム設定のPSM。 */
+  const SINGLE_LINE_PSM = 6;
 
   /**
    * マッチング + 自動判定のみを実行（採用前に結果を提示するため分離）。
@@ -457,8 +429,9 @@ const Recognizer = (() => {
         symbols: res.symbols || [],
         cropDataURL: cropCanvas.toDataURL('image/png'),
         /* 診断: 実際にOCRへ渡した画像（前処理後）と使用パラメータ。
-           前処理が効いたか／ゴーストが除けたかを目視で確認できるようにする。 */
-        ocrInputDataURL: inputCanvas.toDataURL('image/png'),
+           前処理が効いたか／ゴーストが除けたかを目視で確認できるようにする。
+           前処理を通す単一値欄のみPNG化する（他欄は元切り出しとほぼ同一で無駄なため）。 */
+        ocrInputDataURL: single ? inputCanvas.toDataURL('image/png') : null,
         ocrInfo: { preprocessed: single, psm: usePsm, lang: useLang, whitelist: useWl },
       };
     }
