@@ -254,6 +254,13 @@ const StudioUI = (() => {
       return `<span class="sym-chip ${confClass(s.confidence)}" title="${s.confidence}%">${t}<small>${s.confidence}</small></span>`;
     }).join('');
   }
+  /** OCR入力に使ったパラメータの一行表示（前処理が効いたか等を確認できる診断） */
+  function ocrInfoHTML(info) {
+    if (!info) return '';
+    const pre = info.preprocessed ? '二値化+行抽出' : 'なし';
+    const wl  = info.whitelist ? ` ・ 許可「${esc(info.whitelist)}」` : '';
+    return `<span class="field-detail-meta" style="font-size:11px;color:#64748b;line-height:1.4;">前処理: ${pre} ・ PSM ${esc(String(info.psm))} ・ ${esc(info.lang || '')}${wl}</span>`;
+  }
   function renderFieldResults(fields) {
     const c = $('fieldResults'); c.innerHTML = '';
     fields.forEach((f, i) => {
@@ -285,13 +292,19 @@ const StudioUI = (() => {
         ${hasDetail ? `
         <div class="field-detail hidden">
           <div class="field-detail-col">
-            <span class="field-detail-lbl">切り出し画像（OCR対象）</span>
+            <span class="field-detail-lbl">切り出し画像（元）</span>
             <img class="field-crop" src="${f.cropDataURL || ''}" alt="">
           </div>
+          ${f.ocrInputDataURL ? `
+          <div class="field-detail-col">
+            <span class="field-detail-lbl">OCRへ渡した画像（前処理後）</span>
+            <img class="field-crop" src="${f.ocrInputDataURL}" alt="">
+            ${ocrInfoHTML(f.ocrInfo)}
+          </div>` : ''}
           <div class="field-detail-col">
             <span class="field-detail-lbl">文字別の確信度（OCR生データ）</span>
             <div class="field-syms">${symbolChipsHTML(f.symbols)}</div>
-            <p class="field-detail-hint">低い箇所が原因です。画像にノイズ・罫線が写っていないか確認し、①OCR領域を値だけにタイトに ②罫線除去/二値化を調整 ③PDFはDPIを上げる と改善します。</p>
+            <p class="field-detail-hint">低い箇所が原因です。「OCRへ渡した画像」にゴースト行・罫線が残っていないか確認し、①OCR領域を値だけにタイトに ②罫線除去/二値化を調整 ③PDFはDPIを上げる と改善します。</p>
           </div>
         </div>` : ''}`;
       if (hasDetail) {

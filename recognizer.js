@@ -76,7 +76,17 @@ const Recognizer = (() => {
       英数字・記号のみの欄は英語モデル＋制限なし（後処理で整形）。それ以外は従来通り。 */
   function recogParamsFor(rule, fallbackLang, fallbackWhitelist) {
     const active = CharConstraint.isActive(rule);
-    if (active && CharConstraint.isLatinOnly(rule)) return { lang: 'eng', whitelist: '' };
+    if (active && CharConstraint.isLatinOnly(rule)) {
+      /* ⑤ engモデルでは字種whitelistがよく効く（数字1→漢字誤認で守れないjpnと異なる）。
+         数字欄で "9,218"→"HWNgy~EN" のような英字誤読を根本から封じるため、
+         導出したwhitelistをそのまま渡す。純数字の欄では桁区切り記号
+         （, ， 空白 ¥ ￥ $）も許可し、Tesseractに記号として分類させたうえで
+         後段のNUM_NOISE除去で落とす（記号を無理に数字化させないため）。 */
+      const wl = CharConstraint.derivedWhitelist(rule);
+      if (!wl) return { lang: 'eng', whitelist: '' };
+      const pureDigit = [...wl].every(c => c >= '0' && c <= '9');
+      return { lang: 'eng', whitelist: pureDigit ? wl + ',， ¥￥$' : wl };
+    }
     return { lang: fallbackLang, whitelist: active ? (CharConstraint.derivedWhitelist(rule) || fallbackWhitelist) : fallbackWhitelist };
   }
 
@@ -193,16 +203,35 @@ const Recognizer = (() => {
     let cur = null, gap = 0;
     for (let y = 0; y < h; y++) {
       if (rowInk[y] >= rowThr) {
-        if (!cur) cur = { top: y, bottom: y, ink: 0 };
-        cur.bottom = y; cur.ink += rowInk[y]; gap = 0;
+        if (!cur) cur = { top: y, bottom: y };
+        cur.bottom = y; gap = 0;
       } else if (cur && ++gap > mergeGap) { bands.push(cur); cur = null; }
     }
     if (cur) bands.push(cur);
     if (!bands.length) return canvas;
 
-    /* インク量が最大のバンド＝太字の値の行。他の（薄い）バンドは切り落とす */
-    let best = bands[0];
-    for (const b of bands) if (b.ink > best.ink) best = b;
+    /* 各バンドの「濃さ」を評価する。罫線除去のゴースト行は淡い（グレー値が閾値
+       付近）のに全幅に広がるため、インク総量では太字の値より大きくなり得る。
+       総量ではなく暗画素の平均グレー値（小さいほど濃い）で選び、値の行を拾う。
+       小さすぎるバンド（点ノイズ）は最大バンドの一定割合未満として除外する。 */
+    let maxDark = 0;
+    for (const b of bands) {
+      let sum = 0, cnt = 0;
+      for (let y = b.top; y <= b.bottom; y++) {
+        const base = y * w;
+        for (let x = 0; x < w; x++) { const g = gray[base + x]; if (g < thr) { sum += g; cnt++; } }
+      }
+      b.darkCount = cnt;
+      b.meanGray  = cnt ? sum / cnt : 255;
+      if (cnt > maxDark) maxDark = cnt;
+    }
+    const floor = Math.max(4, maxDark * 0.12);
+    let best = null;
+    for (const b of bands) {
+      if (b.darkCount < floor) continue;                   // 点ノイズ相当は無視
+      if (!best || b.meanGray < best.meanGray) best = b;    // 最も濃いバンド＝値の行
+    }
+    if (!best) return canvas;
 
     /* 上下に少しだけ余白を付けて切り出す */
     const pad    = Math.max(2, Math.round((best.bottom - best.top + 1) * 0.18));
@@ -398,7 +427,9 @@ const Recognizer = (() => {
         continue;
       }
       const tFieldStart = performance.now();
-      const res = await OcrProcessor.recognize(ocrInputCanvas(cropCanvas, single), usePsm, prog => {
+      /* 実際にTesseractへ渡す画像。診断表示（切り出し画像との比較）用に保持する */
+      const inputCanvas = ocrInputCanvas(cropCanvas, single);
+      const res = await OcrProcessor.recognize(inputCanvas, usePsm, prog => {
         cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
       }, useLang, useWl);
       /* 言語がページ間・領域間で切り替わるとTesseractの言語データ再読み込みが走り
@@ -425,6 +456,10 @@ const Recognizer = (() => {
         constraintValid,
         symbols: res.symbols || [],
         cropDataURL: cropCanvas.toDataURL('image/png'),
+        /* 診断: 実際にOCRへ渡した画像（前処理後）と使用パラメータ。
+           前処理が効いたか／ゴーストが除けたかを目視で確認できるようにする。 */
+        ocrInputDataURL: inputCanvas.toDataURL('image/png'),
+        ocrInfo: { preprocessed: single, psm: usePsm, lang: useLang, whitelist: useWl },
       };
     }
 
