@@ -771,14 +771,36 @@
       <div class="rec-run-row">
         <button id="recRun" class="btn btn-success"><i class="fas fa-play"></i> 照合を実行</button>
       </div>
-
-      <div id="recSummary" class="rec-summary hidden"></div>
-      <div id="recResult" class="rec-result"></div>
     </div>
     <div class="cr-ftr">
       <button id="recHistBtn" class="btn btn-outline"><i class="fas fa-clock-rotate-left"></i> 過去の照合結果</button>
-      <button id="recExport" class="btn btn-outline" disabled><i class="fas fa-download"></i> 結果をCSV出力</button>
       <button id="reconcileCloseBtn" class="btn btn-primary">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 照合結果（専用モーダル・全幅）。おかしなレコードだけ絞り込み、行クリックで詳細へ飛べる -->
+<div class="modal-overlay hidden" id="reconcileResultModal">
+  <div class="modal modal--full">
+    <div class="modal-hdr">
+      <h2><i class="fas fa-list-check"></i> 照合結果</h2>
+      <button class="modal-close" id="recResultClose"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <div class="rec-result-toolbar">
+        <div id="recSummary" class="rec-summary hidden"></div>
+        <div class="rec-result-filter" role="group" aria-label="表示の絞り込み">
+          <button type="button" id="recFilterAll" class="btn btn-sm btn-primary" data-filter="all">すべて</button>
+          <button type="button" id="recFilterIssues" class="btn btn-sm btn-outline" data-filter="issues"><i class="fas fa-triangle-exclamation"></i> ×・該当なしのみ</button>
+        </div>
+      </div>
+      <p class="hint-text rec-result-hint"><i class="fas fa-circle-info"></i> 行をクリックすると、その記録の詳細（切り出し画像・確信度）を開いて確認できます。</p>
+      <div id="recResult" class="rec-result"></div>
+    </div>
+    <div class="cr-ftr">
+      <button id="recExport" class="btn btn-outline" disabled><i class="fas fa-download"></i> 結果をCSV出力</button>
+      <button type="button" id="recResultBack" class="btn btn-ghost"><i class="fas fa-arrow-left"></i> 設定に戻る</button>
+      <button type="button" id="recResultCloseBtn" class="btn btn-primary">閉じる</button>
     </div>
   </div>
 </div>

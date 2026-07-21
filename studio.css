@@ -610,7 +610,16 @@
 .rec-result-tbl td:last-child { text-align: center; font-weight: 700; font-size: .9rem; }
 .rv-ok { color: var(--c-suc); } .rv-no { color: var(--c-err); } .rv-miss { color: var(--c-text-3); }
 /* 照合結果の切り出し画像（OCRした実画像を行ごとに表示して見比べやすく） */
-.rec-result-wrap { max-height: 360px; }
+.rec-result-wrap { max-height: 62vh; }
+/* 照合結果モーダルのツールバー（サマリ＋絞り込み）と詳細ジャンプ */
+.rec-result-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.rec-result-toolbar .rec-summary { margin-bottom: 0; flex: 1; min-width: 220px; }
+.rec-result-filter { display: flex; gap: 6px; flex-shrink: 0; }
+.rec-result-hint { margin: 8px 0 10px; }
+.rec-filter-note { color: var(--c-pri); font-weight: 700; }
+.rec-detail-cell { text-align: center; white-space: nowrap; }
+.rec-detail-btn { white-space: nowrap; }
+.rec-empty { padding: 30px; text-align: center; color: var(--c-text-3); font-size: .9rem; }
 .rec-crop-cell { padding: 2px 5px; }
 .rec-crop { display: block; max-width: 240px; max-height: 42px; height: auto; border: 1px solid var(--c-border); border-radius: 3px; background: #fff; cursor: zoom-in; transition: max-height .12s ease, max-width .12s ease; }
 .rec-crop:hover { max-height: 150px; max-width: 460px; box-shadow: 0 6px 18px rgba(0, 0, 0, .28); }
