@@ -28,12 +28,29 @@ const Recognizer = (() => {
     return Promise.all(anchors.map(async a => ({ id: a.id, imageElement: await dataURLtoImg(a.dataURL) })));
   }
 
+  /** 中央値（外れ値に強い代表値） */
+  function median(arr) {
+    if (!arr.length) return 1;
+    const s = [...arr].sort((a, b) => a - b);
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  /* 位置回帰で倍率を信頼するために必要な、基準座標上のアンカーの最小広がり(px)。
+     アンカーが密集していると、数pxの検出誤差が大きな倍率誤差に化け、それが切片
+     （＝平行移動 tx,ty）へ伝播して、離れた欄ほど位置がずれる。「同一倍率で平行移動
+     しただけ」の帳票が追随しない主因がこれ。広がりが足りない軸では位置回帰の倍率を
+     使わず、各アンカーの照合倍率の中央値を採用し、平行移動だけを頑健に推定する。 */
+  const MIN_SPAN_FOR_SCALE = 200;
+
   /* ── 幾何: 複数アンカーから軸ごとの拡大率＋平行移動を推定 ── */
   /**
    * 対応点 (ref → matched) から、回転なし・軸独立スケールの変換
    *   inX = sx*refX + tx,  inY = sy*refY + ty
    * を推定する（縦横比が違うスニップに対応）。傾きは別途補正済み。
    * 点が1組なら検出スケール f を sx=sy に採用（1点では縦横比を決められない）。
+   * 複数でもアンカーが密集する軸は、倍率を照合倍率の中央値に固定し、位置回帰の
+   * 不安定な倍率が平行移動を壊さないようにする。
    * @param {Array<{refX,refY,inX,inY,scale}>} pairs
    * @returns {{ sx:number, sy:number, tx:number, ty:number, n:number }}
    */
@@ -44,16 +61,25 @@ const Recognizer = (() => {
       const f = pairs[0].scale || 1;
       return { sx: f, sy: f, tx: pairs[0].inX - f * pairs[0].refX, ty: pairs[0].inY - f * pairs[0].refY, n: 1 };
     }
-    /* x軸・y軸を独立に最小二乗回帰 */
-    const lin = (gr, gi) => {
-      let mr = 0, mi = 0; pairs.forEach(p => { mr += gr(p); mi += gi(p); }); mr /= n; mi /= n;
-      let num = 0, den = 0; pairs.forEach(p => { const dr = gr(p) - mr, di = gi(p) - mi; num += dr * di; den += dr * dr; });
-      let s = den > 1e-6 ? num / den : 1;
-      if (!isFinite(s) || s < 0.4 || s > 2.5) s = 1;   // 異常値・分母過小はスケール1へ（拡大2倍程度まで許容）
+    /* 照合倍率の中央値（探索は 0.6〜2.0 と広く、密集アンカーでも安定して得られる） */
+    const medScale = median(pairs.map(p => p.scale || 1));
+    /* 軸ごと: 広がりが十分なら位置回帰で連続倍率を精密化、狭ければ照合倍率を採用。
+       平行移動は採用倍率 s を固定して t = mean(in - s*ref)（＝回帰の切片と同値だが、
+       倍率誤差から切り離した頑健な平行移動になる）。 */
+    const axis = (gr, gi) => {
+      let mr = 0, mi = 0, lo = Infinity, hi = -Infinity;
+      pairs.forEach(p => { const r = gr(p); mr += r; mi += gi(p); if (r < lo) lo = r; if (r > hi) hi = r; });
+      mr /= n; mi /= n;
+      let s = medScale;
+      if ((hi - lo) >= MIN_SPAN_FOR_SCALE) {
+        let num = 0, den = 0; pairs.forEach(p => { const dr = gr(p) - mr, di = gi(p) - mi; num += dr * di; den += dr * dr; });
+        const sReg = den > 1e-6 ? num / den : NaN;
+        if (isFinite(sReg) && sReg >= 0.4 && sReg <= 2.5) s = sReg;   // 十分広い＝位置回帰を信頼
+      }
       return { s, t: mi - s * mr };
     };
-    const X = lin(p => p.refX, p => p.inX);
-    const Y = lin(p => p.refY, p => p.inY);
+    const X = axis(p => p.refX, p => p.inX);
+    const Y = axis(p => p.refY, p => p.inY);
     return { sx: X.s, sy: Y.s, tx: X.t, ty: Y.t, n };
   }
 
