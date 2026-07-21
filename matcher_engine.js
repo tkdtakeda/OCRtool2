@@ -122,6 +122,11 @@ const MatcherEngine = (() => {
       ? Promise.resolve()
       : new Promise(resolve => setTimeout(resolve, 0));
 
+  /* 1タスクの上限時間（ms）。これを超えたらテンプレートの途中でも制御を返す。
+     matchTemplate 単体は分割できないので、実質「予算 + 直近1回の照合時間」が
+     1タスクの長さ＝入力遅延(INP)の上限になる。約2フレーム。 */
+  const YIELD_BUDGET_MS = 32;
+
   async function matchAll(fullCanvas, templates, opts = {}) {
     const angleRange = opts.angleRange ?? 2;
     const angleStep  = Math.max(0.1, opts.angleStep ?? 1);
@@ -167,22 +172,27 @@ const MatcherEngine = (() => {
       }
     }
 
-    /* 角度 × スケール ごとに入力を変換 → 全テンプレートに照合 */
+    /* 角度 × スケール ごとに入力を変換 → 全テンプレートに照合。
+       アンカー数が多い帳票では1回の角度×スケールでも同期時間が長くなり、その間の
+       クリック/キー入力が遅延する（Input delayが長い状態）。テンプレート1件ごとに
+       時間予算を見て、超えたら途中でも制御を返す。処理順・結果は不変で、純粋に
+       スケジューリングだけを細かくするため精度への影響は一切ない。 */
+    let lastYield = performance.now();
     for (const angle of angles) {
       const rotated = rotateMat(fullGray, angle);
       for (const f of scaleFactors) {
         /* 入力を 1/f に縮小すると、f 倍で写った帳票が基準寸法のテンプレートと一致 */
         const scaled = (Math.abs(f - 1) < 1e-6) ? rotated : resizeMat(rotated, 1 / f);
-        tplMats.forEach(tm => {
+        for (const tm of tplMats) {
           const r   = runMatch(scaled, tm.mat);
           const cur = results.get(tm.id);
           if (r.score > cur.score) {
             /* 縮小探索画像上の loc を原寸入力座標へ戻す（f: 倍率探索分 ÷ workScale: 探索縮小分） */
             results.set(tm.id, { score: r.score, angle, scale: f, loc: { x: Math.round(r.loc.x * f / workScale), y: Math.round(r.loc.y * f / workScale) } });
           }
-        });
+          if (performance.now() - lastYield >= YIELD_BUDGET_MS) { await yieldToUI(); lastYield = performance.now(); }
+        }
         if (scaled !== rotated) scaled.delete();
-        await yieldToUI();
       }
       rotated.delete();
     }

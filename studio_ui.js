@@ -257,7 +257,7 @@ const StudioUI = (() => {
   /** OCR入力に使ったパラメータの一行表示（前処理が効いたか等を確認できる診断） */
   function ocrInfoHTML(info) {
     if (!info) return '';
-    const pre = info.preprocessed ? '二値化+行抽出' : 'なし';
+    const pre = info.preprocessed ? '行トリム+拡大(グレー)' : 'なし';
     const wl  = info.whitelist ? ` ・ 許可「${esc(info.whitelist)}」` : '';
     return `<span class="field-detail-meta" style="font-size:11px;color:#64748b;line-height:1.4;">前処理: ${pre} ・ PSM ${esc(String(info.psm))} ・ ${esc(info.lang || '')}${wl}</span>`;
   }

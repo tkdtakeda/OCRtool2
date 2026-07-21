@@ -28,12 +28,29 @@ const Recognizer = (() => {
     return Promise.all(anchors.map(async a => ({ id: a.id, imageElement: await dataURLtoImg(a.dataURL) })));
   }
 
+  /** 中央値（外れ値に強い代表値） */
+  function median(arr) {
+    if (!arr.length) return 1;
+    const s = [...arr].sort((a, b) => a - b);
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  /* 位置回帰で倍率を信頼するために必要な、基準座標上のアンカーの最小広がり(px)。
+     アンカーが密集していると、数pxの検出誤差が大きな倍率誤差に化け、それが切片
+     （＝平行移動 tx,ty）へ伝播して、離れた欄ほど位置がずれる。「同一倍率で平行移動
+     しただけ」の帳票が追随しない主因がこれ。広がりが足りない軸では位置回帰の倍率を
+     使わず、各アンカーの照合倍率の中央値を採用し、平行移動だけを頑健に推定する。 */
+  const MIN_SPAN_FOR_SCALE = 200;
+
   /* ── 幾何: 複数アンカーから軸ごとの拡大率＋平行移動を推定 ── */
   /**
    * 対応点 (ref → matched) から、回転なし・軸独立スケールの変換
    *   inX = sx*refX + tx,  inY = sy*refY + ty
    * を推定する（縦横比が違うスニップに対応）。傾きは別途補正済み。
    * 点が1組なら検出スケール f を sx=sy に採用（1点では縦横比を決められない）。
+   * 複数でもアンカーが密集する軸は、倍率を照合倍率の中央値に固定し、位置回帰の
+   * 不安定な倍率が平行移動を壊さないようにする。
    * @param {Array<{refX,refY,inX,inY,scale}>} pairs
    * @returns {{ sx:number, sy:number, tx:number, ty:number, n:number }}
    */
@@ -44,16 +61,25 @@ const Recognizer = (() => {
       const f = pairs[0].scale || 1;
       return { sx: f, sy: f, tx: pairs[0].inX - f * pairs[0].refX, ty: pairs[0].inY - f * pairs[0].refY, n: 1 };
     }
-    /* x軸・y軸を独立に最小二乗回帰 */
-    const lin = (gr, gi) => {
-      let mr = 0, mi = 0; pairs.forEach(p => { mr += gr(p); mi += gi(p); }); mr /= n; mi /= n;
-      let num = 0, den = 0; pairs.forEach(p => { const dr = gr(p) - mr, di = gi(p) - mi; num += dr * di; den += dr * dr; });
-      let s = den > 1e-6 ? num / den : 1;
-      if (!isFinite(s) || s < 0.4 || s > 2.5) s = 1;   // 異常値・分母過小はスケール1へ（拡大2倍程度まで許容）
+    /* 照合倍率の中央値（探索は 0.6〜2.0 と広く、密集アンカーでも安定して得られる） */
+    const medScale = median(pairs.map(p => p.scale || 1));
+    /* 軸ごと: 広がりが十分なら位置回帰で連続倍率を精密化、狭ければ照合倍率を採用。
+       平行移動は採用倍率 s を固定して t = mean(in - s*ref)（＝回帰の切片と同値だが、
+       倍率誤差から切り離した頑健な平行移動になる）。 */
+    const axis = (gr, gi) => {
+      let mr = 0, mi = 0, lo = Infinity, hi = -Infinity;
+      pairs.forEach(p => { const r = gr(p); mr += r; mi += gi(p); if (r < lo) lo = r; if (r > hi) hi = r; });
+      mr /= n; mi /= n;
+      let s = medScale;
+      if ((hi - lo) >= MIN_SPAN_FOR_SCALE) {
+        let num = 0, den = 0; pairs.forEach(p => { const dr = gr(p) - mr, di = gi(p) - mi; num += dr * di; den += dr * dr; });
+        const sReg = den > 1e-6 ? num / den : NaN;
+        if (isFinite(sReg) && sReg >= 0.4 && sReg <= 2.5) s = sReg;   // 十分広い＝位置回帰を信頼
+      }
       return { s, t: mi - s * mr };
     };
-    const X = lin(p => p.refX, p => p.inX);
-    const Y = lin(p => p.refY, p => p.inY);
+    const X = axis(p => p.refX, p => p.inX);
+    const Y = axis(p => p.refY, p => p.inY);
     return { sx: X.s, sy: Y.s, tx: X.t, ty: Y.t, n };
   }
 
@@ -172,16 +198,20 @@ const Recognizer = (() => {
   }
 
   /**
-   * 単一値欄の切り出しを二値化し、主要な文字行（バンド）だけを残して返す。
-   * 安全策として、判断がつかない／悪化しそうなケースでは元キャンバスを返す。
-   * @param {HTMLCanvasElement} canvas
+   * 単一値欄の切り出しから、ゴースト行・上下の空白マージンを削って値の行だけを返す。
+   * 【ハード二値化はしない】。小さい切り出しを拡大してから0/1に叩き切ると、元の
+   * なめらかな階調（アンチエイリアス）が失われてブロック状になり、かえってTesseractの
+   * 精度が落ちる（＝「元画像の方がきれい」な状態）。二値化はTesseract内部（大津）に
+   * 任せ、ここでは行トリムのみ行い、拡大済みグレースケールをそのまま渡す。
+   * トリム判定にだけ大津しきい値を使う。悪化しそうな退化ケースは元キャンバスを返す。
+   * @param {HTMLCanvasElement} canvas  （呼び出し側で拡大済み）
    * @returns {HTMLCanvasElement}
    */
   function preprocessSingleLine(canvas) {
     const w = canvas.width, h = canvas.height;
     if (w < 3 || h < 3) return canvas;
     const gray = toGrayOverWhite(canvas);
-    const thr  = otsuThreshold(gray);
+    const thr  = otsuThreshold(gray);   // 行トリムの判定にのみ使用（出力は二値化しない）
 
     /* 行ごとのインク量（暗画素数）と総インク量 */
     const rowInk = new Int32Array(h);
@@ -196,11 +226,10 @@ const Recognizer = (() => {
     /* 退化: ほぼ空白／ほぼ真っ黒 → 触らない（現状の挙動を維持） */
     if (maxRow === 0 || inkFrac < 0.003 || inkFrac > 0.55) return canvas;
 
-    /* 上下の空白マージンだけを削る。「値の行」を推定して1行だけ残す方式は、
-       罫線除去のゴースト（薄いヘッダー行）を値と誤認して数字ごと切り落とす
-       事故が起きるため採らない。インクのある範囲は全て残す＝数字を絶対に落と
-       さない。淡いゴーストは二値化で閾値以下となりインクに数えられないため、
-       トリム範囲からも自然に外れる。濃く残るヘッダー等は残るが、数字欄は
+    /* 上下の空白マージン＆淡いゴースト行を削る。「値の行」を推定して1行だけ残す方式は、
+       ゴースト（薄いヘッダー行）を値と誤認して数字ごと切り落とす事故が起きるため採らない。
+       インクのある範囲は全て残す＝数字を絶対に落とさない。淡いゴーストはしきい値以下で
+       インクに数えられずトリム範囲から自然に外れる。濃く残るヘッダー等は残るが、数字欄は
        whitelist（数字のみ許可）で数字以外を出力しないため実害が出ない。 */
     const rowThr = Math.max(1, maxRow * 0.08);
     let top = 0;        while (top < h && rowInk[top] < rowThr) top++;
@@ -209,40 +238,44 @@ const Recognizer = (() => {
     top    = Math.max(0, top - 2);
     bottom = Math.min(h - 1, bottom + 2);
     const bh = bottom - top + 1;
-    if (bh < 6) return canvas;   // 実質空 → 触らない
+    if (bh < 6 || bh >= h) return canvas;   // 実質空／トリム余地なし → そのまま（拡大済みグレーを返す）
 
-    /* 二値化（黒字・白地）してトリム範囲を描画 */
+    /* トリム範囲を「グレースケールのまま」切り出す（二値化しない）。白地に合成して
+       透明を潰す。drawImageの補間で元のなめらかなエッジが保たれる。 */
     const out = document.createElement('canvas');
     out.width = w; out.height = bh;
     const octx = out.getContext('2d', { willReadFrequently: true });
-    const oimg = octx.createImageData(w, bh);
-    for (let y = 0; y < bh; y++) {
-      const srcBase = (top + y) * w, dstBase = y * w;
-      for (let x = 0; x < w; x++) {
-        const v = gray[srcBase + x] < thr ? 0 : 255;
-        const o = (dstBase + x) * 4;
-        oimg.data[o] = v; oimg.data[o + 1] = v; oimg.data[o + 2] = v; oimg.data[o + 3] = 255;
-      }
-    }
-    octx.putImageData(oimg, 0, 0);
+    octx.fillStyle = '#fff'; octx.fillRect(0, 0, w, bh);
+    octx.drawImage(canvas, 0, top, w, bh, 0, 0, w, bh);
     return out;
   }
 
   /** 構造化された「英数字・記号のみの単一値」欄か。
-      true の欄にだけ 二値化＋主要行抽出（①②）と PSM=単一行（③）を適用する。 */
+      true の欄にだけ 行トリム＋拡大（①④）と PSM=ブロック（③）を適用する。 */
   function isSingleValueField(rule) {
     return CharConstraint.isActive(rule) && CharConstraint.isLatinOnly(rule);
   }
 
-  /** OCR入力キャンバスを構築する。単一値欄は前処理（①②）を挟み、それ以外は従来通り拡大のみ。 */
+  /** OCR入力キャンバスを構築する。
+      単一値欄は ④ グレースケールのまま拡大（滑らかな補間）→ 行トリム（ゴースト除去）。
+      ハード二値化はしない（拡大後に0/1へ叩き切るとブロック状になり精度が落ちるため。
+      二値化はTesseract内部の大津に任せる）。それ以外の欄は従来通り拡大のみ。 */
   function ocrInputCanvas(cropCanvas, single) {
-    return upscaleForOcr(single ? preprocessSingleLine(cropCanvas) : cropCanvas);
+    if (single) return preprocessSingleLine(upscaleForOcr(cropCanvas, SINGLE_TARGET_H, SINGLE_MAX_SCALE));
+    return upscaleForOcr(cropCanvas);
   }
 
   /* PSM: 単一値欄は「単一の均一ブロック」(6) で読む。単一行(7)は最上行だけを読むため、
      ゴーストのヘッダー行が上に残ると値（下段の数字）を取りこぼす。6なら全行を読み、
      数字以外はwhitelistで落ちるので値だけが残る。一般欄は従来通りフォーム設定のPSM。 */
   const SINGLE_LINE_PSM = 6;
+
+  /* ④ 単一値欄の拡大目標。Tesseractは字形が小さいと 9↔G / 0↔O / 1↔I などの
+     微妙な取り違えを起こしやすい。行の高さがこの値に満たない切り出しは拡大してから
+     認識する（最大 SINGLE_MAX_SCALE 倍）。一般欄の既定(44/4)より大きめに取り、
+     数字・英数字の字形をはっきりさせる。上げ過ぎは補間ボケと処理増になるため中庸に。 */
+  const SINGLE_TARGET_H = 64;
+  const SINGLE_MAX_SCALE = 6;
 
   /**
    * マッチング + 自動判定のみを実行（採用前に結果を提示するため分離）。

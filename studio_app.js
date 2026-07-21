@@ -694,6 +694,8 @@
     /* 一括（OCR中確認）: このページを確定 → ループ側が保存して次ページへ
        （次ページが先読み済みなら待ちなしで切り替わる。未完了なら直後にループが「認識中」を出す） */
     if (rv.batch) { const done = rv.batch.resolve; S.review = null; done('done'); return; }
+    /* 照合結果からの「詳細」で開いた調査モード: 新規保存はせず、修正だけ既存記録へ反映 */
+    if (rv.investigate) { reviewFinishInvestigate(); return; }
     const { form, result } = rv;
     reviewHide();
     UI.renderFieldResults(result.fields);   // 修正を画面に反映
@@ -705,8 +707,55 @@
     const rv = S.review;
     /* 一括（OCR中確認）: 中止 → このページは保存せずループを終了（ここまでは保存済み） */
     if (rv && rv.batch) { const stop = rv.batch.resolve; S.review = null; stop('stop'); return; }
+    /* 調査モード: 修正を破棄して照合結果へ戻るだけ */
+    if (rv && rv.investigate) { reviewHide(); return; }
     reviewHide();
     UI.toast('確認をキャンセルしました（未保存）。結果は画面に表示中です', 'info', 4000);
+  }
+
+  /* ── 照合結果の行 → その記録の詳細（切り出し画像・確信度）を直接開く（調査モード）──
+     保存済み記録(raw)からレビュー用の result を組み立てて開く。新規保存はせず、値を
+     直した場合のみ既存記録へ反映し、照合結果も再計算する。 */
+  function openRecordDetail(ocrIdx) {
+    const entry = S.rec && S.rec.ocr && S.rec.ocr[ocrIdx];
+    if (!entry || !entry.raw) return UI.toast('この行の元記録が見つかりません', 'warning');
+    const raw = entry.raw;
+    /* 保存時は cropDataURL を crop（縮小JPEG）として保持しているため、レビュー用に読み替える。
+       symbols/OCRへ渡した画像は保存対象外なので詳細では出ない（切り出し画像＋確信度は出る）。 */
+    const fields = (raw.fields || []).map(f => ({
+      name: f.name, globalName: f.globalName || f.name, text: f.text,
+      confidence: f.confidence, error: f.error || null,
+      constraint: f.constraint || '', constraintValid: f.constraintValid !== false,
+      cropDataURL: f.crop || '', symbols: f.symbols || [],
+    }));
+    if (!fields.length) return UI.toast('この記録には項目がありません', 'warning');
+    S.review = { form: { id: raw.formId, name: raw.formName }, result: { fields, angle: raw.angle }, idx: 0, investigate: { ocrIdx, raw } };
+    $('reviewBatchBar').classList.add('hidden');
+    const ctx = $('reviewPageCtx'); ctx.classList.remove('hidden');
+    ctx.textContent = `P${raw.page || 1}${raw.formName ? ' ・ ' + raw.formName : ''}`;
+    $('reviewModal').classList.remove('hidden');
+    reviewRender();
+    setTimeout(() => { $('reviewValue').focus(); $('reviewValue').select(); }, 60);
+  }
+  /* 調査モードの終了: レビューで直した値を既存記録・照合結果へ反映してから閉じる */
+  function reviewFinishInvestigate() {
+    const rv = S.review, inv = rv && rv.investigate; if (!inv) return;
+    const entry = S.rec && S.rec.ocr && S.rec.ocr[inv.ocrIdx];
+    reviewHide();
+    if (!entry) return;
+    let changed = false;
+    rv.result.fields.forEach(f => {
+      const key = f.globalName || f.name;
+      if ((entry.values[key] ?? '') === f.text) return;
+      entry.values[key] = f.text;
+      recPersistOcrValueFix(inv.ocrIdx, key, f.text);   // 既存OCR記録(raw)＋DBへ反映
+      changed = true;
+    });
+    if (changed && S.rec.runParams && S.rec.result) {
+      S.rec.result[inv.ocrIdx] = recComputeRow(entry, inv.ocrIdx, S.rec.runParams);
+      renderRecResult(S.rec.result, recSummarize(S.rec.result));
+      UI.toast('詳細で修正した値を照合結果へ反映しました', 'success', 2200);
+    }
   }
   /* Shift+Enter: 表示中のページ（あれば）を確定し、以降の残りページはOCR結果をそのまま
      信頼して自動確定し続け、バッチ完了後に照合画面へ自動で進む。
@@ -1500,6 +1549,57 @@
     } catch (e) { UI.toast('読み込みに失敗しました: ' + (e.message || e), 'error', 6000); }
   }
 
+  /* ── 全データのバックアップ（他のPC/ブラウザへ環境ごと移行）────
+     帳票のみを対象にした exportForms/importFormsFromFile（同僚との個別共有向け・
+     IDは再採番して安全にマージ）とは別に、このツールで設定・保存できるものを
+     全て1つのJSONへ書き出す。目的は「他のPCで同じ状態を再現する」ことなので、
+     IDは再採番せずそのまま復元する（results.formId 等の参照関係を保つため。
+     put(upsert)なので同一IDの再読み込みは上書きになり、再インポートしても
+     重複は増えない）。 */
+  const PDF_DPI_KEY = 'ocrtool_pdf_dpi';
+  async function exportAllData() {
+    let forms = [], presets = [], results = [], reconciles = [];
+    try { forms = await FormDB.getAllForms(); } catch (_) {}
+    try { presets = await FormDB.getAllPresets(); } catch (_) {}
+    try { results = await FormDB.getAllResults(0); } catch (_) {}       // limit=0 → 上限なし全件
+    try { reconciles = await FormDB.getAllReconciles(0); } catch (_) {} // limit=0 → 上限なし全件
+    let pdfDpi = null;
+    try { const v = localStorage.getItem(PDF_DPI_KEY); pdfDpi = v ? parseInt(v, 10) : null; } catch (_) {}
+    const data = {
+      app: 'chouhyou-ocr', kind: 'full-backup', version: 1, exportedAt: new Date().toISOString(),
+      matchSettings: S.settings,
+      forms, presets, results, reconciles,
+      pdfDpi,
+      reconcileLastSettings: S.recLastSettings || null,
+    };
+    downloadJson(data, `ocrtool_backup_${Date.now()}.json`);
+    UI.toast(`バックアップを書き出しました（帳票${forms.length}・プリセット${presets.length}・OCR履歴${results.length}・照合履歴${reconciles.length}件）`, 'success', 4500);
+  }
+  async function importAllDataFromFile(file) {
+    let data;
+    try { data = JSON.parse(await file.text()); }
+    catch (e) { return UI.toast('JSONを解析できませんでした: ' + (e.message || e), 'error', 6000); }
+    if (!data || data.kind !== 'full-backup') {
+      return UI.toast('全データのバックアップ形式ではありません（帳票のみのJSONは帳票ライブラリの「読込」から取り込めます）', 'warning', 6500);
+    }
+    const c = { forms: (data.forms || []).length, presets: (data.presets || []).length, results: (data.results || []).length, reconciles: (data.reconciles || []).length };
+    if (!confirm(`バックアップを読み込みます（帳票${c.forms}・プリセット${c.presets}・OCR履歴${c.results}・照合履歴${c.reconciles}件、設定類も含む）。\n同じIDのデータは上書きされます。よろしいですか？`)) return;
+    try {
+      for (const f of (data.forms || []))       if (f && f.id) await FormDB.putForm(f);
+      for (const p of (data.presets || []))     if (p && p.id) await FormDB.putPreset(p);
+      for (const r of (data.results || []))     if (r && r.id) await FormDB.putResult(r);
+      for (const r of (data.reconciles || []))  if (r && r.id) await FormDB.putReconcile(r);
+      if (data.matchSettings) { S.settings = { ...defaultSettings(), ...data.matchSettings }; persistSettings(); applySettingsToUI(); }
+      if (data.pdfDpi) { try { localStorage.setItem(PDF_DPI_KEY, String(data.pdfDpi)); } catch (_) {} }
+      if (data.reconcileLastSettings) {
+        try { localStorage.setItem(REC_LAST_KEY, JSON.stringify(data.reconcileLastSettings)); } catch (_) {}
+        S.recLastSettings = data.reconcileLastSettings;
+      }
+      await Promise.all([loadForms(), loadPresets(), loadRecPresets(), refreshHistory()]);
+      UI.toast('バックアップを読み込みました。他のPCと同じ状態を再現しました', 'success', 4000);
+    } catch (e) { UI.toast('読み込みに失敗しました: ' + (e.message || e), 'error', 6000); }
+  }
+
   /* ════════════════════════════════════════════════════
      照合（OCR結果 × 外部データ）
      ════════════════════════════════════════════════════ */
@@ -1697,9 +1797,14 @@
     }
     recRebuildOcrSide(forms.length > 1 ? forms[0].id : '');
     recFill('recExtKey', []); recFill('recExtVal', ['(なし)']);
-    if (S.recLastSettings) $('recNumeric').checked = !!S.recLastSettings.numeric;
+    if (S.recLastSettings) {
+      $('recNumeric').checked = !!S.recLastSettings.numeric;
+      $('recAutoBlank').checked = !!S.recLastSettings.autoRemoveBlankRows;
+    }
     $('recPreview').innerHTML = ''; $('recResult').innerHTML = ''; $('recSummary').classList.add('hidden'); $('recExport').disabled = true;
     $('recPreviewInfo').textContent = ''; $('recPreviewExpand').disabled = true;
+    S.recResultFilter = 'all'; S.recRender = null;
+    $('reconcileResultModal').classList.add('hidden');
     $('reconcileModal').classList.remove('hidden');
   }
   function closeReconcile() { $('reconcileModal').classList.add('hidden'); }
@@ -1719,13 +1824,24 @@
     if (!rows.length) return UI.toast('データを解析できませんでした', 'warning');
     const hasHeader = $('recHasHeader').checked;
     /* 生のテキストを保持し、区切りパターンは「テーブルで確認・整形」内でいつでも変えて
-       見比べられるようにする。見出し行/削除行もここでは確定せず、暫定で「先頭の空白でない
-       行」を見出しにし、実ファイルにありがちな「見出しが4行目から」等は同モーダルで選び
-       直せるようにする。 */
-    S.rec.raw = { text, delimSel, delim, rows, excluded: new Set(), headerIdx: hasHeader ? recFindFirstNonBlank(rows, 0) : -1 };
+       見比べられるようにする。
+       見出し行の位置は、前回「テーブルで確認・整形」の適用時に記憶した行番号があれば
+       それを復元する（同じ形式のファイルなら「見出しが4行目から」等を毎回選び直さずに
+       済む）。今回のデータの方が行数が少ない等で範囲外なら無視し、従来通り「先頭の
+       空白でない行」を暫定の見出しにする（「テーブルで確認・整形」でいつでも選び直せる）。 */
+    const remembered = S.recLastSettings;
+    const rememberedHeaderIdx = (remembered && Number.isInteger(remembered.headerRowIndex) && remembered.headerRowIndex < rows.length)
+      ? remembered.headerRowIndex : null;
+    const headerIdx = rememberedHeaderIdx != null ? rememberedHeaderIdx : (hasHeader ? recFindFirstNonBlank(rows, 0) : -1);
+    S.rec.raw = { text, delimSel, delim, rows, excluded: new Set(), headerIdx };
+    /* 空白行の自動除外も同様に前回の指定を復元する（見出し行自体は対象外）。 */
+    if (remembered && remembered.autoRemoveBlankRows) {
+      rows.forEach((r, i) => { if (i !== headerIdx && recRowBlank(r)) S.rec.raw.excluded.add(i); });
+    }
     applyRecShape();
     const n = S.rec.ext.rows.length;
-    UI.toast(`比較データ ${n} 行 × ${S.rec.ext.header.length} 列を読み込みました`, 'success', 2500);
+    const restoredNote = rememberedHeaderIdx != null ? '（前回の見出し行・空白行の設定を復元）' : '';
+    UI.toast(`比較データ ${n} 行 × ${S.rec.ext.header.length} 列を読み込みました${restoredNote}`, 'success', 2500);
   }
   /* 削除された行が見出し行だった場合は選び直しを促す（headerIdxを未選択に戻す） */
   function recExcludeRow(idx) {
@@ -1871,8 +1987,11 @@
   }
   function recTableApply() {
     applyRecShape();
+    /* 見出し行の位置・空白行の自動除外を、この場で（照合の実行を待たず）記憶する。
+       次に比較データを読み込んだ時、recParse がこれを見て自動で復元する。 */
+    persistRecLastSettings({ ...(S.recLastSettings || {}), ...currentRecSettings() });
     closeRecTableModal();
-    UI.toast(`${S.rec.ext.rows.length} 行 × ${S.rec.ext.header.length} 列を適用しました`, 'success', 2500);
+    UI.toast(`${S.rec.ext.rows.length} 行 × ${S.rec.ext.header.length} 列を適用しました（見出し行・空白行の設定は次回も自動で復元されます）`, 'success', 3000);
   }
   function closeRecTableModal() { $('recTableModal').classList.add('hidden'); }
   function recReadFile(file) {
@@ -1919,6 +2038,11 @@
       ocrKey: $('recOcrKey').value, extKey: $('recExtKey').value,
       ocrVal: $('recOcrVal').value, extVal: $('recExtVal').value,
       numeric: $('recNumeric').checked,
+      /* 見出し行の位置・空白行の自動除外も、キー/値の対応づけと同じ「前回設定を
+         次回も自動で復元する」対象にする（毎回「テーブルで確認・整形」で選び
+         直す手間を省く）。headerRowIndexはS.rec.raw確定後のみ意味を持つ。 */
+      headerRowIndex: (S.rec && S.rec.raw && S.rec.raw.headerIdx >= 0) ? S.rec.raw.headerIdx : null,
+      autoRemoveBlankRows: !!($('recAutoBlank') && $('recAutoBlank').checked),
     };
   }
   function recRun() {
@@ -1993,6 +2117,7 @@
     recSetSelectValue('recOcrKey', s.ocrKey); recSetSelectValue('recOcrVal', s.ocrVal);
     recSetSelectValue('recExtKey', s.extKey); recSetSelectValue('recExtVal', s.extVal);
     $('recNumeric').checked = !!s.numeric;
+    $('recAutoBlank').checked = !!s.autoRemoveBlankRows;
     updateRecOcrSamples();
     if (S.rec && S.rec.ext) renderRecPreview(S.rec.ext.header, S.rec.ext.rows);
     persistRecLastSettings(s);
@@ -2037,30 +2162,60 @@
      （行番号(ocrIdx)が今のS.rec.ocrと対応しないデータのため、誤って別データを書き換えないように）。 */
   function renderRecResult(out, st, opts) {
     const readOnly = !!(opts && opts.readOnly);
+    /* フィルタ切替（すべて / ×・該当なしのみ）で再描画できるよう、描画コンテキストを保持 */
+    S.recRender = { out, st, readOnly };
+    const filter = S.recResultFilter || 'all';
+    const isIssue = r => r.verdict === '×' || r.verdict === '該当なし';
+    const shown = filter === 'issues' ? out.filter(isIssue) : out;
+
     const sum = $('recSummary'); sum.classList.remove('hidden');
-    sum.innerHTML = st.compareVals
+    const base = st.compareVals
       ? `${out.length}件 ・ <span class="bs-ok">一致 ${st.nMatch}</span> / <span class="bs-rj">不一致 ${st.nNo}</span> / <span class="bs-er">該当なし ${st.nMiss}</span>`
       : `${out.length}件 ・ <span class="bs-ok">キー一致 ${st.nMatch}</span> / <span class="bs-er">該当なし ${st.nMiss}</span>`;
+    sum.innerHTML = filter === 'issues' ? `${base} ・ <span class="rec-filter-note">×・該当なしのみ ${shown.length}件を表示</span>` : base;
+
+    /* フィルタボタンの選択状態を同期 */
+    const fa = $('recFilterAll'), fi = $('recFilterIssues');
+    if (fa && fi) {
+      fa.classList.toggle('btn-primary', filter === 'all'); fa.classList.toggle('btn-outline', filter !== 'all');
+      fi.classList.toggle('btn-primary', filter === 'issues'); fi.classList.toggle('btn-outline', filter !== 'issues');
+    }
+
+    /* 見出し・列構成は全件基準で決める（絞り込んでも列がぶれないように） */
     const names = (out[0] && out[0].ocrFields.map(f => f.name)) || [];
     const hasAnyCrop = out.some(r => r.ocrFields.some(f => f.crop));   // 旧データ（切り出し未保存）では画像列を出さない
     const first = out[0] || {};
     const tagFor = name => name === first.ocrKeyName ? '<span class="rec-th-tag rec-th-tag--key">キー</span>'
       : (first.compareVals && name === first.ocrValName) ? '<span class="rec-th-tag rec-th-tag--val">比較</span>' : '';
     const fieldHead = names.map(name => `<th>OCR値: ${recHtml(name)} ${tagFor(name)}</th>` + (hasAnyCrop ? '<th>切り出し画像</th>' : '')).join('');
-    const head = `<tr><th>ページ</th>${fieldHead}${st.compareVals ? '<th>外部値</th>' : '<th>外部データ</th>'}<th>判定</th></tr>`;
+    /* 行クリックで詳細へ飛べる列（読み取り専用スナップショットは現行データと対応しないため出さない） */
+    const detailHead = readOnly ? '' : '<th></th>';
+    const head = `<tr><th>ページ</th>${fieldHead}${st.compareVals ? '<th>外部値</th>' : '<th>外部データ</th>'}<th>判定</th>${detailHead}</tr>`;
     const cls = v => v === '〇' ? 'rv-ok' : v === '×' ? 'rv-no' : 'rv-miss';
     const rowCls = v => v === '該当なし' ? 'rec-row-miss' : v === '×' ? 'rec-row-bad' : '';
-    const body = out.map(r => {
+    const body = shown.map(r => {
       /* OCR値は照合時にその場で修正できる（誤読の手直し）。修正するとその行の判定を
          再計算し、元のOCR履歴レコードにも反映して保存する。 */
       const fieldCells = r.ocrFields.map(f => (readOnly
         ? `<td>${recHtml(f.value)}</td>`
         : `<td><input type="text" class="rec-ocr-edit" data-row="${r.ocrIdx}" data-field="${recHtml(f.name)}" value="${recHtml(f.value)}" title="クリックしてOCR値を修正"></td>`)
         + (hasAnyCrop ? `<td class="rec-crop-cell">${f.crop ? `<img class="rec-crop" src="${f.crop}" alt="切り出し" loading="lazy">` : ''}</td>` : '')).join('');
-      return `<tr class="${rowCls(r.verdict)}"><td>${recHtml(r.page)}</td>${fieldCells}<td>${recHtml(r.ext)}</td><td class="${cls(r.verdict)}">${r.verdict}</td></tr>`;
+      const detailCell = readOnly ? '' : `<td class="rec-detail-cell"><button type="button" class="btn btn-ghost btn-sm rec-detail-btn" data-ocr-idx="${r.ocrIdx}" title="この記録の詳細（切り出し画像・確信度）を開く"><i class="fas fa-magnifying-glass-chart"></i> 詳細</button></td>`;
+      return `<tr class="${rowCls(r.verdict)}"><td>${recHtml(r.page)}</td>${fieldCells}<td>${recHtml(r.ext)}</td><td class="${cls(r.verdict)}">${r.verdict}</td>${detailCell}</tr>`;
     }).join('');
-    $('recResult').innerHTML = `<div class="rec-tbl-wrap rec-result-wrap"><table class="rec-tbl rec-result-tbl">${head}${body}</table></div>`;
+    const empty = shown.length ? '' : '<div class="rec-empty">該当なし・不一致の行はありません 🎉</div>';
+    $('recResult').innerHTML = `<div class="rec-tbl-wrap rec-result-wrap"><table class="rec-tbl rec-result-tbl">${head}${body}</table></div>${empty}`;
+    /* 結果は専用モーダルで開く（設定モーダルの上に重ねて表示） */
+    $('reconcileResultModal').classList.remove('hidden');
   }
+  /* フィルタ切替（すべて / ×・該当なしのみ） */
+  function recSetResultFilter(f) {
+    S.recResultFilter = f;
+    const ctx = S.recRender; if (!ctx) return;
+    renderRecResult(ctx.out, ctx.st, { readOnly: ctx.readOnly });
+  }
+  function closeReconcileResult() { $('reconcileResultModal').classList.add('hidden'); }   // 結果のみ閉じ→設定へ戻る
+  function closeReconcileAll() { $('reconcileResultModal').classList.add('hidden'); closeReconcile(); }   // 結果＋設定を閉じて照合を抜ける
   function recExport() {
     const out = S.rec && S.rec.result; if (!out || !out.length) return;
     const cmp = out[0].compareVals;
@@ -2206,6 +2361,14 @@
     $('recParse').addEventListener('click', recParse);
     $('recRun').addEventListener('click', recRun);
     $('recExport').addEventListener('click', recExport);
+    /* 照合結果モーダル: 絞り込み・詳細ジャンプ・開閉 */
+    $('recFilterAll').addEventListener('click', () => recSetResultFilter('all'));
+    $('recFilterIssues').addEventListener('click', () => recSetResultFilter('issues'));
+    $('recResult').addEventListener('click', e => { const b = e.target.closest('.rec-detail-btn'); if (b) openRecordDetail(parseInt(b.dataset.ocrIdx, 10)); });
+    $('recResultClose').addEventListener('click', closeReconcileResult);   // ×＝結果を閉じて設定へ戻る
+    $('recResultCloseBtn').addEventListener('click', closeReconcileAll);    // 閉じる＝照合を抜ける
+    $('recResultBack').addEventListener('click', closeReconcileResult);     // 設定に戻る
+    $('reconcileResultModal').addEventListener('click', e => { if (e.target === $('reconcileResultModal')) closeReconcileResult(); });
     $('recHistBtn').addEventListener('click', openReconcileHist);
     $('recHistClose').addEventListener('click', closeReconcileHist);
     $('recHistCloseBtn').addEventListener('click', closeReconcileHist);
@@ -2229,6 +2392,10 @@
     rp.addEventListener('dragover', e => { if (Array.from(e.dataTransfer?.types || []).includes('Files')) { e.preventDefault(); rp.classList.add('drag-over'); } });
     rp.addEventListener('dragleave', () => rp.classList.remove('drag-over'));
     rp.addEventListener('drop', e => { const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) { e.preventDefault(); rp.classList.remove('drag-over'); recReadFile(f); } });
+    /* 貼り付けたら自動で読み込む（「読み込む」クリックを省く＝データを入れるだけで
+       前回のキー設定の復元まで走る。ファイル選択/ドロップは既に自動読み込み済み）。
+       pasteイベントは値が入る前に発火するため次tickで読む。実行(照合)は手動のまま。 */
+    rp.addEventListener('paste', () => setTimeout(() => { if ($('recPaste').value.trim()) recParse(); }, 0));
 
     /* 罫線除去結果プレビューのズーム */
     $('btnRrZoomIn').addEventListener('click', () => { S.rrZoom = Math.min(8, S.rrZoom * 1.3); renderResultPreview(); });
@@ -2317,6 +2484,11 @@
     $('btnImportForms').addEventListener('click', () => $('importFormsInput').click());
     $('importFormsInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) importFormsFromFile(f); e.target.value = ''; });
     setupJsonDrop('libraryPanel', importFormsFromFile);
+
+    /* 全データのバックアップ（他のPCへの移行） */
+    $('btnExportAll').addEventListener('click', exportAllData);
+    $('btnImportAll').addEventListener('click', () => $('importAllInput').click());
+    $('importAllInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) importAllDataFromFile(f); e.target.value = ''; });
 
     document.addEventListener('paste', handlePaste);
 
