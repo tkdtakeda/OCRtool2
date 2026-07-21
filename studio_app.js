@@ -2318,6 +2318,10 @@
     rp.addEventListener('dragover', e => { if (Array.from(e.dataTransfer?.types || []).includes('Files')) { e.preventDefault(); rp.classList.add('drag-over'); } });
     rp.addEventListener('dragleave', () => rp.classList.remove('drag-over'));
     rp.addEventListener('drop', e => { const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) { e.preventDefault(); rp.classList.remove('drag-over'); recReadFile(f); } });
+    /* 貼り付けたら自動で読み込む（「読み込む」クリックを省く＝データを入れるだけで
+       前回のキー設定の復元まで走る。ファイル選択/ドロップは既に自動読み込み済み）。
+       pasteイベントは値が入る前に発火するため次tickで読む。実行(照合)は手動のまま。 */
+    rp.addEventListener('paste', () => setTimeout(() => { if ($('recPaste').value.trim()) recParse(); }, 0));
 
     /* 罫線除去結果プレビューのズーム */
     $('btnRrZoomIn').addEventListener('click', () => { S.rrZoom = Math.min(8, S.rrZoom * 1.3); renderResultPreview(); });
