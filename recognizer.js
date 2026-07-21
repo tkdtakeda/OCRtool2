@@ -234,15 +234,27 @@ const Recognizer = (() => {
     return CharConstraint.isActive(rule) && CharConstraint.isLatinOnly(rule);
   }
 
-  /** OCR入力キャンバスを構築する。単一値欄は前処理（①②）を挟み、それ以外は従来通り拡大のみ。 */
+  /** OCR入力キャンバスを構築する。
+      単一値欄は ④ 先にグレースケールのまま拡大 → 高解像度で二値化＋行トリム、の順で作る。
+      「二値化→拡大」だと低解像度の粗いエッジを引き伸ばすだけで字形が甘くなるため、
+      拡大を先に行い、9の“しっぽ”とGの“横棒”のような差が残る高解像度で二値化する。
+      それ以外の欄は従来通り拡大のみ。 */
   function ocrInputCanvas(cropCanvas, single) {
-    return upscaleForOcr(single ? preprocessSingleLine(cropCanvas) : cropCanvas);
+    if (single) return preprocessSingleLine(upscaleForOcr(cropCanvas, SINGLE_TARGET_H, SINGLE_MAX_SCALE));
+    return upscaleForOcr(cropCanvas);
   }
 
   /* PSM: 単一値欄は「単一の均一ブロック」(6) で読む。単一行(7)は最上行だけを読むため、
      ゴーストのヘッダー行が上に残ると値（下段の数字）を取りこぼす。6なら全行を読み、
      数字以外はwhitelistで落ちるので値だけが残る。一般欄は従来通りフォーム設定のPSM。 */
   const SINGLE_LINE_PSM = 6;
+
+  /* ④ 単一値欄の拡大目標。Tesseractは字形が小さいと 9↔G / 0↔O / 1↔I などの
+     微妙な取り違えを起こしやすい。行の高さがこの値に満たない切り出しは拡大してから
+     認識する（最大 SINGLE_MAX_SCALE 倍）。一般欄の既定(44/4)より大きめに取り、
+     数字・英数字の字形をはっきりさせる。上げ過ぎは補間ボケと処理増になるため中庸に。 */
+  const SINGLE_TARGET_H = 64;
+  const SINGLE_MAX_SCALE = 6;
 
   /**
    * マッチング + 自動判定のみを実行（採用前に結果を提示するため分離）。
