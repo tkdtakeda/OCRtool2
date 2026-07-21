@@ -1797,7 +1797,10 @@
     }
     recRebuildOcrSide(forms.length > 1 ? forms[0].id : '');
     recFill('recExtKey', []); recFill('recExtVal', ['(なし)']);
-    if (S.recLastSettings) $('recNumeric').checked = !!S.recLastSettings.numeric;
+    if (S.recLastSettings) {
+      $('recNumeric').checked = !!S.recLastSettings.numeric;
+      $('recAutoBlank').checked = !!S.recLastSettings.autoRemoveBlankRows;
+    }
     $('recPreview').innerHTML = ''; $('recResult').innerHTML = ''; $('recSummary').classList.add('hidden'); $('recExport').disabled = true;
     $('recPreviewInfo').textContent = ''; $('recPreviewExpand').disabled = true;
     S.recResultFilter = 'all'; S.recRender = null;
@@ -1821,13 +1824,24 @@
     if (!rows.length) return UI.toast('データを解析できませんでした', 'warning');
     const hasHeader = $('recHasHeader').checked;
     /* 生のテキストを保持し、区切りパターンは「テーブルで確認・整形」内でいつでも変えて
-       見比べられるようにする。見出し行/削除行もここでは確定せず、暫定で「先頭の空白でない
-       行」を見出しにし、実ファイルにありがちな「見出しが4行目から」等は同モーダルで選び
-       直せるようにする。 */
-    S.rec.raw = { text, delimSel, delim, rows, excluded: new Set(), headerIdx: hasHeader ? recFindFirstNonBlank(rows, 0) : -1 };
+       見比べられるようにする。
+       見出し行の位置は、前回「テーブルで確認・整形」の適用時に記憶した行番号があれば
+       それを復元する（同じ形式のファイルなら「見出しが4行目から」等を毎回選び直さずに
+       済む）。今回のデータの方が行数が少ない等で範囲外なら無視し、従来通り「先頭の
+       空白でない行」を暫定の見出しにする（「テーブルで確認・整形」でいつでも選び直せる）。 */
+    const remembered = S.recLastSettings;
+    const rememberedHeaderIdx = (remembered && Number.isInteger(remembered.headerRowIndex) && remembered.headerRowIndex < rows.length)
+      ? remembered.headerRowIndex : null;
+    const headerIdx = rememberedHeaderIdx != null ? rememberedHeaderIdx : (hasHeader ? recFindFirstNonBlank(rows, 0) : -1);
+    S.rec.raw = { text, delimSel, delim, rows, excluded: new Set(), headerIdx };
+    /* 空白行の自動除外も同様に前回の指定を復元する（見出し行自体は対象外）。 */
+    if (remembered && remembered.autoRemoveBlankRows) {
+      rows.forEach((r, i) => { if (i !== headerIdx && recRowBlank(r)) S.rec.raw.excluded.add(i); });
+    }
     applyRecShape();
     const n = S.rec.ext.rows.length;
-    UI.toast(`比較データ ${n} 行 × ${S.rec.ext.header.length} 列を読み込みました`, 'success', 2500);
+    const restoredNote = rememberedHeaderIdx != null ? '（前回の見出し行・空白行の設定を復元）' : '';
+    UI.toast(`比較データ ${n} 行 × ${S.rec.ext.header.length} 列を読み込みました${restoredNote}`, 'success', 2500);
   }
   /* 削除された行が見出し行だった場合は選び直しを促す（headerIdxを未選択に戻す） */
   function recExcludeRow(idx) {
@@ -1973,8 +1987,11 @@
   }
   function recTableApply() {
     applyRecShape();
+    /* 見出し行の位置・空白行の自動除外を、この場で（照合の実行を待たず）記憶する。
+       次に比較データを読み込んだ時、recParse がこれを見て自動で復元する。 */
+    persistRecLastSettings({ ...(S.recLastSettings || {}), ...currentRecSettings() });
     closeRecTableModal();
-    UI.toast(`${S.rec.ext.rows.length} 行 × ${S.rec.ext.header.length} 列を適用しました`, 'success', 2500);
+    UI.toast(`${S.rec.ext.rows.length} 行 × ${S.rec.ext.header.length} 列を適用しました（見出し行・空白行の設定は次回も自動で復元されます）`, 'success', 3000);
   }
   function closeRecTableModal() { $('recTableModal').classList.add('hidden'); }
   function recReadFile(file) {
@@ -2021,6 +2038,11 @@
       ocrKey: $('recOcrKey').value, extKey: $('recExtKey').value,
       ocrVal: $('recOcrVal').value, extVal: $('recExtVal').value,
       numeric: $('recNumeric').checked,
+      /* 見出し行の位置・空白行の自動除外も、キー/値の対応づけと同じ「前回設定を
+         次回も自動で復元する」対象にする（毎回「テーブルで確認・整形」で選び
+         直す手間を省く）。headerRowIndexはS.rec.raw確定後のみ意味を持つ。 */
+      headerRowIndex: (S.rec && S.rec.raw && S.rec.raw.headerIdx >= 0) ? S.rec.raw.headerIdx : null,
+      autoRemoveBlankRows: !!($('recAutoBlank') && $('recAutoBlank').checked),
     };
   }
   function recRun() {
@@ -2095,6 +2117,7 @@
     recSetSelectValue('recOcrKey', s.ocrKey); recSetSelectValue('recOcrVal', s.ocrVal);
     recSetSelectValue('recExtKey', s.extKey); recSetSelectValue('recExtVal', s.extVal);
     $('recNumeric').checked = !!s.numeric;
+    $('recAutoBlank').checked = !!s.autoRemoveBlankRows;
     updateRecOcrSamples();
     if (S.rec && S.rec.ext) renderRecPreview(S.rec.ext.header, S.rec.ext.rows);
     persistRecLastSettings(s);

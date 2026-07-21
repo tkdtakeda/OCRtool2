@@ -829,7 +829,7 @@
       <button class="modal-close" id="recTableClose"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="modal-bdy">
-      <p class="hint-text rec-tbl-hint"><i class="fas fa-circle-info"></i> 「見出し行」で選んだ行より下がデータになります（それより上の行は無視されます）。列数はその行のセル数で決まり、それを超える分は「余分」として右側に表示されます。行頭の <i class="fas fa-xmark"></i> で個別に削除、または下のボタンで空白の行をまとめて削除できます。</p>
+      <p class="hint-text rec-tbl-hint"><i class="fas fa-circle-info"></i> 「見出し行」で選んだ行より下がデータになります（それより上の行は無視されます）。列数はその行のセル数で決まり、それを超える分は「余分」として右側に表示されます。行頭の <i class="fas fa-xmark"></i> で個別に削除、または下のボタンで空白の行をまとめて削除できます。「適用」すると見出し行の位置と下の設定は記憶され、次に比較データを読み込んだ時も自動で復元されます。</p>
       <div class="rec-tbl-toolbar">
         <label class="rec-tbl-delim">区切り
           <select id="recTableDelim" class="pselect">
@@ -842,11 +842,14 @@
         </label>
         <button type="button" id="recRemoveBlankRows" class="btn btn-outline btn-sm"><i class="fas fa-broom"></i> 空白の行を削除</button>
         <button type="button" id="recResetRows" class="btn btn-ghost btn-sm"><i class="fas fa-rotate-left"></i> 削除をリセット</button>
+        <label class="rec-check" title="次に比較データを読み込んだ時、空白行を自動で除外します">
+          <input type="checkbox" id="recAutoBlank"> 今後も自動で空白行を除外する
+        </label>
       </div>
       <div id="recTableFull" class="rec-tbl-wrap rec-tbl-wrap--full"></div>
     </div>
     <div class="cr-ftr">
-      <button type="button" id="recTableApply" class="btn btn-success"><i class="fas fa-check"></i> この内容で適用</button>
+      <button type="button" id="recTableApply" class="btn btn-success"><i class="fas fa-check"></i> この内容で適用（次回も自動復元）</button>
       <button type="button" id="recTableCloseBtn" class="btn btn-ghost">閉じる</button>
     </div>
   </div>
