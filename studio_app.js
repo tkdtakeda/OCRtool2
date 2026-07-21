@@ -1549,6 +1549,57 @@
     } catch (e) { UI.toast('読み込みに失敗しました: ' + (e.message || e), 'error', 6000); }
   }
 
+  /* ── 全データのバックアップ（他のPC/ブラウザへ環境ごと移行）────
+     帳票のみを対象にした exportForms/importFormsFromFile（同僚との個別共有向け・
+     IDは再採番して安全にマージ）とは別に、このツールで設定・保存できるものを
+     全て1つのJSONへ書き出す。目的は「他のPCで同じ状態を再現する」ことなので、
+     IDは再採番せずそのまま復元する（results.formId 等の参照関係を保つため。
+     put(upsert)なので同一IDの再読み込みは上書きになり、再インポートしても
+     重複は増えない）。 */
+  const PDF_DPI_KEY = 'ocrtool_pdf_dpi';
+  async function exportAllData() {
+    let forms = [], presets = [], results = [], reconciles = [];
+    try { forms = await FormDB.getAllForms(); } catch (_) {}
+    try { presets = await FormDB.getAllPresets(); } catch (_) {}
+    try { results = await FormDB.getAllResults(0); } catch (_) {}       // limit=0 → 上限なし全件
+    try { reconciles = await FormDB.getAllReconciles(0); } catch (_) {} // limit=0 → 上限なし全件
+    let pdfDpi = null;
+    try { const v = localStorage.getItem(PDF_DPI_KEY); pdfDpi = v ? parseInt(v, 10) : null; } catch (_) {}
+    const data = {
+      app: 'chouhyou-ocr', kind: 'full-backup', version: 1, exportedAt: new Date().toISOString(),
+      matchSettings: S.settings,
+      forms, presets, results, reconciles,
+      pdfDpi,
+      reconcileLastSettings: S.recLastSettings || null,
+    };
+    downloadJson(data, `ocrtool_backup_${Date.now()}.json`);
+    UI.toast(`バックアップを書き出しました（帳票${forms.length}・プリセット${presets.length}・OCR履歴${results.length}・照合履歴${reconciles.length}件）`, 'success', 4500);
+  }
+  async function importAllDataFromFile(file) {
+    let data;
+    try { data = JSON.parse(await file.text()); }
+    catch (e) { return UI.toast('JSONを解析できませんでした: ' + (e.message || e), 'error', 6000); }
+    if (!data || data.kind !== 'full-backup') {
+      return UI.toast('全データのバックアップ形式ではありません（帳票のみのJSONは帳票ライブラリの「読込」から取り込めます）', 'warning', 6500);
+    }
+    const c = { forms: (data.forms || []).length, presets: (data.presets || []).length, results: (data.results || []).length, reconciles: (data.reconciles || []).length };
+    if (!confirm(`バックアップを読み込みます（帳票${c.forms}・プリセット${c.presets}・OCR履歴${c.results}・照合履歴${c.reconciles}件、設定類も含む）。\n同じIDのデータは上書きされます。よろしいですか？`)) return;
+    try {
+      for (const f of (data.forms || []))       if (f && f.id) await FormDB.putForm(f);
+      for (const p of (data.presets || []))     if (p && p.id) await FormDB.putPreset(p);
+      for (const r of (data.results || []))     if (r && r.id) await FormDB.putResult(r);
+      for (const r of (data.reconciles || []))  if (r && r.id) await FormDB.putReconcile(r);
+      if (data.matchSettings) { S.settings = { ...defaultSettings(), ...data.matchSettings }; persistSettings(); applySettingsToUI(); }
+      if (data.pdfDpi) { try { localStorage.setItem(PDF_DPI_KEY, String(data.pdfDpi)); } catch (_) {} }
+      if (data.reconcileLastSettings) {
+        try { localStorage.setItem(REC_LAST_KEY, JSON.stringify(data.reconcileLastSettings)); } catch (_) {}
+        S.recLastSettings = data.reconcileLastSettings;
+      }
+      await Promise.all([loadForms(), loadPresets(), loadRecPresets(), refreshHistory()]);
+      UI.toast('バックアップを読み込みました。他のPCと同じ状態を再現しました', 'success', 4000);
+    } catch (e) { UI.toast('読み込みに失敗しました: ' + (e.message || e), 'error', 6000); }
+  }
+
   /* ════════════════════════════════════════════════════
      照合（OCR結果 × 外部データ）
      ════════════════════════════════════════════════════ */
@@ -2410,6 +2461,11 @@
     $('btnImportForms').addEventListener('click', () => $('importFormsInput').click());
     $('importFormsInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) importFormsFromFile(f); e.target.value = ''; });
     setupJsonDrop('libraryPanel', importFormsFromFile);
+
+    /* 全データのバックアップ（他のPCへの移行） */
+    $('btnExportAll').addEventListener('click', exportAllData);
+    $('btnImportAll').addEventListener('click', () => $('importAllInput').click());
+    $('importAllInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) importAllDataFromFile(f); e.target.value = ''; });
 
     document.addEventListener('paste', handlePaste);
 

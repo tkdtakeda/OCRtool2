@@ -922,6 +922,14 @@
         </select>
       </div>
       <p class="hint-text">精度を上げるコツ：識別的で文字/罫線がはっきりした領域をアンカーにし、<b>2つ以上</b>登録。OCR実行画面の判定パネルに「アンカー別スコア」が出るので、低いアンカーを差し替えると改善します。</p>
+
+      <div class="debug-sec-ttl" style="margin-top:14px"><i class="fas fa-box-archive"></i> バックアップ／他のPCへの移行</div>
+      <p class="hint-text">帳票レイアウト・判定しきい値・OCR/照合の設定プリセット・PDF読み込みDPI・照合の前回キー設定・OCR認識履歴・照合結果履歴など、このツールで設定/保存できるものをすべて1つのJSONに書き出します。他のPC/ブラウザでそのまま読み込めば同じ状態を再現できます。</p>
+      <div class="backup-actions">
+        <button type="button" id="btnExportAll" class="btn btn-outline btn-sm"><i class="fas fa-file-export"></i> 全データを書き出し</button>
+        <button type="button" id="btnImportAll" class="btn btn-outline btn-sm"><i class="fas fa-file-import"></i> 全データを読み込み</button>
+        <input type="file" id="importAllInput" accept="application/json,.json" style="display:none">
+      </div>
     </div>
     <div class="cr-ftr">
       <button type="button" id="settingsReset" class="btn btn-ghost"><i class="fas fa-rotate-left"></i> 既定に戻す</button>

@@ -620,6 +620,9 @@
 .rec-detail-cell { text-align: center; white-space: nowrap; }
 .rec-detail-btn { white-space: nowrap; }
 .rec-empty { padding: 30px; text-align: center; color: var(--c-text-3); font-size: .9rem; }
+
+/* ── バックアップ（全データのエクスポート/インポート） ── */
+.backup-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .rec-crop-cell { padding: 2px 5px; }
 .rec-crop { display: block; max-width: 240px; max-height: 42px; height: auto; border: 1px solid var(--c-border); border-radius: 3px; background: #fff; cursor: zoom-in; transition: max-height .12s ease, max-width .12s ease; }
 .rec-crop:hover { max-height: 150px; max-width: 460px; box-shadow: 0 6px 18px rgba(0, 0, 0, .28); }
