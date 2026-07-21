@@ -198,16 +198,20 @@ const Recognizer = (() => {
   }
 
   /**
-   * 単一値欄の切り出しを二値化し、主要な文字行（バンド）だけを残して返す。
-   * 安全策として、判断がつかない／悪化しそうなケースでは元キャンバスを返す。
-   * @param {HTMLCanvasElement} canvas
+   * 単一値欄の切り出しから、ゴースト行・上下の空白マージンを削って値の行だけを返す。
+   * 【ハード二値化はしない】。小さい切り出しを拡大してから0/1に叩き切ると、元の
+   * なめらかな階調（アンチエイリアス）が失われてブロック状になり、かえってTesseractの
+   * 精度が落ちる（＝「元画像の方がきれい」な状態）。二値化はTesseract内部（大津）に
+   * 任せ、ここでは行トリムのみ行い、拡大済みグレースケールをそのまま渡す。
+   * トリム判定にだけ大津しきい値を使う。悪化しそうな退化ケースは元キャンバスを返す。
+   * @param {HTMLCanvasElement} canvas  （呼び出し側で拡大済み）
    * @returns {HTMLCanvasElement}
    */
   function preprocessSingleLine(canvas) {
     const w = canvas.width, h = canvas.height;
     if (w < 3 || h < 3) return canvas;
     const gray = toGrayOverWhite(canvas);
-    const thr  = otsuThreshold(gray);
+    const thr  = otsuThreshold(gray);   // 行トリムの判定にのみ使用（出力は二値化しない）
 
     /* 行ごとのインク量（暗画素数）と総インク量 */
     const rowInk = new Int32Array(h);
@@ -222,11 +226,10 @@ const Recognizer = (() => {
     /* 退化: ほぼ空白／ほぼ真っ黒 → 触らない（現状の挙動を維持） */
     if (maxRow === 0 || inkFrac < 0.003 || inkFrac > 0.55) return canvas;
 
-    /* 上下の空白マージンだけを削る。「値の行」を推定して1行だけ残す方式は、
-       罫線除去のゴースト（薄いヘッダー行）を値と誤認して数字ごと切り落とす
-       事故が起きるため採らない。インクのある範囲は全て残す＝数字を絶対に落と
-       さない。淡いゴーストは二値化で閾値以下となりインクに数えられないため、
-       トリム範囲からも自然に外れる。濃く残るヘッダー等は残るが、数字欄は
+    /* 上下の空白マージン＆淡いゴースト行を削る。「値の行」を推定して1行だけ残す方式は、
+       ゴースト（薄いヘッダー行）を値と誤認して数字ごと切り落とす事故が起きるため採らない。
+       インクのある範囲は全て残す＝数字を絶対に落とさない。淡いゴーストはしきい値以下で
+       インクに数えられずトリム範囲から自然に外れる。濃く残るヘッダー等は残るが、数字欄は
        whitelist（数字のみ許可）で数字以外を出力しないため実害が出ない。 */
     const rowThr = Math.max(1, maxRow * 0.08);
     let top = 0;        while (top < h && rowInk[top] < rowThr) top++;
@@ -235,36 +238,28 @@ const Recognizer = (() => {
     top    = Math.max(0, top - 2);
     bottom = Math.min(h - 1, bottom + 2);
     const bh = bottom - top + 1;
-    if (bh < 6) return canvas;   // 実質空 → 触らない
+    if (bh < 6 || bh >= h) return canvas;   // 実質空／トリム余地なし → そのまま（拡大済みグレーを返す）
 
-    /* 二値化（黒字・白地）してトリム範囲を描画 */
+    /* トリム範囲を「グレースケールのまま」切り出す（二値化しない）。白地に合成して
+       透明を潰す。drawImageの補間で元のなめらかなエッジが保たれる。 */
     const out = document.createElement('canvas');
     out.width = w; out.height = bh;
     const octx = out.getContext('2d', { willReadFrequently: true });
-    const oimg = octx.createImageData(w, bh);
-    for (let y = 0; y < bh; y++) {
-      const srcBase = (top + y) * w, dstBase = y * w;
-      for (let x = 0; x < w; x++) {
-        const v = gray[srcBase + x] < thr ? 0 : 255;
-        const o = (dstBase + x) * 4;
-        oimg.data[o] = v; oimg.data[o + 1] = v; oimg.data[o + 2] = v; oimg.data[o + 3] = 255;
-      }
-    }
-    octx.putImageData(oimg, 0, 0);
+    octx.fillStyle = '#fff'; octx.fillRect(0, 0, w, bh);
+    octx.drawImage(canvas, 0, top, w, bh, 0, 0, w, bh);
     return out;
   }
 
   /** 構造化された「英数字・記号のみの単一値」欄か。
-      true の欄にだけ 二値化＋主要行抽出（①②）と PSM=単一行（③）を適用する。 */
+      true の欄にだけ 行トリム＋拡大（①④）と PSM=ブロック（③）を適用する。 */
   function isSingleValueField(rule) {
     return CharConstraint.isActive(rule) && CharConstraint.isLatinOnly(rule);
   }
 
   /** OCR入力キャンバスを構築する。
-      単一値欄は ④ 先にグレースケールのまま拡大 → 高解像度で二値化＋行トリム、の順で作る。
-      「二値化→拡大」だと低解像度の粗いエッジを引き伸ばすだけで字形が甘くなるため、
-      拡大を先に行い、9の“しっぽ”とGの“横棒”のような差が残る高解像度で二値化する。
-      それ以外の欄は従来通り拡大のみ。 */
+      単一値欄は ④ グレースケールのまま拡大（滑らかな補間）→ 行トリム（ゴースト除去）。
+      ハード二値化はしない（拡大後に0/1へ叩き切るとブロック状になり精度が落ちるため。
+      二値化はTesseract内部の大津に任せる）。それ以外の欄は従来通り拡大のみ。 */
   function ocrInputCanvas(cropCanvas, single) {
     if (single) return preprocessSingleLine(upscaleForOcr(cropCanvas, SINGLE_TARGET_H, SINGLE_MAX_SCALE));
     return upscaleForOcr(cropCanvas);
