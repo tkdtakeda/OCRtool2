@@ -50,6 +50,25 @@
      ソフトウェアバッキングのまま速く読み出せる。 */
   function canvasFromImg(img) { const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0); return c; }
   function thumbURL(canvas, w = 90) { const s = Math.min(1, w / canvas.width); const c = document.createElement('canvas'); c.width = Math.round(canvas.width * s); c.height = Math.round(canvas.height * s); c.getContext('2d', { willReadFrequently: true }).drawImage(canvas, 0, 0, c.width, c.height); return c.toDataURL('image/png'); }
+  /* 俯瞰サムネイル: 罫線除去済み全体（無ければ元画像）に、変換を掛けたOCR領域の枠を
+     重ねて縮小PNGにする。「読み取り位置が全体のどこか」を一覧で一目で確認するため。
+     枠が空白や画像外に落ちていれば、帳票の誤判定・位置ずれがその場で分かる。 */
+  function overlayThumbURL(baseCanvas, transform, regions, w = 120) {
+    const s = Math.min(1, w / baseCanvas.width);
+    const c = document.createElement('canvas');
+    c.width = Math.round(baseCanvas.width * s);
+    c.height = Math.round(baseCanvas.height * s);
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(baseCanvas, 0, 0, c.width, c.height);
+    const tf = transform || { sx: 1, sy: 1, tx: 0, ty: 0 };
+    (regions || []).forEach(r => {
+      const rx = (tf.sx * r.x + tf.tx) * s, ry = (tf.sy * r.y + tf.ty) * s;
+      const rw = Math.max(2, tf.sx * r.w * s), rh = Math.max(2, tf.sy * r.h * s);
+      ctx.fillStyle = 'rgba(229,62,62,.16)'; ctx.fillRect(rx, ry, rw, rh);
+      ctx.strokeStyle = '#E53E3E'; ctx.lineWidth = 1.2; ctx.strokeRect(rx, ry, rw, rh);
+    });
+    return c.toDataURL('image/png');
+  }
   /* 切り出し画像（PNG dataURL）を保存用に縮小＋JPEG化して容量を抑える。照合での見比べ用。 */
   function shrinkDataURL(dataURL, maxW = 260, quality = 0.72) {
     return new Promise(resolve => {
@@ -1076,12 +1095,15 @@
       console.log(`[perf] p${page} classify=${(t1 - t0).toFixed(0)}ms runOcr=${(t2 - t1).toFixed(0)}ms total=${(t2 - t0).toFixed(0)}ms fields=${res.fields.length}`);
       if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
       checkPositionWarning(form, res.matchQuality);
+      /* 一覧サムネイルは「罫線除去済み全体＋OCR領域枠」の俯瞰にする（cleanupMats後も
+         resultCanvasは有効）。枠がどこに落ちたかが一目で分かり、位置ずれ/誤判定に気づける。 */
+      const overThumb = res.resultCanvas ? overlayThumbURL(res.resultCanvas, res.transform, form.ocrRegions, 120) : thumb;
       LineRemovalProcessor.cleanupMats(res.previewMats);
       const manual = forcedFormId ? true : !(candId === form.id);
       const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
       return {
         page, decision: verdict, formName: form.name, formId: form.id, forced: !!forcedFormId,
-        avgConf: avg, fields: res.fields, thumb,
+        avgConf: avg, fields: res.fields, thumb: overThumb,
         _save: { form, dec: decision, res, canvas, manual, page },   // 確認後に putResult する材料
       };
     } catch (e) {
