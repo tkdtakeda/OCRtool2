@@ -51,7 +51,15 @@ const Recognizer = (() => {
    * 点が1組なら検出スケール f を sx=sy に採用（1点では縦横比を決められない）。
    * 複数でもアンカーが密集する軸は、倍率を照合倍率の中央値に固定し、位置回帰の
    * 不安定な倍率が平行移動を壊さないようにする。
-   * @param {Array<{refX,refY,inX,inY,scale}>} pairs
+   *
+   * 回帰は各点のスコア(score)で加重する。「他帳票との識別性を上げるため広く取った
+   * アンカー」は、その広さゆえページ内の局所的な印刷ズレ（罫線幅の微差・紙送りの
+   * 個体差等）の影響を受けやすく、一致位置がスコアはそこそこでも微妙にずれた
+   * 「妥協点」になりやすい。「位置合わせ用に狭く正確に取ったアンカー」と一緒に
+   * 登録した場合、加重により後者（通常スコアが高い）の影響を強くし、前者の
+   * 位置ノイズに引きずられにくくする。役割別にアンカー種別を分けなくても、
+   * 広い識別用アンカー＋狭い精密アンカーを両方登録するだけで自然に機能する。
+   * @param {Array<{refX,refY,inX,inY,scale,score}>} pairs
    * @returns {{ sx:number, sy:number, tx:number, ty:number, n:number }}
    */
   function estimateTransform(pairs) {
@@ -63,16 +71,21 @@ const Recognizer = (() => {
     }
     /* 照合倍率の中央値（探索は 0.6〜2.0 と広く、密集アンカーでも安定して得られる） */
     const medScale = median(pairs.map(p => p.scale || 1));
-    /* 軸ごと: 広がりが十分なら位置回帰で連続倍率を精密化、狭ければ照合倍率を採用。
-       平行移動は採用倍率 s を固定して t = mean(in - s*ref)（＝回帰の切片と同値だが、
+    /* 加重は score をそのまま使う（呼び出し側は score>=0.4 のみを渡すため、常に正）。
+       スコア差を過度に増幅しないよう線形のまま用いる。 */
+    const weights = pairs.map(p => Math.max(1e-3, p.score || 0));
+    const wSum = weights.reduce((a, b) => a + b, 0);
+    /* 軸ごと: 広がりが十分なら加重位置回帰で連続倍率を精密化、狭ければ照合倍率を採用。
+       平行移動は採用倍率 s を固定して t = 加重平均(in - s*ref)（＝回帰の切片と同値だが、
        倍率誤差から切り離した頑健な平行移動になる）。 */
     const axis = (gr, gi) => {
       let mr = 0, mi = 0, lo = Infinity, hi = -Infinity;
-      pairs.forEach(p => { const r = gr(p); mr += r; mi += gi(p); if (r < lo) lo = r; if (r > hi) hi = r; });
-      mr /= n; mi /= n;
+      pairs.forEach((p, i) => { const r = gr(p); mr += weights[i] * r; mi += weights[i] * gi(p); if (r < lo) lo = r; if (r > hi) hi = r; });
+      mr /= wSum; mi /= wSum;
       let s = medScale;
       if ((hi - lo) >= MIN_SPAN_FOR_SCALE) {
-        let num = 0, den = 0; pairs.forEach(p => { const dr = gr(p) - mr, di = gi(p) - mi; num += dr * di; den += dr * dr; });
+        let num = 0, den = 0;
+        pairs.forEach((p, i) => { const dr = gr(p) - mr, di = gi(p) - mi; num += weights[i] * dr * di; den += weights[i] * dr * dr; });
         const sReg = den > 1e-6 ? num / den : NaN;
         if (isFinite(sReg) && sReg >= 0.4 && sReg <= 2.5) s = sReg;   // 十分広い＝位置回帰を信頼
       }
