@@ -229,7 +229,10 @@
         <!-- 右: 登録済みリスト -->
         <div class="editor-col editor-col--lists">
           <div class="list-block">
-            <div class="list-hdr"><span class="dot dot-anchor"></span> 目印（アンカー） <span id="anchorCount" class="list-count">0</span></div>
+            <div class="list-hdr">
+              <span class="dot dot-anchor"></span> 目印（アンカー） <span id="anchorCount" class="list-count">0</span>
+              <button type="button" id="btnCheckAnchorSimilarity" class="btn btn-ghost btn-xs list-hdr-act" title="各目印を他の登録済み帳票の基準画像と照合し、紛らわしい（高スコアで一致してしまう）目印がないか確認します"><i class="fas fa-shield-halved"></i> 他の帳票との類似度をチェック</button>
+            </div>
             <div id="anchorList" class="mini-list"><div class="mini-empty">未登録</div></div>
           </div>
           <div class="list-block">

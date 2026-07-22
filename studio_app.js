@@ -384,6 +384,43 @@
     } catch (e) { UI.toast('処理に失敗しました: ' + e.message, 'error'); }
   }
 
+  /* ── 目印（アンカー）の識別性チェック（他の帳票との類似度） ──
+     matchTemplateは正規化相関でピクセル模様を比較するだけで文字を読んでいるわけではない
+     ため、見た目には別物でも「似た構造」（罫線グリッド・生成された枠・同じくらいの
+     太さ/量の文字が同じような位置にあるタイトル等）は高スコアで一致し得る。
+     「厳選したつもり」を実測で検証できるよう、各目印を他の全帳票の基準画像に対して
+     実際に照合し、しきい値以上で一致する帳票があれば警告する。 */
+  const ANCHOR_COLLISION_WARN = 0.45;   // voting.jsのacceptFloorと揃える（採用判定に効き得る水準）
+  async function checkAnchorSimilarity() {
+    if (!S.anchors.length) return UI.toast('目印を1つ以上登録してから実行してください', 'warning');
+    const others = S.forms.filter(f => f.id !== S.editingId && f.referenceImage && f.referenceImage.dataURL);
+    if (!others.length) return UI.toast('比較できる他の帳票がありません（先に複数の帳票を登録してください）', 'info');
+    UI.toast('他の帳票との類似度を確認中…', 'info', 2500);
+    const templates = S.anchors.map(a => ({ id: a.id, imageElement: null, dataURL: a.dataURL }));
+    for (const t of templates) t.imageElement = await dataURLtoImg(t.dataURL);
+    /* classify() の帳票判定と同じ探索条件（角度±2°・倍率0.85〜1.15）で照合し、
+       実運用で本当に競合し得るスコアかを見る。 */
+    const collisions = new Map();   // anchorId -> [{ formName, score }]
+    for (const f of others) {
+      let img;
+      try { img = await dataURLtoImg(f.referenceImage.dataURL); } catch (_) { continue; }
+      const scores = await MatcherEngine.matchAll(img, templates, { angleRange: 2, angleStep: 1, scaleFactors: [0.85, 1.0, 1.15] });
+      templates.forEach(t => {
+        const r = scores.get(t.id);
+        if (r && r.score >= ANCHOR_COLLISION_WARN) {
+          if (!collisions.has(t.id)) collisions.set(t.id, []);
+          collisions.get(t.id).push({ formName: f.name, score: r.score });
+        }
+      });
+    }
+    collisions.forEach(list => list.sort((a, b) => b.score - a.score));
+    UI.renderAnchorCollisions(collisions);
+    const nWarn = collisions.size;
+    UI.toast(nWarn
+      ? `${nWarn} 件の目印で他の帳票との高い類似度を検出しました（一覧に表示）`
+      : '他の帳票との高い類似度は検出されませんでした', nWarn ? 'warning' : 'success', 4500);
+  }
+
   /* ── 罫線除去パラメータ UI 連携 ─────────────────────── */
   function applyLineRemovalToUI(p) {
     const set = (id, v) => { const e = $(id); if (e) e[e.type === 'checkbox' ? 'checked' : 'value'] = v; };
@@ -2321,6 +2358,7 @@
     $('btnRefSample').addEventListener('click', openSampleFormModal);
     setupDrop('anchorDropZone', f => acceptFile(f, useAsAnchor), 'anchorFileInput');
     $('anchorFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) acceptFile(f, useAsAnchor); e.target.value = ''; });
+    $('btnCheckAnchorSimilarity').addEventListener('click', checkAnchorSimilarity);
     $('regBinaryMethod').addEventListener('change', updateBinaryRows);
 
     /* 描画 */

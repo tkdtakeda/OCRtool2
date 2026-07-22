@@ -68,7 +68,7 @@ const StudioUI = (() => {
     if (!anchors.length) { c.innerHTML = '<div class="mini-empty">未登録（左の画像上にドラッグ）</div>'; return; }
     c.innerHTML = '';
     anchors.forEach((a, i) => {
-      const item = document.createElement('div'); item.className = 'mini-item';
+      const item = document.createElement('div'); item.className = 'mini-item'; item.dataset.anchorId = a.id;
       item.innerHTML = `
         <span class="midx" style="background:${ANCHOR_COLOR}">${i + 1}</span>
         <img class="mthumb" src="${a.dataURL}" alt="">
@@ -85,6 +85,23 @@ const StudioUI = (() => {
       item.querySelector('.mini-reposition').addEventListener('click', () => onReposition && onReposition(a.id));
       item.querySelector('.mini-del').addEventListener('click', () => onRemove(a.id));
       c.appendChild(item);
+    });
+  }
+  /* 目印の識別性チェック結果（他の帳票との高い類似度）を、既存のアンカー一覧の各行に
+     警告バッジとして重ねる。renderAnchorListは呼び直さない（チェック結果が消えるため）。
+     @param {Map<string, Array<{formName:string, score:number}>>} collisions  anchorId→一致した帳票 */
+  function renderAnchorCollisions(collisions) {
+    const list = $('anchorList');
+    list.querySelectorAll('.mini-item').forEach(item => {
+      const old = item.querySelector('.anchor-collision-warn'); if (old) old.remove();
+      const hits = collisions.get(item.dataset.anchorId);
+      if (!hits || !hits.length) return;
+      const badge = document.createElement('span');
+      badge.className = 'anchor-collision-warn';
+      const top = hits[0];
+      badge.title = `一致した帳票: ${hits.map(h => `${h.formName} ${Math.round(h.score * 100)}%`).join(' / ')}`;
+      badge.innerHTML = `<i class="fas fa-triangle-exclamation"></i> ${esc(top.formName)} ${Math.round(top.score * 100)}%`;
+      item.appendChild(badge);
     });
   }
 
@@ -420,7 +437,7 @@ const StudioUI = (() => {
 
   return {
     $, esc, toast, REGION_COLORS, ANCHOR_COLOR, OCR_COLOR,
-    refreshRegSteps, renderFormLibrary, renderAnchorList, renderRegionList,
+    refreshRegSteps, renderFormLibrary, renderAnchorList, renderAnchorCollisions, renderRegionList,
     setPipeline, resetPipeline,
     renderDecision, renderRecogPreview, renderFieldResults, symbolChipsHTML, confClass,
     showRecogProgress, updateRecogProgress, renderHistory,
