@@ -612,16 +612,34 @@
          通知はセッション中その帳票につき最初の1回のみ。以降は件数だけ
          静かに積算し、バッチ完了時にまとめて知らせる。 */
   function checkPositionWarning(form, matchQuality) {
-    if (!form || !matchQuality || !(matchQuality.scaleEdge || matchQuality.weakMatch)) return;
+    if (!form || !matchQuality) return;
+    /* 目印が1つしかない帳票は、位置合わせ（平行移動・拡大率）がその1点だけの検出精度に
+       完全に依存する。1つの目印を広げて識別性を上げても、テンプレートが大きくなるほど
+       ページ内の局所的な印刷ズレ（罫線幅の微差・紙送りの個体差等）の影響を受けやすく、
+       matchTemplateは単一の剛体変換しか仮定しないため一致位置が「妥協点」に寄れる
+       （＝スコア自体は悪くなくても位置精度が落ちる）。scaleEdge/weakMatchのスコア閾値
+       だけでは検出できないため、目印数からも独立して案内する。 */
+    const singleAnchor = (form.anchors || []).length <= 1;
+    if (!(matchQuality.scaleEdge || matchQuality.weakMatch || singleAnchor)) return;
     S.posWarnCounts[form.id] = (S.posWarnCounts[form.id] || 0) + 1;
     if (S.posWarnShown.has(form.id)) return;
     S.posWarnShown.add(form.id);
     const pct = Math.round((matchQuality.bestScale || 1) * 100);
+    const scoreIssue = matchQuality.weakMatch || matchQuality.scaleEdge;
+    if (!scoreIssue) {
+      /* スコア上は問題なし＝「壊れている」わけではないので警告ではなく助言として出す */
+      UI.toast(
+        `ℹ️ 「${form.name}」: 目印（アンカー）が1つしかなく、位置合わせがその1点の検出精度だけに依存しています。離れた場所にもう1つ目印を追加すると、拡大率・平行移動のズレに強くなります（広い1つより、狭く正確な2つの方が精度が出やすいです）。`,
+        'info', 12000
+      );
+      return;
+    }
     const detail = matchQuality.weakMatch
       ? '目印（アンカー）がうまく見つかりませんでした。'
       : `検出された倍率が調整可能な範囲の端（${pct}%）に達しており、実際の倍率はそれ以上に違う可能性があります。`;
+    const anchorHint = singleAnchor ? ' さらに、目印を2つ以上（離れた場所に）登録すると精度が上がります。' : '';
     UI.toast(
-      `⚠ 「${form.name}」: OCRの位置がずれているかもしれません。${detail} 基準画像を今回と同じ解像度(DPI)で登録し直すと改善します。`,
+      `⚠ 「${form.name}」: OCRの位置がずれているかもしれません。${detail} 基準画像を今回と同じ解像度(DPI)で登録し直すと改善します。${anchorHint}`,
       'warning', 15000
     );
   }
