@@ -2388,6 +2388,15 @@
     $('batchCsvDl').addEventListener('click', downloadBatchCsv);
     $('batchCancel').addEventListener('click', () => { S.batchCancel = true; UI.updateBatchProgress('中止しています…', 1); });
     $('batchReview').addEventListener('click', () => { if (S.pageNav) { UI.closeBatchModal(); navLoadPage(S.pageNav.idx || 0); } });
+    /* バッチ一覧の各カードをクリック → そのページを詳細ペインで大きく開く（サムネイルが
+       小さくて見えない時に、一覧から一気に目的のページへ飛べる）。 */
+    $('batchList').addEventListener('click', e => {
+      const card = e.target.closest('.batch-card--nav'); if (!card || !S.pageNav) return;
+      const idx = S.pageNav.pages.indexOf(parseInt(card.dataset.page, 10));
+      if (idx < 0) return;
+      UI.closeBatchModal();
+      navLoadPage(idx);
+    });
     $('batchReconcile').addEventListener('click', () => { UI.closeBatchModal(); openReconcile(); });
     $('batchResume').addEventListener('click', () => {
       const r = S.batchResume; if (!r) return;
