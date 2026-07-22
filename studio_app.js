@@ -50,6 +50,25 @@
      ソフトウェアバッキングのまま速く読み出せる。 */
   function canvasFromImg(img) { const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0); return c; }
   function thumbURL(canvas, w = 90) { const s = Math.min(1, w / canvas.width); const c = document.createElement('canvas'); c.width = Math.round(canvas.width * s); c.height = Math.round(canvas.height * s); c.getContext('2d', { willReadFrequently: true }).drawImage(canvas, 0, 0, c.width, c.height); return c.toDataURL('image/png'); }
+  /* 俯瞰サムネイル: 罫線除去済み全体（無ければ元画像）に、変換を掛けたOCR領域の枠を
+     重ねて縮小PNGにする。「読み取り位置が全体のどこか」を一覧で一目で確認するため。
+     枠が空白や画像外に落ちていれば、帳票の誤判定・位置ずれがその場で分かる。 */
+  function overlayThumbURL(baseCanvas, transform, regions, w = 120) {
+    const s = Math.min(1, w / baseCanvas.width);
+    const c = document.createElement('canvas');
+    c.width = Math.round(baseCanvas.width * s);
+    c.height = Math.round(baseCanvas.height * s);
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(baseCanvas, 0, 0, c.width, c.height);
+    const tf = transform || { sx: 1, sy: 1, tx: 0, ty: 0 };
+    (regions || []).forEach(r => {
+      const rx = (tf.sx * r.x + tf.tx) * s, ry = (tf.sy * r.y + tf.ty) * s;
+      const rw = Math.max(2, tf.sx * r.w * s), rh = Math.max(2, tf.sy * r.h * s);
+      ctx.fillStyle = 'rgba(229,62,62,.16)'; ctx.fillRect(rx, ry, rw, rh);
+      ctx.strokeStyle = '#E53E3E'; ctx.lineWidth = 1.2; ctx.strokeRect(rx, ry, rw, rh);
+    });
+    return c.toDataURL('image/png');
+  }
   /* 切り出し画像（PNG dataURL）を保存用に縮小＋JPEG化して容量を抑える。照合での見比べ用。 */
   function shrinkDataURL(dataURL, maxW = 260, quality = 0.72) {
     return new Promise(resolve => {
@@ -365,6 +384,43 @@
     } catch (e) { UI.toast('処理に失敗しました: ' + e.message, 'error'); }
   }
 
+  /* ── 目印（アンカー）の識別性チェック（他の帳票との類似度） ──
+     matchTemplateは正規化相関でピクセル模様を比較するだけで文字を読んでいるわけではない
+     ため、見た目には別物でも「似た構造」（罫線グリッド・生成された枠・同じくらいの
+     太さ/量の文字が同じような位置にあるタイトル等）は高スコアで一致し得る。
+     「厳選したつもり」を実測で検証できるよう、各目印を他の全帳票の基準画像に対して
+     実際に照合し、しきい値以上で一致する帳票があれば警告する。 */
+  const ANCHOR_COLLISION_WARN = 0.45;   // voting.jsのacceptFloorと揃える（採用判定に効き得る水準）
+  async function checkAnchorSimilarity() {
+    if (!S.anchors.length) return UI.toast('目印を1つ以上登録してから実行してください', 'warning');
+    const others = S.forms.filter(f => f.id !== S.editingId && f.referenceImage && f.referenceImage.dataURL);
+    if (!others.length) return UI.toast('比較できる他の帳票がありません（先に複数の帳票を登録してください）', 'info');
+    UI.toast('他の帳票との類似度を確認中…', 'info', 2500);
+    const templates = S.anchors.map(a => ({ id: a.id, imageElement: null, dataURL: a.dataURL }));
+    for (const t of templates) t.imageElement = await dataURLtoImg(t.dataURL);
+    /* classify() の帳票判定と同じ探索条件（角度±2°・倍率0.85〜1.15）で照合し、
+       実運用で本当に競合し得るスコアかを見る。 */
+    const collisions = new Map();   // anchorId -> [{ formName, score }]
+    for (const f of others) {
+      let img;
+      try { img = await dataURLtoImg(f.referenceImage.dataURL); } catch (_) { continue; }
+      const scores = await MatcherEngine.matchAll(img, templates, { angleRange: 2, angleStep: 1, scaleFactors: [0.85, 1.0, 1.15] });
+      templates.forEach(t => {
+        const r = scores.get(t.id);
+        if (r && r.score >= ANCHOR_COLLISION_WARN) {
+          if (!collisions.has(t.id)) collisions.set(t.id, []);
+          collisions.get(t.id).push({ formName: f.name, score: r.score });
+        }
+      });
+    }
+    collisions.forEach(list => list.sort((a, b) => b.score - a.score));
+    UI.renderAnchorCollisions(collisions);
+    const nWarn = collisions.size;
+    UI.toast(nWarn
+      ? `${nWarn} 件の目印で他の帳票との高い類似度を検出しました（一覧に表示）`
+      : '他の帳票との高い類似度は検出されませんでした', nWarn ? 'warning' : 'success', 4500);
+  }
+
   /* ── 罫線除去パラメータ UI 連携 ─────────────────────── */
   function applyLineRemovalToUI(p) {
     const set = (id, v) => { const e = $(id); if (e) e[e.type === 'checkbox' ? 'checked' : 'value'] = v; };
@@ -556,16 +612,37 @@
          通知はセッション中その帳票につき最初の1回のみ。以降は件数だけ
          静かに積算し、バッチ完了時にまとめて知らせる。 */
   function checkPositionWarning(form, matchQuality) {
-    if (!form || !matchQuality || !(matchQuality.scaleEdge || matchQuality.weakMatch)) return;
+    if (!form || !matchQuality) return;
+    /* 目印が1つしかない帳票は、位置合わせ（平行移動・拡大率）がその1点だけの検出精度に
+       完全に依存する。1つの目印を広げて識別性を上げても、テンプレートが大きくなるほど
+       ページ内の局所的な印刷ズレ（罫線幅の微差・紙送りの個体差等）の影響を受けやすく、
+       matchTemplateは単一の剛体変換しか仮定しないため一致位置が「妥協点」に寄れる
+       （＝スコア自体は悪くなくても位置精度が落ちる）。scaleEdge/weakMatchのスコア閾値
+       だけでは検出できないため、目印数からも独立して案内する。 */
+    const singleAnchor = (form.anchors || []).length <= 1;
+    if (!(matchQuality.scaleEdge || matchQuality.weakMatch || singleAnchor)) return;
     S.posWarnCounts[form.id] = (S.posWarnCounts[form.id] || 0) + 1;
     if (S.posWarnShown.has(form.id)) return;
     S.posWarnShown.add(form.id);
     const pct = Math.round((matchQuality.bestScale || 1) * 100);
+    const scoreIssue = matchQuality.weakMatch || matchQuality.scaleEdge;
+    if (!scoreIssue) {
+      /* スコア上は問題なし＝「壊れている」わけではないので警告ではなく助言として出す。
+         2つ目を足すだけでも「1点頼み」からは脱するが、広い識別用アンカー＋狭い精密用
+         アンカーを組み合わせる場合、その効果（広い方の位置ノイズを弱める加重）は
+         幾何的に3点以上でないと働かない（2点は常に一意な直線になるため）。 */
+      UI.toast(
+        `ℹ️ 「${form.name}」: 目印（アンカー）が1つしかなく、位置合わせがその1点の検出精度だけに依存しています。離れた場所にもう1つ追加すると格段に安定します。広い識別用アンカーと狭い位置合わせ用アンカーを併用するなら、3つ以上（狭い方を複数）にすると、広い方の局所的なズレに影響されにくくなります。`,
+        'info', 13000
+      );
+      return;
+    }
     const detail = matchQuality.weakMatch
       ? '目印（アンカー）がうまく見つかりませんでした。'
       : `検出された倍率が調整可能な範囲の端（${pct}%）に達しており、実際の倍率はそれ以上に違う可能性があります。`;
+    const anchorHint = singleAnchor ? ' さらに、目印を3つ以上（離れた場所に）登録すると精度が上がります。' : '';
     UI.toast(
-      `⚠ 「${form.name}」: OCRの位置がずれているかもしれません。${detail} 基準画像を今回と同じ解像度(DPI)で登録し直すと改善します。`,
+      `⚠ 「${form.name}」: OCRの位置がずれているかもしれません。${detail} 基準画像を今回と同じ解像度(DPI)で登録し直すと改善します。${anchorHint}`,
       'warning', 15000
     );
   }
@@ -1076,12 +1153,15 @@
       console.log(`[perf] p${page} classify=${(t1 - t0).toFixed(0)}ms runOcr=${(t2 - t1).toFixed(0)}ms total=${(t2 - t0).toFixed(0)}ms fields=${res.fields.length}`);
       if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
       checkPositionWarning(form, res.matchQuality);
+      /* 一覧サムネイルは「罫線除去済み全体＋OCR領域枠」の俯瞰にする（cleanupMats後も
+         resultCanvasは有効）。枠がどこに落ちたかが一目で分かり、位置ずれ/誤判定に気づける。 */
+      const overThumb = res.resultCanvas ? overlayThumbURL(res.resultCanvas, res.transform, form.ocrRegions, 120) : thumb;
       LineRemovalProcessor.cleanupMats(res.previewMats);
       const manual = forcedFormId ? true : !(candId === form.id);
       const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
       return {
         page, decision: verdict, formName: form.name, formId: form.id, forced: !!forcedFormId,
-        avgConf: avg, fields: res.fields, thumb,
+        avgConf: avg, fields: res.fields, thumb: overThumb,
         _save: { form, dec: decision, res, canvas, manual, page },   // 確認後に putResult する材料
       };
     } catch (e) {
@@ -2299,6 +2379,7 @@
     $('btnRefSample').addEventListener('click', openSampleFormModal);
     setupDrop('anchorDropZone', f => acceptFile(f, useAsAnchor), 'anchorFileInput');
     $('anchorFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) acceptFile(f, useAsAnchor); e.target.value = ''; });
+    $('btnCheckAnchorSimilarity').addEventListener('click', checkAnchorSimilarity);
     $('regBinaryMethod').addEventListener('change', updateBinaryRows);
 
     /* 描画 */
@@ -2328,6 +2409,15 @@
     $('batchCsvDl').addEventListener('click', downloadBatchCsv);
     $('batchCancel').addEventListener('click', () => { S.batchCancel = true; UI.updateBatchProgress('中止しています…', 1); });
     $('batchReview').addEventListener('click', () => { if (S.pageNav) { UI.closeBatchModal(); navLoadPage(S.pageNav.idx || 0); } });
+    /* バッチ一覧の各カードをクリック → そのページを詳細ペインで大きく開く（サムネイルが
+       小さくて見えない時に、一覧から一気に目的のページへ飛べる）。 */
+    $('batchList').addEventListener('click', e => {
+      const card = e.target.closest('.batch-card--nav'); if (!card || !S.pageNav) return;
+      const idx = S.pageNav.pages.indexOf(parseInt(card.dataset.page, 10));
+      if (idx < 0) return;
+      UI.closeBatchModal();
+      navLoadPage(idx);
+    });
     $('batchReconcile').addEventListener('click', () => { UI.closeBatchModal(); openReconcile(); });
     $('batchResume').addEventListener('click', () => {
       const r = S.batchResume; if (!r) return;

@@ -68,7 +68,7 @@ const StudioUI = (() => {
     if (!anchors.length) { c.innerHTML = '<div class="mini-empty">未登録（左の画像上にドラッグ）</div>'; return; }
     c.innerHTML = '';
     anchors.forEach((a, i) => {
-      const item = document.createElement('div'); item.className = 'mini-item';
+      const item = document.createElement('div'); item.className = 'mini-item'; item.dataset.anchorId = a.id;
       item.innerHTML = `
         <span class="midx" style="background:${ANCHOR_COLOR}">${i + 1}</span>
         <img class="mthumb" src="${a.dataURL}" alt="">
@@ -85,6 +85,23 @@ const StudioUI = (() => {
       item.querySelector('.mini-reposition').addEventListener('click', () => onReposition && onReposition(a.id));
       item.querySelector('.mini-del').addEventListener('click', () => onRemove(a.id));
       c.appendChild(item);
+    });
+  }
+  /* 目印の識別性チェック結果（他の帳票との高い類似度）を、既存のアンカー一覧の各行に
+     警告バッジとして重ねる。renderAnchorListは呼び直さない（チェック結果が消えるため）。
+     @param {Map<string, Array<{formName:string, score:number}>>} collisions  anchorId→一致した帳票 */
+  function renderAnchorCollisions(collisions) {
+    const list = $('anchorList');
+    list.querySelectorAll('.mini-item').forEach(item => {
+      const old = item.querySelector('.anchor-collision-warn'); if (old) old.remove();
+      const hits = collisions.get(item.dataset.anchorId);
+      if (!hits || !hits.length) return;
+      const badge = document.createElement('span');
+      badge.className = 'anchor-collision-warn';
+      const top = hits[0];
+      badge.title = `一致した帳票: ${hits.map(h => `${h.formName} ${Math.round(h.score * 100)}%`).join(' / ')}`;
+      badge.innerHTML = `<i class="fas fa-triangle-exclamation"></i> ${esc(top.formName)} ${Math.round(top.score * 100)}%`;
+      item.appendChild(badge);
     });
   }
 
@@ -393,10 +410,13 @@ const StudioUI = (() => {
     sum.innerHTML = `全 <b>${results.length}</b> ページ ・ <span class="bs-ok">採用 ${count('accepted')}</span> / `
       + `<span class="bs-rv">要確認 ${count('review')}</span> / <span class="bs-rj">不一致 ${count('rejected')}</span>`
       + (count('error') ? ` / <span class="bs-er">エラー ${count('error')}</span>` : '');
+    const hasNav = !!(opts && opts.hasNav);
     const c = $('batchList'); c.innerHTML = '';
     const shown = results.slice(0, BATCH_RENDER_CAP);
     shown.forEach(r => {
-      const item = document.createElement('div'); item.className = 'batch-card';
+      const item = document.createElement('div');
+      item.className = 'batch-card' + (hasNav ? ' batch-card--nav' : '');
+      if (hasNav) { item.dataset.page = r.page; item.title = 'クリックで詳細ペインを開き、このページを大きく確認します'; }
       const verdict = VERDICT_SHORT[r.decision] || (r.decision === 'error' ? 'エラー' : '—');
       const fieldsHtml = (r.fields || []).length
         ? (r.fields).map(f => `<div class="batch-field"><span class="bf-name">${esc(f.name)}</span><span class="bf-text">${esc(f.text || (f.error ? '[エラー]' : ''))}</span><span class="bf-conf scv-${confClass(f.confidence)}">${f.confidence != null ? f.confidence + '%' : ''}</span></div>`).join('')
@@ -406,6 +426,7 @@ const StudioUI = (() => {
           <span class="batch-page">P${r.page}</span>
           <span class="batch-form">${esc(r.formName || '—')}</span>
           <span class="hist-verdict ${r.decision}">${verdict}</span>
+          ${hasNav ? '<span class="batch-open-hint"><i class="fas fa-magnifying-glass-plus"></i> 詳細</span>' : ''}
         </div>
         <img class="batch-thumb" src="${r.thumb || ''}" alt="">
         <div class="batch-fields">${fieldsHtml}</div>`;
@@ -420,7 +441,7 @@ const StudioUI = (() => {
 
   return {
     $, esc, toast, REGION_COLORS, ANCHOR_COLOR, OCR_COLOR,
-    refreshRegSteps, renderFormLibrary, renderAnchorList, renderRegionList,
+    refreshRegSteps, renderFormLibrary, renderAnchorList, renderAnchorCollisions, renderRegionList,
     setPipeline, resetPipeline,
     renderDecision, renderRecogPreview, renderFieldResults, symbolChipsHTML, confClass,
     showRecogProgress, updateRecogProgress, renderHistory,

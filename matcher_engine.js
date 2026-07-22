@@ -58,13 +58,43 @@ const MatcherEngine = (() => {
   }
 
   /**
+   * グレースケール Mat の標準偏差（コントラストの目安）。
+   * @param {cv.Mat} mat  CV_8UC1
+   * @returns {number}
+   */
+  function stdDevOf(mat) {
+    const mean = new cv.Mat(), std = new cv.Mat();
+    cv.meanStdDev(mat, mean, std);
+    const v = std.data64F[0];
+    mean.delete(); std.delete();
+    return v;
+  }
+
+  const clamp01 = v => Math.max(0, Math.min(1, v));
+  /* 標準偏差 → 信頼性(0〜1)への線形ランプ。8bitグレースケールの目安値。
+     STD_LO未満（ほぼ無地）は信頼性最低、STD_HI以上（十分な文字/線がある）で満点。 */
+  const STD_LO = 6, STD_HI = 18;
+  const stdRamp = v => clamp01((v - STD_LO) / (STD_HI - STD_LO));
+  /* 信頼性が最低でもスコアを0にはしない（低コントラストでも正しく機能している
+     既存アンカーを壊さないため）。あくまで「無関係な帳票への誤マッチ」を抑える減衰。 */
+  const STD_PENALTY_FLOOR = 0.25;
+
+  /**
    * 単一テンプレートを入力画像に対して matchTemplate (TM_CCOEFF_NORMED)
    * テンプレートが入力画像より大きい場合はスコア 0 を返す。
+   *
+   * TM_CCOEFF_NORMED は分散で正規化した相関係数のため、テンプレート・一致窓の
+   * 少なくとも一方がほぼ無地（低コントラスト＝白紙に近い）だと、実際には無関係な
+   * 領域でも数値的に高いスコアが偶然出ることがある（正規化の分母が小さく不安定に
+   * なるため）。「特徴が全然違う帳票なのに高スコアでマッチする」の主因はこれで、
+   * 帳票は総じて白地×薄い文字/罫線という統計的に似た画像のため起きやすい。
+   * 一致窓の標準偏差も見て、双方低コントラストならスコアを減衰させる。
    * @param {cv.Mat} fullGray      CV_8UC1
    * @param {cv.Mat} templateGray  CV_8UC1
+   * @param {number} templateStd   テンプレートの標準偏差（呼び出し側で1回だけ計算）
    * @returns {{ score: number, loc: {x:number, y:number} }}
    */
-  function runMatch(fullGray, templateGray) {
+  function runMatch(fullGray, templateGray, templateStd) {
     if (templateGray.rows > fullGray.rows || templateGray.cols > fullGray.cols) {
       return { score: 0, loc: { x: 0, y: 0 } };
     }
@@ -72,7 +102,12 @@ const MatcherEngine = (() => {
     cv.matchTemplate(fullGray, templateGray, res, cv.TM_CCOEFF_NORMED);
     const mm = cv.minMaxLoc(res);
     res.delete();
-    return { score: mm.maxVal, loc: { x: mm.maxLoc.x, y: mm.maxLoc.y } };
+    const roi = fullGray.roi(new cv.Rect(mm.maxLoc.x, mm.maxLoc.y, templateGray.cols, templateGray.rows));
+    const windowStd = stdDevOf(roi);
+    roi.delete();
+    const reliability = Math.min(stdRamp(templateStd), stdRamp(windowStd));
+    const score = mm.maxVal * (STD_PENALTY_FLOOR + (1 - STD_PENALTY_FLOOR) * reliability);
+    return { score, loc: { x: mm.maxLoc.x, y: mm.maxLoc.y } };
   }
 
   /* ── メイン: 傾き補正付き一括マッチング ────────────── */
@@ -138,7 +173,8 @@ const MatcherEngine = (() => {
     const results = new Map();
     templates.forEach(t => results.set(t.id, { score: -Infinity, angle: 0, scale: 1, loc: { x: 0, y: 0 } }));
 
-    /* テンプレートをグレースケール Mat に変換（事前に 1 回のみ） */
+    /* テンプレートをグレースケール Mat に変換（事前に 1 回のみ）。標準偏差
+       （コントラストの目安）もここで1回だけ計算し、以降の全角度×スケール照合で使い回す。 */
     const tplMats = templates.map(t => {
       const m = cv.imread(t.imageElement);
       const g = toGray(m);
@@ -146,6 +182,7 @@ const MatcherEngine = (() => {
       return {
         id: t.id,
         mat: g,
+        std: stdDevOf(g),
         w:   t.imageElement.naturalWidth,
         h:   t.imageElement.naturalHeight,
       };
@@ -184,7 +221,7 @@ const MatcherEngine = (() => {
         /* 入力を 1/f に縮小すると、f 倍で写った帳票が基準寸法のテンプレートと一致 */
         const scaled = (Math.abs(f - 1) < 1e-6) ? rotated : resizeMat(rotated, 1 / f);
         for (const tm of tplMats) {
-          const r   = runMatch(scaled, tm.mat);
+          const r   = runMatch(scaled, tm.mat, tm.std);
           const cur = results.get(tm.id);
           if (r.score > cur.score) {
             /* 縮小探索画像上の loc を原寸入力座標へ戻す（f: 倍率探索分 ÷ workScale: 探索縮小分） */
