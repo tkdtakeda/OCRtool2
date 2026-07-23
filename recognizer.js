@@ -506,6 +506,15 @@ const Recognizer = (() => {
          大幅に遅くなることがあるため、領域ごとの所要時間と使用言語を記録する。 */
       console.log(`[perf]   OCR "${region.name}" lang=${useLang} ${(performance.now() - tFieldStart).toFixed(0)}ms`);
       let text = (res.fullText || '').trim();
+      /* 単一値欄でTesseractが複数行として認識した場合（PSM=6は罫線除去の
+         ゴースト行を別行として拾うことがある）、最も確信度の高い行だけを採用する。
+         whitelistの制約でノイズも数字として出力され得るため、行同士を連結した
+         "051\n8558" のような値をそのまま出さないための対策。複数値を許容する
+         一般欄はこれまで通りfullTextをそのまま使う。 */
+      if (single && res.lines && res.lines.length > 1) {
+        const best = res.lines.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+        text = best.text;
+      }
       if (doNorm) text = OcrProcessor.normalize(text);
       if (doKanji) text = OcrProcessor.kanjiToNum(text);
       const raw = text;
@@ -566,6 +575,11 @@ const Recognizer = (() => {
       const res = await OcrProcessor.recognize(input, psm, () => {}, useLang, regWhitelist);
       const conf = confOf(res);
       let text = (res.fullText || '').trim();
+      /* 本認識(runOcr)と同じ「単一値欄は最も確信度の高い行を採用」を比較にも反映する */
+      if (single && res.lines && res.lines.length > 1) {
+        const best = res.lines.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+        text = best.text;
+      }
       if (normalize) text = OcrProcessor.normalize(text);
       if (kanji) text = OcrProcessor.kanjiToNum(text);
       if (region.pattern) text = applyPattern(text, region.pattern);
