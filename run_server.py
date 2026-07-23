@@ -29,8 +29,8 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        from server import ocr
-        from server.app import create_app
+        import ocr_server as ocr
+        from app import create_app
     except ImportError as e:
         print(f'[エラー] 必要なパッケージが見つかりません: {e}', file=sys.stderr)
         print('先に `pip install -r requirements.txt` を実行してください。', file=sys.stderr)

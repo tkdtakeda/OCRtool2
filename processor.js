@@ -4,7 +4,7 @@
    ────────────────────────────────────────────────────────
    以前はOpenCV.js(WASM)でここに二値化・線検出・回転を直接実装していたが、
    処理速度向上のためローカルのPythonサーバー（/api/line-removal・
-   /api/rotate、server/processor.py）へ移した。公開関数名・引数・戻り値の
+   /api/rotate、processor_server.py）へ移した。公開関数名・引数・戻り値の
    形は維持している。ただし mats は以前 cv.Mat の配列だったが、いまは
    HTMLCanvasElement の配列になっている（呼び出し側で .cols/.rows を
    使っていた箇所は .width/.height に直す必要がある点に注意）。

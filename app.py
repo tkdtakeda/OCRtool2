@@ -1,6 +1,6 @@
 """Flask アプリ本体。ルーティングと静的配信、エラー整形のみを担当し、
-実際の画像処理ロジックは matcher.py / processor.py / ocr.py に委譲する
-（各モジュール冒頭コメントの通り、元のJSファイルと同じ役割分担）。
+実際の画像処理ロジックは matcher.py / processor_server.py / ocr_server.py に
+委譲する（各モジュール冒頭コメントの通り、元のJSファイルと同じ役割分担）。
 
 将来デスクトップアプリ化（pywebviewでの専用ウィンドウ表示）する際、
 このモジュールをサブプロセスではなくバックグラウンドスレッドで動かせるよう
@@ -22,10 +22,12 @@ import os
 import cv2
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import matcher, ocr, processor
-from .imaging import data_url_to_rgba, rgba_to_data_url
+import matcher
+import ocr_server as ocr
+import processor_server as processor
+from imaging import data_url_to_rgba, rgba_to_data_url
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 MAX_CONTENT_LENGTH = 64 * 1024 * 1024  # 64MB（高DPI・複数アンカーのmatchでも十分な余裕）
 _STATIC_EXTS = ('.js', '.css', '.png', '.jpg', '.jpeg', '.svg', '.ico', '.json', '.webmanifest')
 

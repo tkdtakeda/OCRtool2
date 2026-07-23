@@ -12,7 +12,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .imaging import js_round
+from imaging import js_round
 
 RED_OVERLAY_RGBA = (215, 45, 45, 255)   # cv.Scalar(215,45,45,255) と同じRGBA順
 WHITE_RGBA = (255, 255, 255, 255)

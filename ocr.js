@@ -3,8 +3,8 @@
    Responsibility: OCR処理の依頼のみ。DOM操作・UI状態管理は持たない
    ────────────────────────────────────────────────────────
    以前はTesseract.js(WASM)でここに直接OCRを実行していたが、処理速度向上の
-   ためローカルのPythonサーバー（/api/ocr、server/ocr.py）へ移した。
-   server/ocr.py は tesserocr（文字単位の確信度まで取れる。無ければ
+   ためローカルのPythonサーバー（/api/ocr、ocr_server.py）へ移した。
+   ocr_server.py は tesserocr（文字単位の確信度まで取れる。無ければ
    pytesseractへ自動フォールバック）でネイティブのTesseractエンジンを叩く。
    公開関数名・引数・戻り値の形（fullText/words/symbols/lines/confidence/
    error）は維持しているため、呼び出し側（recognizer.js）は無修正で動く。
