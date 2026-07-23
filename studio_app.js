@@ -53,15 +53,17 @@
   /* 俯瞰サムネイル: 罫線除去済み全体（無ければ元画像）に、変換を掛けたOCR領域の枠を
      重ねて縮小PNGにする。「読み取り位置が全体のどこか」を一覧で一目で確認するため。
      枠が空白や画像外に落ちていれば、帳票の誤判定・位置ずれがその場で分かる。 */
-  function overlayThumbURL(baseCanvas, transform, regions, w = 120) {
+  function overlayThumbURL(baseCanvas, transform, regions, w = 120, anchorPoints) {
     const s = Math.min(1, w / baseCanvas.width);
     const c = document.createElement('canvas');
     c.width = Math.round(baseCanvas.width * s);
     c.height = Math.round(baseCanvas.height * s);
     const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(baseCanvas, 0, 0, c.width, c.height);
-    const tf = transform || { sx: 1, sy: 1, tx: 0, ty: 0 };
+    const global = transform || { sx: 1, sy: 1, tx: 0, ty: 0 };
     (regions || []).forEach(r => {
+      /* 実際の切り出しと同じ「欄ごとの局所アンカー変換」で枠を描く（全体変換へフォールバック） */
+      const tf = Recognizer.transformForRegion(anchorPoints, r, global);
       const rx = (tf.sx * r.x + tf.tx) * s, ry = (tf.sy * r.y + tf.ty) * s;
       const rw = Math.max(2, tf.sx * r.w * s), rh = Math.max(2, tf.sy * r.h * s);
       ctx.fillStyle = 'rgba(229,62,62,.16)'; ctx.fillRect(rx, ry, rw, rh);
@@ -689,7 +691,7 @@
       UI.setPipeline(null, ['match', 'decide', 'rotate', 'line', 'ocr']);
       UI.showRecogProgress(false);
       /* ズーム/パン用に結果を保持して描画 */
-      S.recogResult = { resultCanvas: result.resultCanvas, transform: result.transform, regions: form.ocrRegions, angle: result.angle };
+      S.recogResult = { resultCanvas: result.resultCanvas, transform: result.transform, anchorPoints: result.anchorPoints, regions: form.ocrRegions, angle: result.angle };
       S.rrZoom = 1;
       renderResultPreview();
       UI.renderFieldResults(result.fields);
@@ -1042,9 +1044,11 @@
     try {
       const prep = await Recognizer.prepare(S.recogCanvas, form, S.recogMatchInfo);
       if (prep.error) { $('psmProgress').classList.add('hidden'); $('btnPsmRun').disabled = false; return UI.toast('前処理エラー: ' + prep.error, 'error'); }
-      const crop = LineRemovalProcessor.extractRect(prep.resultCanvas, Recognizer.mapRect(region, prep.transform));
+      /* 本認識と同じ「欄ごとの局所アンカー変換」で切り出す（全体変換へフォールバック） */
+      const regionTf = Recognizer.transformForRegion(prep.anchorPoints, region, prep.transform);
+      const crop = LineRemovalProcessor.extractRect(prep.resultCanvas, Recognizer.mapRect(region, regionTf));
       if (crop) { $('psmCropImg').src = crop.toDataURL('image/png'); $('psmCrop').classList.remove('hidden'); }
-      const results = await Recognizer.comparePsm(prep.resultCanvas, prep.transform, region, PSM_LIST,
+      const results = await Recognizer.comparePsm(prep.resultCanvas, regionTf, region, PSM_LIST,
         { lang: form.ocrSettings.lang || 'eng', whitelist: form.ocrSettings.whitelist || '', normalize: form.ocrSettings.normalize !== false, kanji: !!form.ocrSettings.normalizeKanji },
         (i, total, psm) => setProg(`PSM ${psm} を認識中… (${i + 1}/${total})`, (i + 1) / total));
       LineRemovalProcessor.cleanupMats(prep.previewMats);
@@ -1079,8 +1083,8 @@
   /* 罫線除去結果プレビューの描画（ズーム反映） */
   function renderResultPreview() {
     if (!S.recogResult) return;
-    const { resultCanvas, transform, regions, angle } = S.recogResult;
-    const scale = UI.renderRecogPreview(resultCanvas, transform, regions, angle, S.rrZoom);
+    const { resultCanvas, transform, anchorPoints, regions, angle } = S.recogResult;
+    const scale = UI.renderRecogPreview(resultCanvas, transform, regions, angle, S.rrZoom, anchorPoints);
     $('rrZoomLabel').textContent = Math.round(scale * 100) + '%';
   }
 
@@ -1155,7 +1159,7 @@
       checkPositionWarning(form, res.matchQuality);
       /* 一覧サムネイルは「罫線除去済み全体＋OCR領域枠」の俯瞰にする（cleanupMats後も
          resultCanvasは有効）。枠がどこに落ちたかが一目で分かり、位置ずれ/誤判定に気づける。 */
-      const overThumb = res.resultCanvas ? overlayThumbURL(res.resultCanvas, res.transform, form.ocrRegions, 120) : thumb;
+      const overThumb = res.resultCanvas ? overlayThumbURL(res.resultCanvas, res.transform, form.ocrRegions, 120, res.anchorPoints) : thumb;
       LineRemovalProcessor.cleanupMats(res.previewMats);
       const manual = forcedFormId ? true : !(candId === form.id);
       const avg = res.fields.length ? Math.round(res.fields.reduce((s, f) => s + (f.confidence || 0), 0) / res.fields.length) : 0;
