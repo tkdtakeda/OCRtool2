@@ -101,9 +101,17 @@ const OcrProcessor = (() => {
         .filter(s => s.text && s.text.trim())
         .map(s => ({ text: s.text, confidence: Math.round(s.confidence) }));
 
+      /* 行別のテキスト・確信度。PSM=単一ブロック等で複数行として認識された結果から、
+         呼び出し側（単一値欄）が「最も確信度の高い行」を選べるようにする。罫線除去の
+         ゴースト行がwhitelistの制約でそれっぽい別の数字列として読まれ、本来の値と
+         連結されてしまう問題（例:"051\n8558"）への対処に使う。 */
+      const lines = (data.lines || [])
+        .filter(l => l.text && l.text.trim())
+        .map(l => ({ text: l.text.trim(), confidence: Math.round(l.confidence || 0) }));
+
       /* data.confidence は領域全体の平均信頼度。文字ホワイトリスト指定時は
          words が空/0になることがあるため、フォールバックとして返す。 */
-      return { fullText: data.text || '', words, symbols, confidence: typeof data.confidence === 'number' ? data.confidence : 0, error: null };
+      return { fullText: data.text || '', words, symbols, lines, confidence: typeof data.confidence === 'number' ? data.confidence : 0, error: null };
 
     } catch (e) {
       return {

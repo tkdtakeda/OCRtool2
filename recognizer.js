@@ -101,6 +101,31 @@ const Recognizer = (() => {
     return { x: tf.sx * region.x + tf.tx, y: tf.sy * region.y + tf.ty, w: tf.sx * region.w, h: tf.sy * region.h };
   }
 
+  /* ── 局所アンカー: 欄ごとに近いアンカーを重く使って位置決め（移動最小二乗の考え方）──
+     1枚に1つの全体変換だと、アンカーがページ上部などに偏っている場合、下部の欄が
+     「外挿」になり、わずかな倍率誤差（例: 98%）が距離ぶん増幅されて1行ぶん等の大きな
+     ズレになる（支払金額の枠が値でなく1行上のラベルに乗る、等）。欄ごとに近傍アンカーを
+     重くした変換を使えば、アンカーが偏っていても各欄は最寄りアンカー基準で合う。
+     近傍に寄り過ぎて倍率が不安定にならないよう、遠いアンカーにも 1/(1+(d/L)^2) で滑らかに
+     重みを残す（アンカー1点や全点同一位置など退化時は全体変換へフォールバック）。 */
+  function transformForRegion(anchorPoints, region, globalTf) {
+    if (!anchorPoints || anchorPoints.length < 2) return globalTf || { sx: 1, sy: 1, tx: 0, ty: 0, n: anchorPoints ? anchorPoints.length : 0 };
+    const cx = region.x + region.w / 2, cy = region.y + region.h / 2;
+    let lo = Infinity, hi = -Infinity, loY = Infinity, hiY = -Infinity;
+    anchorPoints.forEach(p => { if (p.refX < lo) lo = p.refX; if (p.refX > hi) hi = p.refX; if (p.refY < loY) loY = p.refY; if (p.refY > hiY) hiY = p.refY; });
+    /* 近傍の長さスケール = アンカー分布の広がりの半分。0広がり（全点同一位置）は全体変換へ */
+    const spread = Math.hypot(hi - lo, hiY - loY);
+    if (spread < 1) return globalTf;
+    const L = 0.5 * spread;
+    const weighted = anchorPoints.map(p => {
+      const dx = p.refX - cx, dy = p.refY - cy, d = Math.hypot(dx, dy);
+      const prox = 1 / (1 + (d / L) * (d / L));
+      return { ...p, score: Math.max(1e-3, (p.score || 0.5)) * prox };   // 既存のscore加重に近接度を乗せる
+    });
+    const tf = estimateTransform(weighted);
+    return (tf && isFinite(tf.sx) && isFinite(tf.tx)) ? tf : globalTf;
+  }
+
   /** 抽出パターン（正規表現）を適用。group1があればそれ、無ければ全体。不一致は空。 */
   function applyPattern(text, pattern) {
     if (!pattern) return text;
@@ -394,6 +419,8 @@ const Recognizer = (() => {
        いる／信頼できる一致が1つも無い場合は、呼び出し側で警告できるように
        フラグを返す（例: PDFの読み込みDPIが登録時と違いすぎるケース）。 */
     const usedMatches = good.length ? good : allMatches.slice(0, 1);
+    /* 局所アンカー位置決め用の対応点（信頼できる一致が2点以上あるときだけ）。 */
+    const anchorPoints = good.length >= 2 ? good : null;
     const scaleMin = LOCALIZE_SCALES[0], scaleMax = LOCALIZE_SCALES[LOCALIZE_SCALES.length - 1];
     const matchQuality = {
       n: transform.n,
@@ -411,7 +438,7 @@ const Recognizer = (() => {
     console.log(`[perf]   prepare: rotate=${(tRotate - tPrepStart).toFixed(0)}ms localize(anchor${anchors.length})=${(tLocalize - tRotate).toFixed(0)}ms lineRemoval=${(tLineRemoval - tLocalize).toFixed(0)}ms`);
     if (proc.error) {
       LineRemovalProcessor.cleanupMats(proc.mats);
-      return { angle, transform, resultCanvas: null, previewMats: [], error: proc.error, matchQuality };
+      return { angle, transform, anchorPoints, resultCanvas: null, previewMats: [], error: proc.error, matchQuality };
     }
     /* mats[3] = 罫線除去結果。OCR 入力用に独立キャンバスへ描画 */
     const resultCanvas = document.createElement('canvas');
@@ -426,7 +453,7 @@ const Recognizer = (() => {
     resultCanvas.getContext('2d', { willReadFrequently: true });
     LineRemovalProcessor.renderToCanvas(resMat, resultCanvas);
 
-    return { angle, transform, resultCanvas, previewMats: proc.mats, error: null, matchQuality };
+    return { angle, transform, anchorPoints, resultCanvas, previewMats: proc.mats, error: null, matchQuality };
   }
 
   async function runOcr(sourceCanvas, form, matchInfo, opts = {}, cb = {}) {
@@ -434,9 +461,9 @@ const Recognizer = (() => {
 
     const prep = await prepare(sourceCanvas, form, matchInfo, cb);
     if (prep.error) {
-      return { angle: prep.angle, transform: prep.transform, resultCanvas: null, previewMats: [], fields: [], error: prep.error, matchQuality: prep.matchQuality };
+      return { angle: prep.angle, transform: prep.transform, anchorPoints: prep.anchorPoints, resultCanvas: null, previewMats: [], fields: [], error: prep.error, matchQuality: prep.matchQuality };
     }
-    const { angle, transform, resultCanvas } = prep;
+    const { angle, transform, anchorPoints, resultCanvas } = prep;
 
     /* ⑥ OCR領域ごとに認識 */
     const regions = form.ocrRegions || [];
@@ -463,7 +490,8 @@ const Recognizer = (() => {
       const i = order[oi];
       const { region, rule, active, single, lang: useLang, whitelist: useWl, psm: usePsm } = plan[i];
       stage(`OCR ${oi + 1}/${regions.length}`, 0.55 + 0.4 * (oi / Math.max(1, regions.length)));
-      const cropCanvas = LineRemovalProcessor.extractRect(resultCanvas, mapRect(region, transform));
+      /* 欄ごとに近傍アンカーを重く使った局所変換で切り出す（全体変換への安全なフォールバック付き） */
+      const cropCanvas = LineRemovalProcessor.extractRect(resultCanvas, mapRect(region, transformForRegion(anchorPoints, region, transform)));
       if (!cropCanvas) {
         fields[i] = { name: region.name, globalName: region.globalName || region.name, text: '', confidence: 0, error: '領域の切り出しに失敗しました' };
         continue;
@@ -478,6 +506,15 @@ const Recognizer = (() => {
          大幅に遅くなることがあるため、領域ごとの所要時間と使用言語を記録する。 */
       console.log(`[perf]   OCR "${region.name}" lang=${useLang} ${(performance.now() - tFieldStart).toFixed(0)}ms`);
       let text = (res.fullText || '').trim();
+      /* 単一値欄でTesseractが複数行として認識した場合（PSM=6は罫線除去の
+         ゴースト行を別行として拾うことがある）、最も確信度の高い行だけを採用する。
+         whitelistの制約でノイズも数字として出力され得るため、行同士を連結した
+         "051\n8558" のような値をそのまま出さないための対策。複数値を許容する
+         一般欄はこれまで通りfullTextをそのまま使う。 */
+      if (single && res.lines && res.lines.length > 1) {
+        const best = res.lines.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+        text = best.text;
+      }
       if (doNorm) text = OcrProcessor.normalize(text);
       if (doKanji) text = OcrProcessor.kanjiToNum(text);
       const raw = text;
@@ -507,7 +544,7 @@ const Recognizer = (() => {
     }
 
     stage('完了', 1);
-    return { angle, transform, resultCanvas, previewMats: prep.previewMats, fields, error: null, matchQuality: prep.matchQuality };
+    return { angle, transform, anchorPoints, resultCanvas, previewMats: prep.previewMats, fields, error: null, matchQuality: prep.matchQuality };
   }
 
   /**
@@ -538,6 +575,11 @@ const Recognizer = (() => {
       const res = await OcrProcessor.recognize(input, psm, () => {}, useLang, regWhitelist);
       const conf = confOf(res);
       let text = (res.fullText || '').trim();
+      /* 本認識(runOcr)と同じ「単一値欄は最も確信度の高い行を採用」を比較にも反映する */
+      if (single && res.lines && res.lines.length > 1) {
+        const best = res.lines.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+        text = best.text;
+      }
       if (normalize) text = OcrProcessor.normalize(text);
       if (kanji) text = OcrProcessor.kanjiToNum(text);
       if (region.pattern) text = applyPattern(text, region.pattern);
@@ -547,6 +589,6 @@ const Recognizer = (() => {
     return out;
   }
 
-  return { classify, prepare, runOcr, comparePsm, mapRect, dataURLtoImg };
+  return { classify, prepare, runOcr, comparePsm, mapRect, transformForRegion, dataURLtoImg };
 
 })();

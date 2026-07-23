@@ -55,6 +55,16 @@
   <button id="onboardHelp" class="btn btn-ghost btn-sm"><i class="fas fa-book-open"></i> 使い方</button>
   <button id="onboardClose" class="btn-icon-sm" title="閉じる"><i class="fas fa-xmark"></i></button>
 </div>
+<script>
+  /* CLS対策: 表示するかどうかを初回描画より前（パーサがここに来た時点）に同期的に決める。
+     以前はstudio_app.jsのinit()（DOMContentLoaded後、重いライブラリ読込の後）で hidden を
+     外していたため、最初のペイント後にこのバーが挿入され、下のコンテンツを押し下げる
+     大きなレイアウトシフトになっていた（CLS計測の主因）。ここで先に確定させれば、
+     最初のフレームから最終状態で描画され、シフトが起きない。 */
+  try {
+    if (!localStorage.getItem('ocrtool_onboard_dismissed')) document.getElementById('onboardBar').classList.remove('hidden');
+  } catch (_) {}
+</script>
 
 <!-- ════════════════════════════════════════════════════
      VIEW A : レイアウト登録工程

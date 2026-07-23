@@ -231,7 +231,7 @@ const StudioUI = (() => {
   }
 
   /* ── 認識プレビュー（罫線除去結果 + OCR領域重畳） ───── */
-  function renderRecogPreview(resultCanvas, transform, regions, angle, zoom = 1) {
+  function renderRecogPreview(resultCanvas, transform, regions, angle, zoom = 1, anchorPoints) {
     const c = $('recogResultCanvas'); if (!c || !resultCanvas) return 1;
     const wrap = c.parentElement;
     const maxW = (wrap?.clientWidth || 500) - 24;
@@ -241,10 +241,12 @@ const StudioUI = (() => {
     c.height = Math.round(resultCanvas.height * scale);
     const ctx = c.getContext('2d');
     ctx.drawImage(resultCanvas, 0, 0, c.width, c.height);
-    const tf = transform || { sx: 1, sy: 1, tx: 0, ty: 0 };
+    const global = transform || { sx: 1, sy: 1, tx: 0, ty: 0 };
     (regions || []).forEach((r, i) => {
       const col = REGION_COLORS[i % REGION_COLORS.length];
-      /* 軸独立スケール変換で入力座標へ写像してから表示スケールを掛ける */
+      /* 実際の切り出しと同じ「欄ごとの局所アンカー変換」で枠を描く（枠と読取位置を一致させる） */
+      const tf = (typeof Recognizer !== 'undefined' && Recognizer.transformForRegion)
+        ? Recognizer.transformForRegion(anchorPoints, r, global) : global;
       const rx = Math.round((tf.sx * r.x + tf.tx) * scale);
       const ry = Math.round((tf.sy * r.y + tf.ty) * scale);
       const rw = Math.max(2, Math.round(tf.sx * r.w * scale));
@@ -255,9 +257,10 @@ const StudioUI = (() => {
       ctx.fillText(`${i + 1}.${r.name}`, rx + 2, Math.max(10, ry - 2));
       ctx.textBaseline = 'alphabetic';
     });
-    const sxPct = Math.round((tf.sx || 1) * 100), syPct = Math.round((tf.sy || 1) * 100);
+    /* 表示の「倍率」は全体変換ベース（全体傾向の目安）。欄ごとの微差は枠の位置で表現する。 */
+    const sxPct = Math.round((global.sx || 1) * 100), syPct = Math.round((global.sy || 1) * 100);
     const sizeTxt = (sxPct === syPct) ? `${sxPct}%` : `${sxPct}%×${syPct}%`;
-    $('rrAngle').textContent = `傾き ${angle > 0 ? '+' : ''}${angle}° / 倍率 ${sizeTxt} / アンカー${tf.n || 0}点`;
+    $('rrAngle').textContent = `傾き ${angle > 0 ? '+' : ''}${angle}° / 倍率 ${sizeTxt} / アンカー${global.n || 0}点`;
     return scale;
   }
 
