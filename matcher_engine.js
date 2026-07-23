@@ -1,129 +1,59 @@
 /* ════════════════════════════════════════════════════════
-   matcher_engine.js  OpenCV.js 画像マッチングエンジン
-   Responsibility: matchTemplate 処理のみ。DOM 操作なし
+   matcher_engine.js  画像マッチングエンジン（Pythonサーバー呼び出し版）
+   Responsibility: マッチング処理の依頼のみ。DOM 操作なし
+   ────────────────────────────────────────────────────────
+   以前はOpenCV.js(WASM)でここに直接テンプレートマッチングを実装していたが、
+   処理速度向上のためローカルのPythonサーバー（/api/match、server/matcher.py）
+   へ移した。公開関数名・引数・戻り値の形は完全に維持しているため、呼び出し側
+   （recognizer.js・studio_app.js）は無修正で動く。アルゴリズム自体（角度×
+   スケール探索、コントラストに基づく信頼性減衰）もPython側でこれまでと
+   同じ定数・同じ手順のまま動く。
    ════════════════════════════════════════════════════════ */
 'use strict';
 
 const MatcherEngine = (() => {
 
-  /* ── Mat ヘルパー ───────────────────────────────────── */
-
-  /**
-   * 任意チャンネルの Mat をグレースケール (CV_8UC1) に変換
-   * @param {cv.Mat} src
-   * @returns {cv.Mat}
-   */
-  function toGray(src) {
-    const dst = new cv.Mat();
-    if      (src.channels() === 4) cv.cvtColor(src, dst, cv.COLOR_RGBA2GRAY);
-    else if (src.channels() === 3) cv.cvtColor(src, dst, cv.COLOR_RGB2GRAY);
-    else                           src.copyTo(dst);
-    return dst;
-  }
-
-  /**
-   * グレースケール Mat を指定角度で回転（白背景 = 帳票余白に合わせた塗りつぶし）
-   * @param {cv.Mat} src       CV_8UC1
-   * @param {number} angleDeg  回転角（正 = 反時計回り）
-   * @returns {cv.Mat}         新規 Mat（呼び出し元が delete すること）
-   */
-  function rotateMat(src, angleDeg) {
-    if (angleDeg === 0) return src.clone();
-    const center = new cv.Point(src.cols / 2, src.rows / 2);
-    const M      = cv.getRotationMatrix2D(center, angleDeg, 1.0);
-    const dst    = new cv.Mat();
-    cv.warpAffine(
-      src, dst, M,
-      new cv.Size(src.cols, src.rows),
-      cv.INTER_LINEAR,
-      cv.BORDER_CONSTANT,
-      new cv.Scalar(255)   // 白で埋める
-    );
-    M.delete();
-    return dst;
-  }
-
-  /**
-   * グレースケール Mat を指定倍率で拡大縮小する（スケール探索用）。
-   * @param {cv.Mat} src     CV_8UC1
-   * @param {number} factor  倍率（<1 で縮小）
-   * @returns {cv.Mat}       新規 Mat（呼び出し元が delete すること）
-   */
-  function resizeMat(src, factor) {
-    const w = Math.max(1, Math.round(src.cols * factor));
-    const h = Math.max(1, Math.round(src.rows * factor));
-    const dst = new cv.Mat();
-    cv.resize(src, dst, new cv.Size(w, h), 0, 0, factor < 1 ? cv.INTER_AREA : cv.INTER_LINEAR);
-    return dst;
-  }
-
-  /**
-   * グレースケール Mat の標準偏差（コントラストの目安）。
-   * @param {cv.Mat} mat  CV_8UC1
-   * @returns {number}
-   */
-  function stdDevOf(mat) {
-    const mean = new cv.Mat(), std = new cv.Mat();
-    cv.meanStdDev(mat, mean, std);
-    const v = std.data64F[0];
-    mean.delete(); std.delete();
-    return v;
-  }
-
-  const clamp01 = v => Math.max(0, Math.min(1, v));
-  /* 標準偏差 → 信頼性(0〜1)への線形ランプ。8bitグレースケールの目安値。
-     STD_LO未満（ほぼ無地）は信頼性最低、STD_HI以上（十分な文字/線がある）で満点。 */
-  const STD_LO = 6, STD_HI = 18;
-  const stdRamp = v => clamp01((v - STD_LO) / (STD_HI - STD_LO));
-  /* 信頼性が最低でもスコアを0にはしない（低コントラストでも正しく機能している
-     既存アンカーを壊さないため）。あくまで「無関係な帳票への誤マッチ」を抑える減衰。 */
-  const STD_PENALTY_FLOOR = 0.25;
-
-  /**
-   * 単一テンプレートを入力画像に対して matchTemplate (TM_CCOEFF_NORMED)
-   * テンプレートが入力画像より大きい場合はスコア 0 を返す。
-   *
-   * TM_CCOEFF_NORMED は分散で正規化した相関係数のため、テンプレート・一致窓の
-   * 少なくとも一方がほぼ無地（低コントラスト＝白紙に近い）だと、実際には無関係な
-   * 領域でも数値的に高いスコアが偶然出ることがある（正規化の分母が小さく不安定に
-   * なるため）。「特徴が全然違う帳票なのに高スコアでマッチする」の主因はこれで、
-   * 帳票は総じて白地×薄い文字/罫線という統計的に似た画像のため起きやすい。
-   * 一致窓の標準偏差も見て、双方低コントラストならスコアを減衰させる。
-   * @param {cv.Mat} fullGray      CV_8UC1
-   * @param {cv.Mat} templateGray  CV_8UC1
-   * @param {number} templateStd   テンプレートの標準偏差（呼び出し側で1回だけ計算）
-   * @returns {{ score: number, loc: {x:number, y:number} }}
-   */
-  function runMatch(fullGray, templateGray, templateStd) {
-    if (templateGray.rows > fullGray.rows || templateGray.cols > fullGray.cols) {
-      return { score: 0, loc: { x: 0, y: 0 } };
+  /* ── サーバー通信ヘルパー ────────────────────────────── */
+  async function postJSON(path, body) {
+    let res;
+    try {
+      res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (_) {
+      throw new Error('OCRサーバーに接続できません。サーバーが起動しているか確認してください。');
     }
-    const res = new cv.Mat();
-    cv.matchTemplate(fullGray, templateGray, res, cv.TM_CCOEFF_NORMED);
-    const mm = cv.minMaxLoc(res);
-    res.delete();
-    const roi = fullGray.roi(new cv.Rect(mm.maxLoc.x, mm.maxLoc.y, templateGray.cols, templateGray.rows));
-    const windowStd = stdDevOf(roi);
-    roi.delete();
-    const reliability = Math.min(stdRamp(templateStd), stdRamp(windowStd));
-    const score = mm.maxVal * (STD_PENALTY_FLOOR + (1 - STD_PENALTY_FLOOR) * reliability);
-    return { score, loc: { x: mm.maxLoc.x, y: mm.maxLoc.y } };
+    if (!res.ok) {
+      let msg = `サーバーエラー (HTTP ${res.status})`;
+      try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) {}
+      throw new Error(msg);
+    }
+    return res.json();
+  }
+
+  /**
+   * canvas または img 要素を PNG dataURL にする（元のcv.imreadが両対応
+   * だったのに合わせ、こちらも両方受け付ける）。
+   * @param {HTMLCanvasElement|HTMLImageElement} source
+   * @returns {string}
+   */
+  function toDataURL(source) {
+    if (source instanceof HTMLCanvasElement) return source.toDataURL('image/png');
+    const c = document.createElement('canvas');
+    c.width = source.naturalWidth || source.width;
+    c.height = source.naturalHeight || source.height;
+    c.getContext('2d', { willReadFrequently: true }).drawImage(source, 0, 0);
+    return c.toDataURL('image/png');
   }
 
   /* ── メイン: 傾き補正付き一括マッチング ────────────── */
 
-  /* matchTemplate は画素数にほぼ比例して遅くなる。高DPIスキャンやカメラ写真
-     （数千px級）をそのまま 角度×倍率×アンカー数 分繰り返すと致命的に遅くなる
-     ため、探索は長辺 MAX_WORKING_DIM 以下に縮小した画像で行い、結果座標のみ
-     原寸へ戻す（テンプレート自体は縮小しない＝既存の scaleFactors 探索と同じ
-     考え方で、入力側だけを縮めるので精度への影響は小さい）。 */
-  const MAX_WORKING_DIM = 1800;
-
   /**
-   * 「角度ごとに全画像を 1 回だけ回転 → 全テンプレートを一括照合」
-   * という戦略で回転コストを最小化する。
+   * 登録済みの全テンプレートを、角度×スケールの探索付きで一括照合する。
    *
-   * @param {HTMLCanvasElement}   fullCanvas    判定対象画像（フル帳票）
+   * @param {HTMLCanvasElement|HTMLImageElement} fullCanvas  判定対象画像（フル帳票）
    * @param {Array<{
    *   id:           string,
    *   imageElement: HTMLImageElement   // 読み込み済み
@@ -131,113 +61,39 @@ const MatcherEngine = (() => {
    * @param {object}  opts
    * @param {number}  opts.angleRange    補正角度範囲 ± (度)  default 2
    * @param {number}  opts.angleStep     ステップ (度)         default 1
-   * @returns {Map<string, {
+   * @param {number[]} opts.scaleFactors スケール探索係数      default [1]
+   * @returns {Promise<Map<string, {
    *   score: number,
    *   angle: number,
+   *   scale: number,
    *   loc:   {x:number, y:number}
-   * }>}  テンプレート id → ベストスコア情報
+   * }>>}  テンプレート id → ベストスコア情報
    */
-  /* 角度×スケールの組ごとに一度だけイベントループへ制御を返す。
-     matchAllは角度×スケール×テンプレート数ぶんcv.matchTemplateを呼ぶ完全同期処理で、
-     その間ずっとメインスレッドを専有すると、クリック/キー入力が処理されず
-     ブラウザが固まって見える（DevTools計測で「Input delay」が長時間・
-     「Processing duration」がほぼ0として現れる状態）。
-
-     ただし setTimeout(0) は【非表示タブで重度にスロットリングされる】。Chromeは
-     バックグラウンドで最短1秒、数分放置すると最悪1回/分まで間引くため、一括処理を
-     裏に回して離席すると、matchAll が譲るたびに数十秒〜数分寝かされ、1回の classify
-     が数百秒に膨れ上がる（実測 classify=528秒。実演算は数秒）。
-     対策:
-      ・表示中は setTimeout(0) で譲り、クリック/キー入力の応答性(INP)を確保する。
-      ・非表示中は応答性が不要なので、スロットルされないマイクロタスクで即時に継続し
-        全速で回す（PDFラスタライズやOCRワーカ待ちなど本来の await では通常どおり
-        マクロタスクへ譲るため、ワーカのメッセージ処理は妨げない）。 */
-  const yieldToUI = () =>
-    (typeof document !== 'undefined' && document.hidden)
-      ? Promise.resolve()
-      : new Promise(resolve => setTimeout(resolve, 0));
-
-  /* 1タスクの上限時間（ms）。これを超えたらテンプレートの途中でも制御を返す。
-     matchTemplate 単体は分割できないので、実質「予算 + 直近1回の照合時間」が
-     1タスクの長さ＝入力遅延(INP)の上限になる。約2フレーム。 */
-  const YIELD_BUDGET_MS = 32;
-
   async function matchAll(fullCanvas, templates, opts = {}) {
     const angleRange = opts.angleRange ?? 2;
     const angleStep  = Math.max(0.1, opts.angleStep ?? 1);
-    /* スケール探索係数（f = 入力に写る帳票の倍率 / 基準）。既定は等倍のみ */
     const scaleFactors = (Array.isArray(opts.scaleFactors) && opts.scaleFactors.length)
       ? opts.scaleFactors : [1];
 
-    /* 結果マップ初期化 */
     const results = new Map();
     templates.forEach(t => results.set(t.id, { score: -Infinity, angle: 0, scale: 1, loc: { x: 0, y: 0 } }));
+    if (!templates.length) return results;
 
-    /* テンプレートをグレースケール Mat に変換（事前に 1 回のみ）。標準偏差
-       （コントラストの目安）もここで1回だけ計算し、以降の全角度×スケール照合で使い回す。 */
-    const tplMats = templates.map(t => {
-      const m = cv.imread(t.imageElement);
-      const g = toGray(m);
-      m.delete();
-      return {
-        id: t.id,
-        mat: g,
-        std: stdDevOf(g),
-        w:   t.imageElement.naturalWidth,
-        h:   t.imageElement.naturalHeight,
-      };
+    const templatePayload = templates.map(t => ({ id: t.id, image: toDataURL(t.imageElement) }));
+
+    const json = await postJSON('/api/match', {
+      image: toDataURL(fullCanvas),
+      templates: templatePayload,
+      angleRange, angleStep, scaleFactors,
     });
+    if (json.error) throw new Error(json.error);
 
-    /* 入力画像をグレースケールに変換 */
-    const fullSrc      = cv.imread(fullCanvas);
-    const fullGrayFull = toGray(fullSrc);
-    fullSrc.delete();
-
-    /* 大きすぎる入力は探索用に縮小（結果座標は最後に原寸へ戻す） */
-    const longSide  = Math.max(fullGrayFull.cols, fullGrayFull.rows);
-    const workScale = longSide > MAX_WORKING_DIM ? MAX_WORKING_DIM / longSide : 1;
-    const fullGray  = workScale < 1 ? resizeMat(fullGrayFull, workScale) : fullGrayFull;
-    if (workScale < 1) fullGrayFull.delete();
-
-    /* 角度リスト生成（0° を必ず含む） */
-    const angles = [];
-    if (angleRange === 0 || angleStep === 0) {
-      angles.push(0);
-    } else {
-      for (let a = -angleRange; a <= angleRange + 1e-9; a += angleStep) {
-        angles.push(Math.round(a * 1000) / 1000);
-      }
-    }
-
-    /* 角度 × スケール ごとに入力を変換 → 全テンプレートに照合。
-       アンカー数が多い帳票では1回の角度×スケールでも同期時間が長くなり、その間の
-       クリック/キー入力が遅延する（Input delayが長い状態）。テンプレート1件ごとに
-       時間予算を見て、超えたら途中でも制御を返す。処理順・結果は不変で、純粋に
-       スケジューリングだけを細かくするため精度への影響は一切ない。 */
-    let lastYield = performance.now();
-    for (const angle of angles) {
-      const rotated = rotateMat(fullGray, angle);
-      for (const f of scaleFactors) {
-        /* 入力を 1/f に縮小すると、f 倍で写った帳票が基準寸法のテンプレートと一致 */
-        const scaled = (Math.abs(f - 1) < 1e-6) ? rotated : resizeMat(rotated, 1 / f);
-        for (const tm of tplMats) {
-          const r   = runMatch(scaled, tm.mat, tm.std);
-          const cur = results.get(tm.id);
-          if (r.score > cur.score) {
-            /* 縮小探索画像上の loc を原寸入力座標へ戻す（f: 倍率探索分 ÷ workScale: 探索縮小分） */
-            results.set(tm.id, { score: r.score, angle, scale: f, loc: { x: Math.round(r.loc.x * f / workScale), y: Math.round(r.loc.y * f / workScale) } });
-          }
-          if (performance.now() - lastYield >= YIELD_BUDGET_MS) { await yieldToUI(); lastYield = performance.now(); }
-        }
-        if (scaled !== rotated) scaled.delete();
-      }
-      rotated.delete();
-    }
-
-    /* クリーンアップ */
-    fullGray.delete();
-    tplMats.forEach(tm => tm.mat.delete());
-
+    templates.forEach(t => {
+      const r = json.results[t.id];
+      results.set(t.id, r
+        ? { score: r.score, angle: r.angle, scale: r.scale, loc: { x: r.loc.x, y: r.loc.y } }
+        : { score: 0, angle: 0, scale: 1, loc: { x: 0, y: 0 } });
+    });
     return results;
   }
 
@@ -246,6 +102,7 @@ const MatcherEngine = (() => {
   /**
    * フル画像上のマッチング位置に赤枠を描画したサムネイルキャンバスを返す。
    * 座標は回転補正前の元画像座標なので概算表示となる。
+   * （純粋なCanvas2D描画のみで cv 非依存だったため無変更）
    *
    * @param {HTMLCanvasElement}      fullCanvas
    * @param {{ w:number, h:number }} templateSize  テンプレートの実寸

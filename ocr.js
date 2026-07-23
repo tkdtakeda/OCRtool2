@@ -1,60 +1,45 @@
 /* ════════════════════════════════════════════════════════
-   ocr.js  Tesseract.js OCR ラッパー
-   Responsibility: OCR処理ロジックのみ。DOM操作・UI状態管理は持たない
+   ocr.js  OCR ラッパー（Pythonサーバー呼び出し版）
+   Responsibility: OCR処理の依頼のみ。DOM操作・UI状態管理は持たない
+   ────────────────────────────────────────────────────────
+   以前はTesseract.js(WASM)でここに直接OCRを実行していたが、処理速度向上の
+   ためローカルのPythonサーバー（/api/ocr、server/ocr.py）へ移した。
+   server/ocr.py は tesserocr（文字単位の確信度まで取れる。無ければ
+   pytesseractへ自動フォールバック）でネイティブのTesseractエンジンを叩く。
+   公開関数名・引数・戻り値の形（fullText/words/symbols/lines/confidence/
+   error）は維持しているため、呼び出し側（recognizer.js）は無修正で動く。
    ════════════════════════════════════════════════════════ */
 'use strict';
 
 const OcrProcessor = (() => {
 
-  /* ── CDN paths (file:// 対応・明示指定) ─────────────── */
-  const CDN = {
-    workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/worker.min.js',
-    langPath:   'https://tessdata.projectnaptha.com/4.0.0',
-    corePath:   'https://cdn.jsdelivr.net/npm/tesseract.js-core@4/tesseract-core-simd.wasm.js',
-  };
-
-  /* ── ステータス日本語マップ ──────────────────────────── */
-  const STATUS_JA = [
-    ['loading tesseract core',       'OCRエンジンを読み込み中…'],
-    ['loading language traineddata', '言語データを読み込み中… (初回は数十秒かかります)'],
-    ['initializing api',             'OCRを初期化中…'],
-    ['initializing tesseract',       'OCRを初期化中…'],
-    ['recognizing text',             'テキストを認識中…'],
-  ];
-
-  let _worker = null;
-  let _ready  = false;
-  let _lang   = 'eng';
-  let _logCb  = () => {};
-
-  /* ── Worker 初期化（初回 / 言語変更時のみ実行） ─────── */
-  async function ensureWorker(lang) {
-    const want = lang || 'eng';
-    if (_ready && _lang === want) return;
-    /* 言語切り替え（例: 英数字欄=eng ⇔ 氏名・住所欄=jpn）は言語データの再読み込みが
-       走り、体感できるほど遅くなることがあるため、切り替えの発生と所要時間を記録する。 */
-    const t0 = performance.now();
-    const wasReady = _ready, prevLang = _lang;
-    if (!_worker) {
-      _worker = await Tesseract.createWorker({
-        ...CDN,
-        logger: m => _logCb(m),
+  /* ── サーバー通信ヘルパー ────────────────────────────── */
+  async function postJSON(path, body) {
+    let res;
+    try {
+      res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
       });
+    } catch (_) {
+      throw new Error('OCRサーバーに接続できません。サーバーが起動しているか確認してください。');
     }
-    /* 'eng' / 'jpn' / 'jpn+eng' などをまとめて読み込み・初期化 */
-    await _worker.loadLanguage(want);
-    await _worker.initialize(want);
-    _lang  = want;
-    _ready = true;
-    console.log(`[perf]   ${wasReady ? '言語切替' : 'Worker初期化'} ${wasReady ? prevLang : '(初回)'}→${want} ${(performance.now() - t0).toFixed(0)}ms`);
+    if (!res.ok) {
+      let msg = `サーバーエラー (HTTP ${res.status})`;
+      try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) {}
+      throw new Error(msg);
+    }
+    return res.json();
   }
 
-  function toJa(raw) {
-    if (!raw) return '処理中…';
-    for (const [key, msg] of STATUS_JA) {
-      if (raw.includes(key)) return msg;
-    }
-    return raw;
+  function toDataURL(source) {
+    if (source instanceof HTMLCanvasElement) return source.toDataURL('image/png');
+    const c = document.createElement('canvas');
+    c.width = source.naturalWidth || source.width;
+    c.height = source.naturalHeight || source.height;
+    c.getContext('2d', { willReadFrequently: true }).drawImage(source, 0, 0);
+    return c.toDataURL('image/png');
   }
 
   /* ── Public: recognize ──────────────────────────────── */
@@ -66,57 +51,41 @@ const OcrProcessor = (() => {
    * @returns {Promise<{
    *   fullText: string,
    *   words:    Array<{ text: string, confidence: number, bbox: object }>,
+   *   symbols:  Array<{ text: string, confidence: number }>,
+   *   lines:    Array<{ text: string, confidence: number }>,
+   *   confidence: number,
    *   error:    string|null
    * }>}
    */
   async function recognize(canvas, psm, onProgress, lang, whitelist) {
-    /* ログコールバックを更新（ensureWorker 呼び出し前に設定） */
-    _logCb = m => {
-      if (typeof onProgress === 'function') {
-        onProgress({ status: toJa(m.status), progress: m.progress || 0 });
-      }
-    };
+    /* サーバー呼び出しは1リクエストで完結し、Tesseract.js時代のような
+       ワーカー言語切替の待ち時間（数十秒）が無くなったため、途中経過は
+       出せない。進捗表示が前の欄の文言のまま古く見えないよう、リクエスト
+       送信前に1度だけ通知する。 */
+    if (typeof onProgress === 'function') onProgress({ status: '認識中…', progress: 0 });
 
     try {
-      await ensureWorker(lang);
-      /* 文字ホワイトリスト: 指定時はその文字種のみ出力（丸数字・記号の誤認を防ぐ）。
-         未指定('')は制限なし。前回値が残らないよう毎回明示設定する。 */
-      await _worker.setParameters({
-        tessedit_pageseg_mode: String(psm),
-        tessedit_char_whitelist: whitelist || '',
+      const json = await postJSON('/api/ocr', {
+        image: toDataURL(canvas),
+        psm,
+        lang: lang || 'eng',
+        whitelist: whitelist || '',
       });
-
-      const { data } = await _worker.recognize(canvas);
-
-      const words = (data.words || [])
-        .filter(w => w.text && w.text.trim())
-        .map(w => ({
-          text:       w.text.trim(),
-          confidence: Math.round(w.confidence),
-          bbox:       w.bbox,
-        }));
-
-      /* 文字別の確信度（デバッグ表示用。低信頼の原因箇所が分かる） */
-      const symbols = (data.symbols || [])
-        .filter(s => s.text && s.text.trim())
-        .map(s => ({ text: s.text, confidence: Math.round(s.confidence) }));
-
-      /* 行別のテキスト・確信度。PSM=単一ブロック等で複数行として認識された結果から、
-         呼び出し側（単一値欄）が「最も確信度の高い行」を選べるようにする。罫線除去の
-         ゴースト行がwhitelistの制約でそれっぽい別の数字列として読まれ、本来の値と
-         連結されてしまう問題（例:"051\n8558"）への対処に使う。 */
-      const lines = (data.lines || [])
-        .filter(l => l.text && l.text.trim())
-        .map(l => ({ text: l.text.trim(), confidence: Math.round(l.confidence || 0) }));
-
-      /* data.confidence は領域全体の平均信頼度。文字ホワイトリスト指定時は
-         words が空/0になることがあるため、フォールバックとして返す。 */
-      return { fullText: data.text || '', words, symbols, lines, confidence: typeof data.confidence === 'number' ? data.confidence : 0, error: null };
-
+      return {
+        fullText:   json.fullText || '',
+        words:      json.words || [],
+        symbols:    json.symbols || [],
+        lines:      json.lines || [],
+        confidence: typeof json.confidence === 'number' ? json.confidence : 0,
+        error:      json.error || null,
+      };
     } catch (e) {
       return {
         fullText: '',
         words:    [],
+        symbols:  [],
+        lines:    [],
+        confidence: 0,
         error:    (e && e.message) ? e.message : String(e),
       };
     }
@@ -124,15 +93,11 @@ const OcrProcessor = (() => {
 
   /* ── Public: terminate ──────────────────────────────── */
   /**
-   * Worker を終了して解放する（ページ離脱時などに使用）
+   * 互換のために残しているだけの no-op。以前はブラウザ内のTesseract.js
+   * workerを終了する処理だったが、サーバー移行後はその場に持続するローカル
+   * workerが無くなったため何もしない（呼び出し箇所は現状ゼロ）。
    */
-  async function terminate() {
-    if (_worker) {
-      try { await _worker.terminate(); } catch (_) {}
-      _worker = null;
-      _ready  = false;
-    }
-  }
+  async function terminate() {}
 
   /* ── Public: normalize ──────────────────────────────── */
   /**

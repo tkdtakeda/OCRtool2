@@ -13,7 +13,7 @@
 
   /* ── State ──────────────────────────────────────────── */
   const S = {
-    cvReady: false,
+    serverReady: false,
     forms: [],
     mode: 'register',
     /* 編集中の帳票 */
@@ -43,8 +43,8 @@
   const dataURLtoImg = url => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('load fail')); i.src = url; });
   const fileToDataURL = file => new Promise((res, rej) => { const r = new FileReader(); r.onload = e => res(e.target.result); r.onerror = () => rej(new Error('read fail')); r.readAsDataURL(file); });
 
-  /* willReadFrequently: これらのcanvasはOpenCV(cv.imread)やtoDataURLで直後に
-     画素を読み出すため、既定のGPUバッキングだと読み出しのたびにGPU→CPU転送が
+  /* willReadFrequently: これらのcanvasはサーバーへ送るtoDataURLや画面表示用の
+     切り出しで直後に画素を読み出すため、既定のGPUバッキングだと読み出しのたびにGPU→CPU転送が
      発生して遅い（DevToolsの「Multiple readback operations…」警告の原因）。
      生成時点でこのオプションを付けておくと、以後そのcanvasへの参照はずっと
      ソフトウェアバッキングのまま速く読み出せる。 */
@@ -108,9 +108,25 @@
     };
   }
 
-  /* ── CV lifecycle ───────────────────────────────────── */
-  document.addEventListener('cv-ready', () => { S.cvReady = true; $('loadingOverlay').classList.add('hidden'); UI.toast('OpenCV.js の準備が完了しました', 'success'); });
-  document.addEventListener('cv-error', () => { $('loadingMsg').innerHTML = 'OpenCV.js を読み込めませんでした。ネット接続を確認するか、サーバー無しで開く場合は <b>opencv.js</b> を index.html と同じフォルダに置いてください。'; UI.toast('OpenCV.js の読み込みに失敗しました', 'error', 6000); });
+  /* ── サーバー起動チェック ────────────────────────────── */
+  /* 以前はOpenCV.js(CDN)の読み込み完了を cv-ready/cv-error イベントで待っていたが、
+     OCR・画像マッチングの処理をローカルのPythonサーバーへ移したため、そちらが
+     応答するかを確認する形に置き換えた。この画面自体をそのサーバーが配信して
+     いるので、表示できている時点でプロセスは起動済み。ここではOCRエンジン
+     (Tesseract)が実際に使える状態かまで確認する。 */
+  async function checkServerHealth() {
+    try {
+      const res  = await fetch('/api/health');
+      const json = await res.json();
+      if (!res.ok || json.status !== 'ok') throw new Error(json.error || `HTTP ${res.status}`);
+      S.serverReady = true;
+      $('loadingOverlay').classList.add('hidden');
+      UI.toast(`サーバーに接続しました（OCRエンジン: ${json.ocrEngine || '不明'}）`, 'success');
+    } catch (e) {
+      $('loadingMsg').innerHTML = `サーバーに接続できませんでした。ターミナルで <code>python run_server.py</code> を実行しているか確認してください。<br><small>${(e && e.message) ? e.message : e}</small>`;
+      UI.toast('サーバーへの接続に失敗しました', 'error', 6000);
+    }
+  }
 
   /* ── モード切替 ─────────────────────────────────────── */
   function setMode(mode) {
@@ -371,7 +387,7 @@
   /* ── 別画像から識別アンカーを自動配置 ───────────────── */
   async function addAnchorFromImage(dataURL) {
     if (!S.refImg) { UI.toast('先に基準画像を読み込んでください', 'warning'); return; }
-    if (!S.cvReady) { UI.toast('OpenCV.js 読み込み中です', 'warning'); return; }
+    if (!S.serverReady) { UI.toast('サーバーに接続中です', 'warning'); return; }
     try {
       const img = await dataURLtoImg(dataURL);
       const refCanvas = canvasFromImg(S.refImg);
@@ -567,7 +583,7 @@
   }
 
   async function runRecognize() {
-    if (!S.cvReady) return UI.toast('OpenCV.js 読み込み中です', 'warning');
+    if (!S.serverReady) return UI.toast('サーバーに接続中です', 'warning');
     if (!S.recogCanvas) return UI.toast('画像を読み込んでください', 'warning');
     if (!S.forms.length) return UI.toast('先に帳票を登録してください', 'warning');
 
@@ -1193,7 +1209,7 @@
   /* 指定範囲のページを順に一括OCR（pageSource = { pages:[n…], total, getPage(n), done() }）。
      大量ページでも 1枚ずつ描画→OCR→破棄するためメモリは一定。中止可能。 */
   async function runBatchPdf(src, opts) {
-    if (!S.cvReady) { src.done && src.done(); return UI.toast('OpenCV.js 読み込み中です', 'warning'); }
+    if (!S.serverReady) { src.done && src.done(); return UI.toast('サーバーに接続中です', 'warning'); }
     if (!S.forms.length) { src.done && src.done(); return UI.toast('先に帳票を登録してください', 'warning'); }
     const posWarnBefore = { ...S.posWarnCounts };   // このバッチ中に増えた件数だけをサマリで報告するため
     const resuming = !!(opts && opts.resuming);
@@ -2601,6 +2617,7 @@
     loadPresets();
     loadRecPresets();
     loadRecLastSettings();
+    checkServerHealth();
   }
 
   document.addEventListener('DOMContentLoaded', init);
