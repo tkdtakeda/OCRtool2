@@ -2535,7 +2535,8 @@
     });
 
     /* はじめての方向けガイド（初回のみ表示・閉じたら記憶） */
-    try { if (!localStorage.getItem('ocrtool_onboard_dismissed')) $('onboardBar').classList.remove('hidden'); } catch (_) {}
+    /* 表示要否の決定はindex.html側のインラインscriptへ移した（初回ペイント前に確定させ、
+       レイアウトシフト(CLS)を防ぐため）。ここでは閉じる操作のみ扱う。 */
     $('onboardClose').addEventListener('click', () => { $('onboardBar').classList.add('hidden'); try { localStorage.setItem('ocrtool_onboard_dismissed', '1'); } catch (_) {} });
     $('onboardHelp').addEventListener('click', () => $('helpModal').classList.remove('hidden'));
 
