@@ -6,10 +6,28 @@ Responsibility: テンプレートマッチング処理のみ。Flask には触�
 採用しきい値（acceptFloor/acceptConf/nearExact/marginMin）はこのスコア分布に
 対して調整されているため、ここでスコアの出方が変われば帳票判定の挙動が
 変わってしまう。
+
+cv2.matchTemplate(TM_CCOEFF_NORMED)は探索画像1枚あたり数十ms掛かりうる重い
+呼び出しで、これを 角度×スケール×アンカー数 ぶん繰り返すため、アンカー数の
+多い帳票では直列実行だと数秒〜数十秒に積み上がる（実測: 探索画像を
+MAX_WORKING_DIMまで縮小した後でも1回あたり50〜80ms、90回で3.7秒）。
+同じ(角度,スケール)内の各アンカーへの照合は完全に独立しているため、
+ThreadPoolExecutorで並列化する（cv2の処理はGILを解放するため、Pythonの
+スレッドでも実際にマルチコアが働く）。スコアの数値自体は並列化の有無で
+一切変わらない（各アンカーの計算そのものは変更していないため）。
+
+（検討メモ）粗密2段探索（画像を大きく縮小して大まかな位置を求め、その周辺だけ
+元解像度で再探索する「ピラミッド探索」）も試したが、罫線グリッドや同系統の
+文字が並ぶ帳票では類似した領域が複数箇所にでき、粗い段で本来と別の領域を
+選んでしまい位置が大きく外れるケースが実測で確認された（60ケース中17件、
+最大で1000px超のズレ）。精度を落としてまで採用する最適化ではないため見送り、
+並列化のみを採用している。
 """
 from __future__ import annotations
 
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import cv2
@@ -21,6 +39,7 @@ STD_LO = 6.0
 STD_HI = 18.0
 STD_PENALTY_FLOOR = 0.25
 MAX_WORKING_DIM = 1800
+MAX_MATCH_WORKERS = 8
 
 
 def _clamp01(v: float) -> float:
@@ -115,23 +134,38 @@ def match_all(
 
     angles = _build_angles(angle_range, angle_step)
 
+    # 1) 角度×スケールぶんの探索画像を先に作る（rotate/resizeは1回数msと軽いので直列でよい）。
+    prepared: list[tuple[float, float, np.ndarray]] = []
     for angle in angles:
         rotated = _rotate_gray(full_gray, angle)
         for f in scale_factors:
             scaled = rotated if abs(f - 1) < 1e-6 else _resize_gray(rotated, 1.0 / f)
-            for tm in tpl_mats:
-                score, (lx, ly) = _run_match(scaled, tm['mat'], tm['std'])
-                cur = results[tm['id']]
-                if score > cur['score']:
-                    results[tm['id']] = {
-                        'score': score,
-                        'angle': angle,
-                        'scale': f,
-                        'loc': {
-                            'x': js_round(lx * f / work_scale),
-                            'y': js_round(ly * f / work_scale),
-                        },
-                    }
+            prepared.append((angle, f, scaled))
+
+    # 2) 重いのは cv2.matchTemplate 自体（探索画像1枚あたり数十ms）。
+    #    (角度, スケール, アンカー) の組はすべて互いに独立しているため、フラットに
+    #    まとめて並列実行する（角度/スケール単位で区切って並列化するより、
+    #    アンカー数が少ない帳票でも常に並列度を確保できる）。
+    n_workers = max(1, min(MAX_MATCH_WORKERS, len(prepared) * len(tpl_mats), os.cpu_count() or 4))
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        jobs = [
+            (tm, angle, f, pool.submit(_run_match, scaled, tm['mat'], tm['std']))
+            for angle, f, scaled in prepared
+            for tm in tpl_mats
+        ]
+        for tm, angle, f, fut in jobs:
+            score, (lx, ly) = fut.result()
+            cur = results[tm['id']]
+            if score > cur['score']:
+                results[tm['id']] = {
+                    'score': score,
+                    'angle': angle,
+                    'scale': f,
+                    'loc': {
+                        'x': js_round(lx * f / work_scale),
+                        'y': js_round(ly * f / work_scale),
+                    },
+                }
 
     # -inf は「テンプレートが1件も無い」場合以外は起きないが、念のため 0 に丸める
     for r in results.values():

@@ -15,6 +15,7 @@ pywebview から直接インポートしてバックグラウンドスレッド�
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 import webbrowser
@@ -47,6 +48,8 @@ def main() -> int:
 
     info = ocr.health_info()
     print(f'OCRエンジン: {info["ocrEngine"]}（Tesseract {info["tesseractVersion"]}, 言語: {", ".join(info["languages"]) or "?"}）')
+    print(f'検出したCPUコア数: {os.cpu_count()}（マッチング処理の並列度の上限。'
+          f'少ない場合は並列化の効果が限定的です）')
 
     app = create_app()
     url = f'http://127.0.0.1:{args.port}/'
