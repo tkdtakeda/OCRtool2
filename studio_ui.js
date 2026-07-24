@@ -63,17 +63,21 @@ const StudioUI = (() => {
   /* ── 識別アンカー / OCR領域 ミニリスト ──────────────── */
   /* onRename: 名前をその場で書き換え。空欄への変更は元の名前に戻す（拒否）。
      onReposition: 「範囲を描き直す」ボタン。押すとキャンバス側が再ドラッグ待ちになる。 */
-  function renderAnchorList(anchors, onRemove, onRename, onReposition) {
+  function renderAnchorList(anchors, onRemove, onRename, onReposition, onToggleAlign) {
     const c = $('anchorList'); $('anchorCount').textContent = anchors.length;
     if (!anchors.length) { c.innerHTML = '<div class="mini-empty">未登録（左の画像上にドラッグ）</div>'; return; }
     c.innerHTML = '';
     anchors.forEach((a, i) => {
       const item = document.createElement('div'); item.className = 'mini-item'; item.dataset.anchorId = a.id;
+      if (a.alignOnly) item.classList.add('is-alignonly');
       item.innerHTML = `
         <span class="midx" style="background:${ANCHOR_COLOR}">${i + 1}</span>
         <img class="mthumb" src="${a.dataURL}" alt="">
         <input class="mname-edit" value="${esc(a.name)}" title="名前を変更" spellcheck="false">
         <span class="mpos">${a.refX},${a.refY}</span>
+        <label class="malign" title="ONにすると、この目印は帳票の自動判定には使わず、位置合わせ（傾き・拡大率の補正）専用になります。狭い精密アンカーが他の帳票へ誤って一致して判定を狂わせるのを防ぎ、判定処理も少し速くなります。">
+          <input type="checkbox" ${a.alignOnly ? 'checked' : ''}><span>位置合わせ専用</span>
+        </label>
         <button class="btn-icon-sm mini-reposition" title="範囲を描き直す"><i class="fas fa-vector-square"></i></button>
         <button class="btn-icon-sm mini-del" title="削除"><i class="fas fa-xmark"></i></button>`;
       const nameInp = item.querySelector('.mname-edit');
@@ -81,6 +85,11 @@ const StudioUI = (() => {
         const v = nameInp.value.trim();
         if (!v) { nameInp.value = a.name; return; }   // 空欄は許可しない
         onRename && onRename(a.id, v);
+      });
+      const alignChk = item.querySelector('.malign input');
+      alignChk.addEventListener('change', () => {
+        item.classList.toggle('is-alignonly', alignChk.checked);
+        onToggleAlign && onToggleAlign(a.id, alignChk.checked);
       });
       item.querySelector('.mini-reposition').addEventListener('click', () => onReposition && onReposition(a.id));
       item.querySelector('.mini-del').addEventListener('click', () => onRemove(a.id));

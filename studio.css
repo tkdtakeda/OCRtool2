@@ -140,6 +140,10 @@
 .mini-item .mname-edit:hover { border-color: var(--c-border); }
 .mini-item .mname-edit:focus { outline: none; border-color: var(--c-pri); background: #fff; box-shadow: 0 0 0 2px var(--c-pri-lt); }
 .mini-item .btn-icon-sm { flex-shrink: 0; }
+.mini-item .malign { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; font-size: .63rem; color: var(--c-text-3); cursor: pointer; user-select: none; white-space: nowrap; }
+.mini-item .malign input { margin: 0; cursor: pointer; }
+.mini-item.is-alignonly { background: var(--c-pri-lt); border-color: var(--c-pri); }
+.mini-item.is-alignonly .malign { color: var(--c-pri); font-weight: 600; }
 /* 「削除」と紛らわしくならないよう、再設定ボタンは危険色ではなくプライマリ色でホバー */
 .mini-reposition:hover { background: var(--c-pri-lt); color: var(--c-pri); }
 .mini-region { display: flex; flex-direction: column; gap: 3px; }
