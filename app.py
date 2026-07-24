@@ -18,6 +18,7 @@ fetchラッパーはエンドポイントごとに使い分ける（例: /api/ro
 from __future__ import annotations
 
 import os
+import time
 
 import cv2
 from flask import Flask, jsonify, request, send_from_directory
@@ -67,6 +68,7 @@ def create_app() -> Flask:
     # ── 画像マッチング（MatcherEngine.matchAll 相当） ──────
     @app.post('/api/match')
     def api_match():
+        t0 = time.perf_counter()
         try:
             body = request.get_json(force=True, silent=False) or {}
             full_rgba = data_url_to_rgba(body['image'])
@@ -74,41 +76,54 @@ def create_app() -> Flask:
                 {'id': t['id'], 'rgba': data_url_to_rgba(t['image'])}
                 for t in (body.get('templates') or [])
             ]
+            angle_range = body.get('angleRange', 2)
+            angle_step = body.get('angleStep', 1)
+            scale_factors = body.get('scaleFactors') or [1]
             results = matcher.match_all(
                 full_rgba, templates,
-                angle_range=body.get('angleRange', 2),
-                angle_step=body.get('angleStep', 1),
-                scale_factors=body.get('scaleFactors') or [1],
+                angle_range=angle_range, angle_step=angle_step, scale_factors=scale_factors,
             )
+            print(f'[perf] /api/match {(time.perf_counter() - t0) * 1000:.0f}ms '
+                  f'(templates={len(templates)}, angleRange={angle_range}, angleStep={angle_step}, '
+                  f'scales={len(scale_factors)}, image={full_rgba.shape[1]}x{full_rgba.shape[0]})')
             return jsonify({'results': results, 'error': None})
         except Exception as e:  # noqa: BLE001 - JS側は必ずerrorを見て例外化する
+            print(f'[perf] /api/match failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
             return jsonify({'results': {}, 'error': str(e)})
 
     # ── 傾き補正（LineRemovalProcessor.rotateCanvas 相当） ──
     @app.post('/api/rotate')
     def api_rotate():
+        t0 = time.perf_counter()
         try:
             body = request.get_json(force=True, silent=False) or {}
             rgba = data_url_to_rgba(body['image'])
             rotated = processor.rotate(rgba, float(body.get('angle', 0)))
+            print(f'[perf] /api/rotate {(time.perf_counter() - t0) * 1000:.0f}ms')
             return jsonify({'image': rgba_to_data_url(rotated), 'error': None})
         except Exception as e:  # noqa: BLE001 - JS側は失敗時ローカルコピーへフォールバック
+            print(f'[perf] /api/rotate failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
             return jsonify({'image': None, 'error': str(e)})
 
     # ── 罫線除去（LineRemovalProcessor.process 相当） ──────
     @app.post('/api/line-removal')
     def api_line_removal():
+        t0 = time.perf_counter()
         try:
             body = request.get_json(force=True, silent=False) or {}
             rgba = data_url_to_rgba(body['image'])
             mats = processor.process(rgba, body.get('params') or {})
+            print(f'[perf] /api/line-removal {(time.perf_counter() - t0) * 1000:.0f}ms '
+                  f'(image={rgba.shape[1]}x{rgba.shape[0]})')
             return jsonify({'images': [rgba_to_data_url(m) for m in mats], 'error': None})
         except Exception as e:  # noqa: BLE001
+            print(f'[perf] /api/line-removal failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
             return jsonify({'images': [], 'error': str(e)})
 
     # ── OCR（OcrProcessor.recognize 相当） ────────────────
     @app.post('/api/ocr')
     def api_ocr():
+        t0 = time.perf_counter()
         try:
             body = request.get_json(force=True, silent=False) or {}
             rgba = data_url_to_rgba(body['image'])
@@ -118,9 +133,11 @@ def create_app() -> Flask:
                 lang=body.get('lang') or 'eng',
                 whitelist=body.get('whitelist') or '',
             )
+            print(f'[perf] /api/ocr {(time.perf_counter() - t0) * 1000:.0f}ms')
             return jsonify(result)
         except Exception as e:  # noqa: BLE001 - ocr.recognize自体は例外を投げないが、
             # デコード失敗などここより手前の異常はここで拾う
+            print(f'[perf] /api/ocr failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
             return jsonify({'fullText': '', 'words': [], 'symbols': [], 'lines': [],
                              'confidence': 0, 'error': str(e)})
 
