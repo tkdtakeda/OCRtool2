@@ -62,6 +62,7 @@ def create_app() -> Flask:
             'ocrEngine': info['ocrEngine'],
             'tesseractVersion': info['tesseractVersion'],
             'languages': info['languages'],
+            'cpuCount': os.cpu_count(),
             'error': None if ocr.is_ready() else ocr.init_error(),
         })
 
@@ -85,7 +86,8 @@ def create_app() -> Flask:
             )
             print(f'[perf] /api/match {(time.perf_counter() - t0) * 1000:.0f}ms '
                   f'(templates={len(templates)}, angleRange={angle_range}, angleStep={angle_step}, '
-                  f'scales={len(scale_factors)}, image={full_rgba.shape[1]}x{full_rgba.shape[0]})')
+                  f'scales={len(scale_factors)}, image={full_rgba.shape[1]}x{full_rgba.shape[0]}, '
+                  f'cpuCount={os.cpu_count()})')
             return jsonify({'results': results, 'error': None})
         except Exception as e:  # noqa: BLE001 - JS側は必ずerrorを見て例外化する
             print(f'[perf] /api/match failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
