@@ -57,20 +57,40 @@ if not errorlevel 1 (
 echo [3/4] Installing required packages, please wait...
 echo       (first run may take a few minutes to download)
 echo.
+set PIPTRY=0
+
+:pipinstall
+set /a PIPTRY+=1
 %PYCMD% -m pip install -r requirements.txt
-if errorlevel 1 (
+if not errorlevel 1 goto :startserver
+
+if !PIPTRY! LSS 3 (
     echo.
-    echo [ERROR] Failed to install required packages.
-    echo Please check the messages above ^(lines starting with ERROR^).
+    echo Install did not finish cleanly ^(attempt !PIPTRY!/3^). This can
+    echo happen if antivirus/security software briefly locks a newly
+    echo downloaded file. Waiting a few seconds and trying again...
     echo.
-    echo If you saw "Proxy" / "407" / "authentication required" above,
-    echo this network needs a proxy with credentials. Create a file named
-    echo proxy.txt in this same folder containing one line like:
-    echo   http://username:password@proxyserver:port
-    echo Ask your IT department for the exact address if you do not know it.
-    echo Then run run.bat again. See README.md for more details.
-    goto :end
+    ping -n 6 127.0.0.1 >nul
+    goto :pipinstall
 )
+
+echo.
+echo [ERROR] Failed to install required packages after 3 attempts.
+echo Please check the messages above ^(lines starting with ERROR^).
+echo.
+echo If you saw "Proxy" / "407" / "authentication required" above,
+echo this network needs a proxy with credentials. Create a file named
+echo proxy.txt in this same folder containing one line like:
+echo   http://username:password@proxyserver:port
+echo Ask your IT department for the exact address if you do not know it.
+echo.
+echo If you saw "WinError 32" / "being used by another process" above,
+echo antivirus/security software may be locking temporary files. Try
+echo running run.bat again, or ask IT to exclude this folder and your
+echo Python installation folder from real-time scanning.
+echo.
+echo See README.md for more details.
+goto :end
 
 :startserver
 echo.
