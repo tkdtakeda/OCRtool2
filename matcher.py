@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -94,8 +95,11 @@ def _std_dev_of(gray: np.ndarray) -> float:
 
 
 def _run_match(full_gray: np.ndarray, tpl_gray: np.ndarray, tpl_std: float):
+    """戻り値の3つ目は、この1回の照合に掛かった実時間(ms)。並列区間の実測時間と
+    比べて『実効の並列度（＝直列合計÷実測）』を出すための診断用。"""
+    t0 = time.perf_counter()
     if tpl_gray.shape[0] > full_gray.shape[0] or tpl_gray.shape[1] > full_gray.shape[1]:
-        return 0.0, (0, 0)
+        return 0.0, (0, 0), (time.perf_counter() - t0) * 1000
     res = cv2.matchTemplate(full_gray, tpl_gray, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, max_loc = cv2.minMaxLoc(res)
     x, y = max_loc
@@ -103,7 +107,7 @@ def _run_match(full_gray: np.ndarray, tpl_gray: np.ndarray, tpl_std: float):
     window_std = _std_dev_of(roi)
     reliability = min(_std_ramp(tpl_std), _std_ramp(window_std))
     score = float(max_val) * (STD_PENALTY_FLOOR + (1 - STD_PENALTY_FLOOR) * reliability)
-    return score, (int(x), int(y))
+    return score, (int(x), int(y)), (time.perf_counter() - t0) * 1000
 
 
 def _build_angles(angle_range: float, angle_step: float) -> list[float]:
@@ -161,6 +165,8 @@ def match_all(
     #    まとめて並列実行する（角度/スケール単位で区切って並列化するより、
     #    アンカー数が少ない帳票でも常に並列度を確保できる）。
     n_workers = max(1, min(MAX_MATCH_WORKERS, len(prepared) * len(tpl_mats), os.cpu_count() or 4))
+    par_t0 = time.perf_counter()
+    serial_ms = 0.0
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         jobs = [
             (tm, angle, f, pool.submit(_run_match, scaled, tm['mat'], tm['std']))
@@ -168,7 +174,8 @@ def match_all(
             for tm in tpl_mats
         ]
         for tm, angle, f, fut in jobs:
-            score, (lx, ly) = fut.result()
+            score, (lx, ly), call_ms = fut.result()
+            serial_ms += call_ms
             cur = results[tm['id']]
             if score > cur['score']:
                 results[tm['id']] = {
@@ -180,6 +187,13 @@ def match_all(
                         'y': js_round(ly * f / work_scale),
                     },
                 }
+    # 実効の並列度を診断: 各照合の実時間合計(serial_ms)を並列区間の実測(par_wall)で割る。
+    # ≈workers なら並列が効いている（1回が重いだけ→テンプレ/画像を小さくする方針）。
+    # ≈1 なら並列が効いていない（GIL等で直列化→プロセス並列やcvThreads見直しが必要）。
+    par_wall = (time.perf_counter() - par_t0) * 1000
+    print(f'[perf]   match_all parallel: wall={par_wall:.0f}ms serialSum={serial_ms:.0f}ms '
+          f'speedup={serial_ms / par_wall:.1f}x workers={n_workers} calls={len(prepared) * len(tpl_mats)} '
+          f'avgCall={serial_ms / max(1, len(prepared) * len(tpl_mats)):.0f}ms')
 
     # -inf は「テンプレートが1件も無い」場合以外は起きないが、念のため 0 に丸める
     for r in results.values():
