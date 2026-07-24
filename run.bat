@@ -1,14 +1,13 @@
 @echo off
-chcp 65001 >nul
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo ============================================
-echo  帳票OCR統合ツール
+echo  OCR Tool - Server Launcher
 echo ============================================
 echo.
 
-echo [1/3] Pythonを確認しています...
+echo [1/3] Checking for Python...
 set PYCMD=
 for /f "delims=" %%v in ('python --version 2^>^&1') do set PYVER=%%v
 echo %PYVER% | findstr /b /c:"Python " >nul
@@ -25,41 +24,42 @@ if not errorlevel 1 (
 )
 
 echo.
-echo [エラー] Python が見つかりませんでした。
-echo   ・「python」コマンドはあるがストア版の案内が出る場合は、設定の
-echo     「アプリ実行エイリアス」で python.exe / python3.exe をオフにしてから、
-echo     https://www.python.org/downloads/ の公式インストーラーを使ってください。
-echo   ・インストール時は必ず「Add python.exe to PATH」にチェックを入れてください。
-echo   ・インストール後は一度このウィンドウを閉じ、run.bat を開き直してください。
+echo [ERROR] Python was not found.
+echo   If typing "python" opens the Microsoft Store, Python is not really
+echo   installed - turn off the "python" App Execution Alias first:
+echo   Settings, Apps, Advanced app settings, App execution aliases.
+echo   Then install Python from https://www.python.org/downloads/
+echo   IMPORTANT: check "Add python.exe to PATH" during setup.
+echo   After installing, close this window and double-click run.bat again.
 goto :end
 
 :havepython
-echo   使用するPython: %PYCMD% ( %PYVER% )
+echo   Using: %PYCMD%  ^( %PYVER% ^)
 echo.
 
-echo [2/3] 依存パッケージを確認・インストールしています...
-echo       （初回はダウンロードに数分かかることがあります。進捗が表示されます）
+echo [2/3] Installing required packages, please wait...
+echo       (first run may take a few minutes to download)
 echo.
 %PYCMD% -m pip install -r requirements.txt
 if errorlevel 1 (
     echo.
-    echo [エラー] 依存パッケージのインストールに失敗しました。
-    echo 上に表示されたメッセージ（赤字や ERROR で始まる行）をご確認ください。
+    echo [ERROR] Failed to install required packages.
+    echo Please check the messages above ^(lines starting with ERROR^).
     goto :end
 )
 
 echo.
-echo [3/3] サーバーを起動します。
-echo       終了するにはこのウィンドウを選んで Ctrl+C を押してください。
+echo [3/3] Starting the server.
+echo       Press Ctrl+C in this window to stop it.
 echo.
 %PYCMD% run_server.py
 echo.
-echo サーバーが終了しました。
+echo Server stopped.
 
 :end
 echo.
 echo ============================================
-echo 何かキーを押すとこのウィンドウを閉じます。
-echo （エラーが出た場合は、その内容を控えてご連絡ください）
+echo Press any key to close this window.
+echo If there was an error above, please note it down first.
 echo ============================================
 pause >nul
