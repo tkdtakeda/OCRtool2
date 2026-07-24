@@ -84,10 +84,12 @@ def create_app() -> Flask:
                 full_rgba, templates,
                 angle_range=angle_range, angle_step=angle_step, scale_factors=scale_factors,
             )
+            tpl_dims = [(t['rgba'].shape[1], t['rgba'].shape[0]) for t in templates]
+            max_tpl = max((w * h, f'{w}x{h}') for w, h in tpl_dims)[1] if tpl_dims else '-'
             print(f'[perf] /api/match {(time.perf_counter() - t0) * 1000:.0f}ms '
                   f'(templates={len(templates)}, angleRange={angle_range}, angleStep={angle_step}, '
                   f'scales={len(scale_factors)}, image={full_rgba.shape[1]}x{full_rgba.shape[0]}, '
-                  f'cpuCount={os.cpu_count()})')
+                  f'maxTemplate={max_tpl}, cpuCount={os.cpu_count()}, cvThreads={cv2.getNumThreads()})')
             return jsonify({'results': results, 'error': None})
         except Exception as e:  # noqa: BLE001 - JS側は必ずerrorを見て例外化する
             print(f'[perf] /api/match failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')

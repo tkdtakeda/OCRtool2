@@ -35,11 +35,25 @@ import numpy as np
 
 from imaging import js_round
 
+# 並列化は下の ThreadPoolExecutor で (角度×スケール×アンカー) 単位に行う。その一方で
+# OpenCV自身も matchTemplate 1回ごとに内部で全コアを使おうとするため、両者を放置すると
+# 「プールのNスレッド × OpenCVの内部Mスレッド」が物理コアを奪い合う（オーバー
+# サブスクリプション）。個々のmatchTemplateが既に全コアを埋めてしまうと、プールを
+# 足しても実際には並列化されず（各コアが1呼び出しで飽和）、コンテキストスイッチと
+# キャッシュ競合のぶんだけ純粋に遅くなる。実測でも6アンカー・90回の照合が想定(3.7s)の
+# 約9倍(30s超)掛かる症状が出ており、この二重並列が主因とみられる。
+# 対策として OpenCV の内部スレッドは切り(=各呼び出しは1コア)、並列度はプール側だけで
+# 作る。これが自前でOpenCV呼び出しを並列化するときの定石。matchTemplateの数値結果は
+# スレッド数に依らず不変なので、スコア＝帳票判定の挙動には一切影響しない。
+cv2.setNumThreads(1)
+
 STD_LO = 6.0
 STD_HI = 18.0
 STD_PENALTY_FLOOR = 0.25
 MAX_WORKING_DIM = 1800
-MAX_MATCH_WORKERS = 8
+# プールの並列度上限。各 matchTemplate を1コアに固定した上で、コア数ぶんまで
+# 同時実行する（min(cpu_count, ...) で実機のコア数に自動でクランプされる）。
+MAX_MATCH_WORKERS = 16
 
 
 def _clamp01(v: float) -> float:
