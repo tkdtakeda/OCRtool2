@@ -7,3 +7,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# ローカルの秘匿情報（プロキシ認証情報など）。誤ってコミットしないよう除外
+proxy.txt
