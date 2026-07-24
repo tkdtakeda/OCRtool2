@@ -369,7 +369,7 @@ const Recognizer = (() => {
     /* ③ 傾き補正 */
     stage('傾き補正', 0.1);
     const angle = matchInfo.angle || 0;
-    const rotated = LineRemovalProcessor.rotateCanvas(sourceCanvas, angle);
+    const rotated = await LineRemovalProcessor.rotateCanvas(sourceCanvas, angle);
     const tRotate = performance.now();
 
     /* ④ 原点の再ローカライズ: 全アンカーを角度固定で再マッチ → 相似変換を推定
@@ -433,23 +433,23 @@ const Recognizer = (() => {
     /* ⑤ 罫線除去（登録された罫線除去パラメータを引き継ぎ） */
     stage('罫線除去', 0.45);
     const params = form.lineRemoval || LineRemovalProcessor.defaultParams();
-    const proc   = LineRemovalProcessor.process(rotated, params);
+    const proc   = await LineRemovalProcessor.process(rotated, params);
     const tLineRemoval = performance.now();
     console.log(`[perf]   prepare: rotate=${(tRotate - tPrepStart).toFixed(0)}ms localize(anchor${anchors.length})=${(tLocalize - tRotate).toFixed(0)}ms lineRemoval=${(tLineRemoval - tLocalize).toFixed(0)}ms`);
     if (proc.error) {
       LineRemovalProcessor.cleanupMats(proc.mats);
       return { angle, transform, anchorPoints, resultCanvas: null, previewMats: [], error: proc.error, matchQuality };
     }
-    /* mats[3] = 罫線除去結果。OCR 入力用に独立キャンバスへ描画 */
+    /* mats[3] = 罫線除去結果（サーバーから受け取り済みのcanvas）。OCR 入力用に
+       独立キャンバスへ描画 */
     const resultCanvas = document.createElement('canvas');
     const resMat = proc.mats[3];
-    resultCanvas.width  = resMat.cols;
-    resultCanvas.height = resMat.rows;
-    /* renderToCanvas内部はcv.imshowで初めてこのcanvasにgetContext('2d')するため、
-       このcanvasはOCR領域ごとに何度も切り出し(drawImage)で読み出される最重要の
-       中間結果でもある。cv.imshowより先にここで一度getContextしてオプションを
-       固定しておく（canvasの2Dコンテキストは最初の生成時のオプションが以後も
-       維持されるため、後からcv.imshowが素のgetContext('2d')を呼んでも上書きされない）。 */
+    resultCanvas.width  = resMat.width;
+    resultCanvas.height = resMat.height;
+    /* このcanvasはOCR領域ごとに何度も切り出し(drawImage)で読み出される最重要の
+       中間結果のため、最初の生成時にwillReadFrequentlyを固定しておく（canvasの
+       2Dコンテキストは最初のgetContext呼び出しのオプションが以後も維持されるため、
+       後段のrenderToCanvas内のgetContextで上書きされないよう先に確定させる）。 */
     resultCanvas.getContext('2d', { willReadFrequently: true });
     LineRemovalProcessor.renderToCanvas(resMat, resultCanvas);
 

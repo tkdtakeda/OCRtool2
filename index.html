@@ -16,8 +16,8 @@
 <div id="loadingOverlay" class="loading-overlay">
   <div class="loading-box">
     <i class="fas fa-circle-notch fa-spin loading-spin"></i>
-    <p class="loading-title">OpenCV.js を読み込み中</p>
-    <p id="loadingMsg" class="loading-sub">インターネット接続が必要です</p>
+    <p class="loading-title">サーバーに接続中</p>
+    <p id="loadingMsg" class="loading-sub">しばらくお待ちください</p>
   </div>
 </div>
 
@@ -983,73 +983,9 @@
 
 <!-- Toast -->
 <div id="toastContainer" class="toast-container"></div>
-<script>
-/* OpenCV.js ローダー（file:// でサーバー無しでも開けるようにする）
-   従来使っていた docs.opencv.org の opencv.js は、file:// で直接開いた（＝ローカル
-   サーバー無しの）ページからは読み込めない（Cross-Origin-Resource-Policy 由来の
-   net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin。加えて 403/ACAO無しで fetch も不可）。
-   そこで jsDelivr 配信の opencv.js を使う（jsDelivr は CORP:cross-origin を返すため
-   file:// でも <script src> で読める。tesseract/pdf.js が動くのと同じ理由）。
-   @techstark/opencv-js は wasm を data URI で内包した単一ファイルで、グローバル cv に
-   「初期化完了で解決する Promise」を入れる。従来の docs 版（グローバル Module を読み
-   onRuntimeInitialized を呼ぶクラシック型）も、ローカルに opencv.js を置いた場合に
-   備えて両対応する。読み込みは各ソースにつき ①<script src> ②失敗時 fetch→Blob 注入
-   （CORP は no-cors 埋め込みのみ制限。ACAO があれば file:// でも取得でき回避）の順。 */
-var Module = { onRuntimeInitialized: function () { document.dispatchEvent(new CustomEvent('cv-ready')); } };
-(function () {
-  var SOURCES = [
-    'opencv.js',                                                                    // ローカル同梱（あれば最優先）
-    'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.8.0-release.10/dist/opencv.js',
-  ];
-  var idx = 0, settled = false;
-  document.addEventListener('cv-ready', function () { settled = true; }, { once: true });
-  function ready() { if (!settled) document.dispatchEvent(new CustomEvent('cv-ready')); }
-
-  /* ロード直後、ビルド種別に応じて初期化完了を cv-ready に橋渡しする。
-     戻り値 true=このロードで解決処理を担当した / false=クラシック型なので
-     事前定義の Module.onRuntimeInitialized に任せる。 */
-  function wireInit() {
-    var c = window.cv;
-    if (c && typeof c.then === 'function') {          // techstark: Promise を解決してから公開
-      c.then(function (resolved) { window.cv = resolved; ready(); }, function () { nextSource(); });
-      return true;
-    }
-    if (c && c.Mat) { ready(); return true; }         // 既に初期化済み
-    return false;                                     // クラシック型は Module.onRuntimeInitialized 経由
-  }
-  function injectBlob(code) {
-    var url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
-    var s = document.createElement('script');
-    s.src = url;
-    s.onload = function () { setTimeout(function () { URL.revokeObjectURL(url); }, 0); wireInit(); };
-    s.onerror = nextSource;                           // 注入したのに実行できなければ次のソースへ
-    document.body.appendChild(s);
-  }
-  function nextSource() {
-    if (settled) return;
-    if (idx >= SOURCES.length) { document.dispatchEvent(new CustomEvent('cv-error')); return; }
-    var url = SOURCES[idx++];
-    var s = document.createElement('script');
-    s.async = true; s.src = url;
-    s.onload = function () { wireInit(); };
-    s.onerror = function () {
-      if (settled) return;
-      /* fetch() での再取得は http(s) の場合のみ意味がある（CORPでの<script src>ブロックを
-         fetch+Blob注入で回避できるのはCORS越しの取得ができるケースだけ）。ローカル同梱
-         ファイル（相対パス）が無い場合の404はここでは再取得しても無意味（file:// への
-         fetch はブラウザ仕様上ブロックされるため）なので、余計なエラーを console に出さず
-         次のソースへ進む。 */
-      if (!/^https?:\/\//i.test(url)) { nextSource(); return; }
-      fetch(url).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
-                .then(injectBlob)
-                .catch(nextSource);                   // 取得も不可 → 次のソースへ
-    };
-    document.body.appendChild(s);
-  }
-  nextSource();
-})();
-</script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+<!-- OCR・画像マッチングはPythonサーバー側（app.py等）へ移管したため、
+     以前ここにあったOpenCV.js/Tesseract.jsのCDN読み込みは不要になった。
+     PDFのページ画像化にのみ使うpdf.jsだけ残す。 -->
 <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
 <!-- engines -->
 <script src="processor.js"></script>

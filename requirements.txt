@@ -1,0 +1,14 @@
+# 帳票OCR統合ツール — Pythonサーバー側の依存パッケージ
+#
+# ここに書かれているものだけで、コンパイラ不要・どのOSでも `pip install -r
+# requirements.txt` が確実に通ることを優先している（tesserocrは意図的に
+# 含めていない。README.md の「文字別の確信度を上げる（任意）」を参照）。
+#
+# バージョンは緩めに固定（exact pinはユーザーのPython/OS組み合わせで
+# ビルド済みwheelが無く失敗するリスクがあるため、下限+メジャー上限のみ）。
+
+flask>=3.0,<4.0
+numpy>=1.26,<3.0
+opencv-python-headless>=4.9,<5.0
+pillow>=10.2,<12.0
+pytesseract>=0.3.10,<0.4.0
