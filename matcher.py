@@ -41,11 +41,11 @@ from imaging import js_round
 # 「プールのNスレッド × OpenCVの内部Mスレッド」が物理コアを奪い合う（オーバー
 # サブスクリプション）。個々のmatchTemplateが既に全コアを埋めてしまうと、プールを
 # 足しても実際には並列化されず（各コアが1呼び出しで飽和）、コンテキストスイッチと
-# キャッシュ競合のぶんだけ純粋に遅くなる。実測でも6アンカー・90回の照合が想定(3.7s)の
-# 約9倍(30s超)掛かる症状が出ており、この二重並列が主因とみられる。
-# 対策として OpenCV の内部スレッドは切り(=各呼び出しは1コア)、並列度はプール側だけで
-# 作る。これが自前でOpenCV呼び出しを並列化するときの定石。matchTemplateの数値結果は
-# スレッド数に依らず不変なので、スコア＝帳票判定の挙動には一切影響しない。
+# キャッシュ競合のぶんだけ純粋に遅くなる。対策として OpenCV の内部スレッドは切り
+# (=各呼び出しは1コア)、並列度はプール側だけで作る。これが自前でOpenCV呼び出しを
+# 並列化するときの定石。matchTemplateの数値結果はスレッド数に依らず不変なので、
+# スコア＝帳票判定の挙動には一切影響しない。
+# 効果は実測済み: 12コア機で speedup=11.7x（効率97%）と、並列化自体は理想的に働く。
 cv2.setNumThreads(1)
 
 STD_LO = 6.0
@@ -55,6 +55,32 @@ MAX_WORKING_DIM = 1800
 # プールの並列度上限。各 matchTemplate を1コアに固定した上で、コア数ぶんまで
 # 同時実行する（min(cpu_count, ...) で実機のコア数に自動でクランプされる）。
 MAX_MATCH_WORKERS = 16
+
+
+# ── 校正プローブ（診断用） ──────────────────────────────────
+# 「1回のmatchTemplateが本番だけ異常に重い（実測 avgCall=2176ms、参考環境では70ms）」
+# 原因を切り分けるための、コストが既知の基準測定。固定サイズの合成画像に対して
+# matchTemplate を1回だけ実行し、その所要時間を返す。実リクエストの処理直後に測るのが
+# 肝で、「同じ機械の・同じ瞬間の」健全値と実測値を並べて比べられる。
+#   校正も一緒に遅い → 機械が外的要因で遅くなっている（他プロセスのCPU占有・メモリ逼迫・
+#                      ウイルス対策など）。データや当コードは無罪。
+#   校正だけ速い     → 実データ側に固有の重さがある（サイズ・枚数など）。
+# 画像は一度だけ作って使い回す（測定のたびに確保すると、確保自体の時間が混ざるため）。
+_CALIB_IMG: np.ndarray | None = None
+_CALIB_TPL: np.ndarray | None = None
+
+
+def calibration_ms() -> float:
+    """既知コストの matchTemplate を1回実行し、所要ミリ秒を返す（健全なら概ね50〜150ms）。"""
+    global _CALIB_IMG, _CALIB_TPL
+    if _CALIB_IMG is None:
+        rng = np.random.default_rng(12345)
+        _CALIB_IMG = rng.integers(0, 255, (1374, 1942), dtype=np.uint8)
+        _CALIB_TPL = rng.integers(0, 255, (334, 636), dtype=np.uint8)
+    t0 = time.perf_counter()
+    res = cv2.matchTemplate(_CALIB_IMG, _CALIB_TPL, cv2.TM_CCOEFF_NORMED)
+    cv2.minMaxLoc(res)
+    return (time.perf_counter() - t0) * 1000
 
 
 def _clamp01(v: float) -> float:

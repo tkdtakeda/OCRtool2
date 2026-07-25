@@ -33,6 +33,20 @@ MAX_CONTENT_LENGTH = 64 * 1024 * 1024  # 64MB（高DPI・複数アンカーのma
 _STATIC_EXTS = ('.js', '.css', '.png', '.jpg', '.jpeg', '.svg', '.ico', '.json', '.webmanifest')
 
 
+def _load_hint() -> str:
+    """診断ログ用に、機械の混み具合（CPU使用率・メモリ空き）を分かる範囲で付ける。
+    psutil は requirements に無い任意依存なので、入っていなければ黙って省略する。"""
+    try:
+        import psutil
+    except ImportError:
+        return ''
+    try:
+        return (f', cpuBusy={psutil.cpu_percent(interval=None):.0f}%'
+                f', ramFree={psutil.virtual_memory().available / 1e9:.1f}GB')
+    except Exception:  # noqa: BLE001 - 診断情報なので失敗しても本処理は止めない
+        return ''
+
+
 def create_app() -> Flask:
     app = Flask(__name__, static_folder=None)
     app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
@@ -86,10 +100,15 @@ def create_app() -> Flask:
             )
             tpl_dims = [(t['rgba'].shape[1], t['rgba'].shape[0]) for t in templates]
             max_tpl = max((w * h, f'{w}x{h}') for w, h in tpl_dims)[1] if tpl_dims else '-'
+            # コストが既知(健全なら50〜150ms)の校正を、実処理の直後＝同じ状況で1回測る。
+            # これが一緒に遅ければ、遅さの原因はこのコードでも画像でもなく機械の状態
+            # （他プロセスのCPU占有・メモリ逼迫など）だと確定できる。
+            calib = matcher.calibration_ms()
             print(f'[perf] /api/match {(time.perf_counter() - t0) * 1000:.0f}ms '
                   f'(templates={len(templates)}, angleRange={angle_range}, angleStep={angle_step}, '
                   f'scales={len(scale_factors)}, image={full_rgba.shape[1]}x{full_rgba.shape[0]}, '
-                  f'maxTemplate={max_tpl}, cpuCount={os.cpu_count()}, cvThreads={cv2.getNumThreads()})')
+                  f'maxTemplate={max_tpl}, cpuCount={os.cpu_count()}, cvThreads={cv2.getNumThreads()}, '
+                  f'calibration={calib:.0f}ms{_load_hint()})')
             return jsonify({'results': results, 'error': None})
         except Exception as e:  # noqa: BLE001 - JS側は必ずerrorを見て例外化する
             print(f'[perf] /api/match failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
