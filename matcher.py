@@ -54,7 +54,18 @@ STD_PENALTY_FLOOR = 0.25
 MAX_WORKING_DIM = 1800
 # プールの並列度上限。各 matchTemplate を1コアに固定した上で、コア数ぶんまで
 # 同時実行する（min(cpu_count, ...) で実機のコア数に自動でクランプされる）。
+# 環境変数 OCRTOOL_MATCH_WORKERS で上書きできる。用途は実機での当たり付け:
+# スレッドを増やすほど速いとは限らず、各スレッドが確保する結果バッファ（画像サイズ×
+# テンプレサイズごとに異なる）がメモリ帯域やヒープを奪い合うと、増やすほど遅くなる。
+# 単一サイズを繰り返すベンチでは12並列が最速でも、サイズがばらつく本番では最適値が
+# 下がることがあるため、サーバー再起動だけでA/Bできるようにしてある。
 MAX_MATCH_WORKERS = 16
+try:
+    _env_workers = int(os.environ.get('OCRTOOL_MATCH_WORKERS', '') or 0)
+    if _env_workers > 0:
+        MAX_MATCH_WORKERS = _env_workers
+except ValueError:
+    pass
 
 
 # ── 校正プローブ（診断用・既定OFF） ────────────────────────
@@ -127,19 +138,29 @@ def _std_dev_of(gray: np.ndarray) -> float:
 
 
 def _run_match(full_gray: np.ndarray, tpl_gray: np.ndarray, tpl_std: float):
-    """戻り値の3つ目は、この1回の照合に掛かった実時間(ms)。並列区間の実測時間と
-    比べて『実効の並列度（＝直列合計÷実測）』を出すための診断用。"""
+    """戻り値の3つ目は、この1回の照合の内訳時間(ms) (match, minmax, std, total)。
+    並列区間の実測と比べた『実効の並列度』に加え、1回が重いときにどのOpenCV呼び出しが
+    効いているのかを切り分けるための診断用（ベンチでは matchTemplate しか測っておらず、
+    minMaxLoc と meanStdDev は本番にしか無い処理なので、ここを分けて見る必要がある）。"""
     t0 = time.perf_counter()
     if tpl_gray.shape[0] > full_gray.shape[0] or tpl_gray.shape[1] > full_gray.shape[1]:
-        return 0.0, (0, 0), (time.perf_counter() - t0) * 1000
+        return 0.0, (0, 0), (0.0, 0.0, 0.0, (time.perf_counter() - t0) * 1000)
     res = cv2.matchTemplate(full_gray, tpl_gray, cv2.TM_CCOEFF_NORMED)
+    t1 = time.perf_counter()
     _, max_val, _, max_loc = cv2.minMaxLoc(res)
+    t2 = time.perf_counter()
     x, y = max_loc
     roi = full_gray[y:y + tpl_gray.shape[0], x:x + tpl_gray.shape[1]]
     window_std = _std_dev_of(roi)
+    t3 = time.perf_counter()
     reliability = min(_std_ramp(tpl_std), _std_ramp(window_std))
     score = float(max_val) * (STD_PENALTY_FLOOR + (1 - STD_PENALTY_FLOOR) * reliability)
-    return score, (int(x), int(y)), (time.perf_counter() - t0) * 1000
+    return score, (int(x), int(y)), (
+        (t1 - t0) * 1000,   # matchTemplate
+        (t2 - t1) * 1000,   # minMaxLoc
+        (t3 - t2) * 1000,   # meanStdDev（非連続ビューのROIに対して実行）
+        (time.perf_counter() - t0) * 1000,
+    )
 
 
 def _build_angles(angle_range: float, angle_step: float) -> list[float]:
@@ -199,6 +220,7 @@ def match_all(
     n_workers = max(1, min(MAX_MATCH_WORKERS, len(prepared) * len(tpl_mats), os.cpu_count() or 4))
     par_t0 = time.perf_counter()
     serial_ms = 0.0
+    sum_match = sum_minmax = sum_std = 0.0
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         jobs = [
             (tm, angle, f, pool.submit(_run_match, scaled, tm['mat'], tm['std']))
@@ -206,8 +228,11 @@ def match_all(
             for tm in tpl_mats
         ]
         for tm, angle, f, fut in jobs:
-            score, (lx, ly), call_ms = fut.result()
+            score, (lx, ly), (ms_match, ms_minmax, ms_std, call_ms) = fut.result()
             serial_ms += call_ms
+            sum_match += ms_match
+            sum_minmax += ms_minmax
+            sum_std += ms_std
             cur = results[tm['id']]
             if score > cur['score']:
                 results[tm['id']] = {
@@ -223,9 +248,12 @@ def match_all(
     # ≈workers なら並列が効いている（1回が重いだけ→テンプレ/画像を小さくする方針）。
     # ≈1 なら並列が効いていない（GIL等で直列化→プロセス並列やcvThreads見直しが必要）。
     par_wall = (time.perf_counter() - par_t0) * 1000
+    n_calls = max(1, len(prepared) * len(tpl_mats))
     print(f'[perf]   match_all parallel: wall={par_wall:.0f}ms serialSum={serial_ms:.0f}ms '
           f'speedup={serial_ms / par_wall:.1f}x workers={n_workers} calls={len(prepared) * len(tpl_mats)} '
-          f'avgCall={serial_ms / max(1, len(prepared) * len(tpl_mats)):.0f}ms')
+          f'avgCall={serial_ms / n_calls:.0f}ms '
+          f'[match={sum_match / n_calls:.0f}ms minMaxLoc={sum_minmax / n_calls:.0f}ms '
+          f'meanStdDev={sum_std / n_calls:.0f}ms]')
 
     # -inf は「テンプレートが1件も無い」場合以外は起きないが、念のため 0 に丸める
     for r in results.values():
