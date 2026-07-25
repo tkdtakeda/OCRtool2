@@ -57,21 +57,27 @@ MAX_WORKING_DIM = 1800
 MAX_MATCH_WORKERS = 16
 
 
-# ── 校正プローブ（診断用） ──────────────────────────────────
-# 「1回のmatchTemplateが本番だけ異常に重い（実測 avgCall=2176ms、参考環境では70ms）」
-# 原因を切り分けるための、コストが既知の基準測定。固定サイズの合成画像に対して
-# matchTemplate を1回だけ実行し、その所要時間を返す。実リクエストの処理直後に測るのが
-# 肝で、「同じ機械の・同じ瞬間の」健全値と実測値を並べて比べられる。
-#   校正も一緒に遅い → 機械が外的要因で遅くなっている（他プロセスのCPU占有・メモリ逼迫・
-#                      ウイルス対策など）。データや当コードは無罪。
-#   校正だけ速い     → 実データ側に固有の重さがある（サイズ・枚数など）。
+# ── 校正プローブ（診断用・既定OFF） ────────────────────────
+# コストが既知の基準測定。固定サイズの合成画像に対して matchTemplate を1回だけ実行し、
+# 所要時間を返す。実リクエストの処理直後に測ると「同じ機械の・同じ瞬間の」健全値と
+# 実測値を並べられるので、遅さの原因を切り分けられる:
+#   校正も一緒に遅い → 機械が外的要因で遅い（他プロセスのCPU占有・メモリ逼迫など）
+#   校正だけ速い     → 実データ側に固有の重さがある
+# これで実際に「ブラウザが大量ページを処理中はサーバーがCPUを奪われ、matchTemplateが
+# 70ms→2176msに膨らむ（校正も同時に遅くなる）」ことを確認できた。診断が済んだので
+# 既定はOFF（1回あたり約70msの純粋な計測コストが乗るため）。再診断したいときは
+# 環境変数 OCRTOOL_CALIBRATION=1 を付けてサーバーを起動する。
 # 画像は一度だけ作って使い回す（測定のたびに確保すると、確保自体の時間が混ざるため）。
+CALIBRATION_ENABLED = os.environ.get('OCRTOOL_CALIBRATION', '') not in ('', '0')
 _CALIB_IMG: np.ndarray | None = None
 _CALIB_TPL: np.ndarray | None = None
 
 
-def calibration_ms() -> float:
-    """既知コストの matchTemplate を1回実行し、所要ミリ秒を返す（健全なら概ね50〜150ms）。"""
+def calibration_ms() -> float | None:
+    """既知コストの matchTemplate を1回実行し、所要ミリ秒を返す（健全なら概ね50〜150ms）。
+    OCRTOOL_CALIBRATION が未設定なら計測せず None を返す。"""
+    if not CALIBRATION_ENABLED:
+        return None
     global _CALIB_IMG, _CALIB_TPL
     if _CALIB_IMG is None:
         rng = np.random.default_rng(12345)

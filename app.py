@@ -102,13 +102,14 @@ def create_app() -> Flask:
             max_tpl = max((w * h, f'{w}x{h}') for w, h in tpl_dims)[1] if tpl_dims else '-'
             # コストが既知(健全なら50〜150ms)の校正を、実処理の直後＝同じ状況で1回測る。
             # これが一緒に遅ければ、遅さの原因はこのコードでも画像でもなく機械の状態
-            # （他プロセスのCPU占有・メモリ逼迫など）だと確定できる。
+            # （他プロセスのCPU占有・メモリ逼迫など）だと確定できる。既定OFF。
             calib = matcher.calibration_ms()
+            calib_txt = f', calibration={calib:.0f}ms' if calib is not None else ''
             print(f'[perf] /api/match {(time.perf_counter() - t0) * 1000:.0f}ms '
                   f'(templates={len(templates)}, angleRange={angle_range}, angleStep={angle_step}, '
                   f'scales={len(scale_factors)}, image={full_rgba.shape[1]}x{full_rgba.shape[0]}, '
-                  f'maxTemplate={max_tpl}, cpuCount={os.cpu_count()}, cvThreads={cv2.getNumThreads()}, '
-                  f'calibration={calib:.0f}ms{_load_hint()})')
+                  f'maxTemplate={max_tpl}, cpuCount={os.cpu_count()}, cvThreads={cv2.getNumThreads()}'
+                  f'{calib_txt}{_load_hint()})')
             return jsonify({'results': results, 'error': None})
         except Exception as e:  # noqa: BLE001 - JS側は必ずerrorを見て例外化する
             print(f'[perf] /api/match failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
