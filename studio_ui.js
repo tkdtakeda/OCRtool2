@@ -63,8 +63,21 @@ const StudioUI = (() => {
   /* ── 識別アンカー / OCR領域 ミニリスト ──────────────── */
   /* onRename: 名前をその場で書き換え。空欄への変更は元の名前に戻す（拒否）。
      onReposition: 「範囲を描き直す」ボタン。押すとキャンバス側が再ドラッグ待ちになる。 */
+  /* 帳票判定に参加する本数を併記する。ここが1ページあたりの照合回数（＝処理時間）に
+     直結する一方、判定の主証拠は最良1本のスコア(peak)で裏付けは小さな加点に留まる
+     ため、「判定は少数の識別的な目印だけ・残りは位置合わせ専用」が速度と精度の
+     両立になる。作業中にその配分が見えるようにしておく。 */
+  function updateAnchorCount() {
+    const items = $('anchorList').querySelectorAll('.mini-item');
+    const alignOnly = $('anchorList').querySelectorAll('.mini-item.is-alignonly').length;
+    $('anchorCount').textContent = alignOnly
+      ? `${items.length}（判定${items.length - alignOnly} / 位置合わせ専用${alignOnly}）`
+      : String(items.length);
+  }
+
   function renderAnchorList(anchors, onRemove, onRename, onReposition, onToggleAlign) {
-    const c = $('anchorList'); $('anchorCount').textContent = anchors.length;
+    const c = $('anchorList');
+    $('anchorCount').textContent = anchors.length;
     if (!anchors.length) { c.innerHTML = '<div class="mini-empty">未登録（左の画像上にドラッグ）</div>'; return; }
     c.innerHTML = '';
     anchors.forEach((a, i) => {
@@ -89,12 +102,14 @@ const StudioUI = (() => {
       const alignChk = item.querySelector('.malign input');
       alignChk.addEventListener('change', () => {
         item.classList.toggle('is-alignonly', alignChk.checked);
+        updateAnchorCount();
         onToggleAlign && onToggleAlign(a.id, alignChk.checked);
       });
       item.querySelector('.mini-reposition').addEventListener('click', () => onReposition && onReposition(a.id));
       item.querySelector('.mini-del').addEventListener('click', () => onRemove(a.id));
       c.appendChild(item);
     });
+    updateAnchorCount();   // 行を並べ終えてから（DOMから判定/位置合わせ専用の内訳を数える）
   }
   /* 目印の識別性チェック結果（他の帳票との高い類似度）を、既存のアンカー一覧の各行に
      警告バッジとして重ねる。renderAnchorListは呼び直さない（チェック結果が消えるため）。
