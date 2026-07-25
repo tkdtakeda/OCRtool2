@@ -162,7 +162,7 @@
     updateRepositionBanner();
     $('regCanvas').style.display = 'none'; $('regCanvasPlaceholder').style.display = 'flex';
     $('editorEmpty').classList.add('hidden'); $('editorForm').classList.remove('hidden');
-    UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+    UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly);
     UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
     refreshSteps();
     setTimeout(() => $('formNameInput').focus(), 50);
@@ -182,7 +182,7 @@
     $('editorEmpty').classList.add('hidden'); $('editorForm').classList.remove('hidden');
     setDrawMode('anchor');
     updateRepositionBanner();
-    UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+    UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly);
     UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
     await setReference(f.referenceImage.dataURL);
     refreshSteps();
@@ -230,7 +230,7 @@
         r.x = Math.round(r.x * sx); r.y = Math.round(r.y * sy);
         r.w = Math.max(1, Math.round(r.w * sx)); r.h = Math.max(1, Math.round(r.h * sy));
       });
-      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly);
       UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
       UI.toast(`基準画像のサイズが変わったため、目印${S.anchors.length}件・OCR領域${S.regions.length}件の位置を自動調整しました（${Math.round(sx * 100)}%）`, 'info', 4500);
     }
@@ -324,7 +324,7 @@
         crop.getContext('2d', { willReadFrequently: true }).drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
         Object.assign(a, { name, dataURL: crop.toDataURL('image/png'), w: p.w, h: p.h, refX: p.x, refY: p.y });
       }
-      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly);
     } else if (repos && repos.kind === 'region') {
       const r = S.regions.find(x => x.id === repos.id);
       if (r) Object.assign(r, { name, x: p.x, y: p.y, w: p.w, h: p.h });
@@ -334,7 +334,7 @@
       const crop = document.createElement('canvas'); crop.width = p.w; crop.height = p.h;
       crop.getContext('2d', { willReadFrequently: true }).drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
       S.anchors.push({ id: uid(), name, dataURL: crop.toDataURL('image/png'), w: p.w, h: p.h, refX: p.x, refY: p.y });
-      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor);
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly);
     } else {
       S.regions.push({ id: uid(), name, x: p.x, y: p.y, w: p.w, h: p.h });
       UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
@@ -344,11 +344,14 @@
     redrawRegCanvas(); refreshSteps();
     UI.toast(repos ? `「${name}」の範囲を更新しました` : `「${name}」を追加しました`, 'success', 1600);
   }
-  function removeAnchor(id) { S.anchors = S.anchors.filter(a => a.id !== id); UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor); redrawRegCanvas(); refreshSteps(); }
+  function removeAnchor(id) { S.anchors = S.anchors.filter(a => a.id !== id); UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly); redrawRegCanvas(); refreshSteps(); }
   function removeRegion(id) { S.regions = S.regions.filter(r => r.id !== id); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName); redrawRegCanvas(); refreshSteps(); }
   function setRegionPattern(id, val) { const r = S.regions.find(x => x.id === id); if (r) r.pattern = (val || '').trim(); }
   function setRegionGlobalName(id, val) { const r = S.regions.find(x => x.id === id); if (r) r.globalName = (val || '').trim(); }
   function renameAnchor(id, name) { const a = S.anchors.find(x => x.id === id); if (a) { a.name = name; redrawRegCanvas(); } }
+  /* 「位置合わせ専用」トグル: ONにするとこのアンカーは帳票の自動判定（classify/voting）
+     から外れ、位置合わせ（prepareの再ローカライズ）だけに使われる。 */
+  function setAnchorAlignOnly(id, val) { const a = S.anchors.find(x => x.id === id); if (a) { a.alignOnly = !!val; refreshSteps(); } }
   function renameRegion(id, name) { const r = S.regions.find(x => x.id === id); if (r) { r.name = name; redrawRegCanvas(); } }
   function openRegionConstraintEditor(id) {
     const r = S.regions.find(x => x.id === id); if (!r) return;
@@ -397,7 +400,7 @@
       const name = prompt('識別アンカー名を入力', `アンカー${S.anchors.length + 1}`);
       if (name === null) return;
       S.anchors.push({ id: uid(), name: (name || 'アンカー').trim(), dataURL, w: img.naturalWidth, h: img.naturalHeight, refX: r.loc.x, refY: r.loc.y });
-      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor); redrawRegCanvas(); refreshSteps();
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly); redrawRegCanvas(); refreshSteps();
       UI.toast(`自動配置しました（スコア ${r.score.toFixed(2)}, 位置 ${r.loc.x},${r.loc.y}）`, 'success', 3500);
     } catch (e) { UI.toast('処理に失敗しました: ' + e.message, 'error'); }
   }
@@ -411,10 +414,14 @@
   const ANCHOR_COLLISION_WARN = 0.45;   // voting.jsのacceptFloorと揃える（採用判定に効き得る水準）
   async function checkAnchorSimilarity() {
     if (!S.anchors.length) return UI.toast('目印を1つ以上登録してから実行してください', 'warning');
+    /* alignOnly（位置合わせ専用）は帳票判定に使わないので、他帳票との誤マッチが
+       起きても判定には影響しない＝この識別性チェックの対象外にする。 */
+    const classifyAnchors = S.anchors.filter(a => !a.alignOnly);
+    if (!classifyAnchors.length) return UI.toast('帳票判定に使う目印がありません（すべて「位置合わせ専用」です）', 'info', 5000);
     const others = S.forms.filter(f => f.id !== S.editingId && f.referenceImage && f.referenceImage.dataURL);
     if (!others.length) return UI.toast('比較できる他の帳票がありません（先に複数の帳票を登録してください）', 'info');
     UI.toast('他の帳票との類似度を確認中…', 'info', 2500);
-    const templates = S.anchors.map(a => ({ id: a.id, imageElement: null, dataURL: a.dataURL }));
+    const templates = classifyAnchors.map(a => ({ id: a.id, imageElement: null, dataURL: a.dataURL }));
     for (const t of templates) t.imageElement = await dataURLtoImg(t.dataURL);
     /* classify() の帳票判定と同じ探索条件（角度±2°・倍率0.85〜1.15）で照合し、
        実運用で本当に競合し得るスコアかを見る。 */
@@ -492,6 +499,7 @@
     if (!name) { $('formNameInput').focus(); return UI.toast('帳票名を入力してください', 'warning'); }
     if (!S.refImg) return UI.toast('基準画像を設定してください', 'warning');
     if (!S.anchors.length) return UI.toast('識別アンカーを1つ以上設定してください', 'warning');
+    if (!S.anchors.some(a => !a.alignOnly)) return UI.toast('帳票判定に使うアンカーが必要です。少なくとも1つは「位置合わせ専用」を外してください', 'warning', 5000);
     if (!S.regions.length) return UI.toast('OCR領域を1つ以上設定してください', 'warning');
 
     const form = {
@@ -542,7 +550,7 @@
         S.refNatW = 0; S.refNatH = 0;   // 通常読み込みでは自動スケール調整を発動させない（setReference参照）
         $('formNameInput').value = f.name;
         applyLineRemovalToUI(f.lineRemoval); $('regPsm').value = String(f.ocrSettings.psm);
-        UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
+        UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
         await setReference(f.referenceImage.dataURL);
         UI.toast('サンプルレイアウトを読み込みました。確認して保存してください', 'info', 4000);
       });

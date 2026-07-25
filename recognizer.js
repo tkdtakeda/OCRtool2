@@ -22,9 +22,13 @@ const Recognizer = (() => {
     });
   }
 
-  /** 帳票配列から「全アンカー」を matcher 用テンプレート配列へ展開（並列読み込み） */
+  /** 帳票配列から「帳票判定に使うアンカー」を matcher 用テンプレート配列へ展開（並列読み込み）。
+     alignOnly（位置合わせ専用）フラグの付いたアンカーは、他帳票への誤マッチで判定を
+     狂わせる／狭いアンカーが判定に混じるのを避けるため、ここ（=classify）では除外する。
+     除外したぶん照合するテンプレート数が減るので、一番重い classify の速度にもプラス。
+     位置合わせ（prepare の再ローカライズ）は精度のため引き続き全アンカーを使う。 */
   async function buildAnchorTemplates(forms) {
-    const anchors = forms.flatMap(form => form.anchors || []);
+    const anchors = forms.flatMap(form => (form.anchors || []).filter(a => !a.alignOnly));
     return Promise.all(anchors.map(async a => ({ id: a.id, imageElement: await dataURLtoImg(a.dataURL) })));
   }
 

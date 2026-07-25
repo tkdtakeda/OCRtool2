@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -35,11 +36,57 @@ import numpy as np
 
 from imaging import js_round
 
+# 並列化は下の ThreadPoolExecutor で (角度×スケール×アンカー) 単位に行う。その一方で
+# OpenCV自身も matchTemplate 1回ごとに内部で全コアを使おうとするため、両者を放置すると
+# 「プールのNスレッド × OpenCVの内部Mスレッド」が物理コアを奪い合う（オーバー
+# サブスクリプション）。個々のmatchTemplateが既に全コアを埋めてしまうと、プールを
+# 足しても実際には並列化されず（各コアが1呼び出しで飽和）、コンテキストスイッチと
+# キャッシュ競合のぶんだけ純粋に遅くなる。対策として OpenCV の内部スレッドは切り
+# (=各呼び出しは1コア)、並列度はプール側だけで作る。これが自前でOpenCV呼び出しを
+# 並列化するときの定石。matchTemplateの数値結果はスレッド数に依らず不変なので、
+# スコア＝帳票判定の挙動には一切影響しない。
+# 効果は実測済み: 12コア機で speedup=11.7x（効率97%）と、並列化自体は理想的に働く。
+cv2.setNumThreads(1)
+
 STD_LO = 6.0
 STD_HI = 18.0
 STD_PENALTY_FLOOR = 0.25
 MAX_WORKING_DIM = 1800
-MAX_MATCH_WORKERS = 8
+# プールの並列度上限。各 matchTemplate を1コアに固定した上で、コア数ぶんまで
+# 同時実行する（min(cpu_count, ...) で実機のコア数に自動でクランプされる）。
+MAX_MATCH_WORKERS = 16
+
+
+# ── 校正プローブ（診断用・既定OFF） ────────────────────────
+# コストが既知の基準測定。固定サイズの合成画像に対して matchTemplate を1回だけ実行し、
+# 所要時間を返す。実リクエストの処理直後に測ると「同じ機械の・同じ瞬間の」健全値と
+# 実測値を並べられるので、遅さの原因を切り分けられる:
+#   校正も一緒に遅い → 機械が外的要因で遅い（他プロセスのCPU占有・メモリ逼迫など）
+#   校正だけ速い     → 実データ側に固有の重さがある
+# これで実際に「ブラウザが大量ページを処理中はサーバーがCPUを奪われ、matchTemplateが
+# 70ms→2176msに膨らむ（校正も同時に遅くなる）」ことを確認できた。診断が済んだので
+# 既定はOFF（1回あたり約70msの純粋な計測コストが乗るため）。再診断したいときは
+# 環境変数 OCRTOOL_CALIBRATION=1 を付けてサーバーを起動する。
+# 画像は一度だけ作って使い回す（測定のたびに確保すると、確保自体の時間が混ざるため）。
+CALIBRATION_ENABLED = os.environ.get('OCRTOOL_CALIBRATION', '') not in ('', '0')
+_CALIB_IMG: np.ndarray | None = None
+_CALIB_TPL: np.ndarray | None = None
+
+
+def calibration_ms() -> float | None:
+    """既知コストの matchTemplate を1回実行し、所要ミリ秒を返す（健全なら概ね50〜150ms）。
+    OCRTOOL_CALIBRATION が未設定なら計測せず None を返す。"""
+    if not CALIBRATION_ENABLED:
+        return None
+    global _CALIB_IMG, _CALIB_TPL
+    if _CALIB_IMG is None:
+        rng = np.random.default_rng(12345)
+        _CALIB_IMG = rng.integers(0, 255, (1374, 1942), dtype=np.uint8)
+        _CALIB_TPL = rng.integers(0, 255, (334, 636), dtype=np.uint8)
+    t0 = time.perf_counter()
+    res = cv2.matchTemplate(_CALIB_IMG, _CALIB_TPL, cv2.TM_CCOEFF_NORMED)
+    cv2.minMaxLoc(res)
+    return (time.perf_counter() - t0) * 1000
 
 
 def _clamp01(v: float) -> float:
@@ -80,8 +127,11 @@ def _std_dev_of(gray: np.ndarray) -> float:
 
 
 def _run_match(full_gray: np.ndarray, tpl_gray: np.ndarray, tpl_std: float):
+    """戻り値の3つ目は、この1回の照合に掛かった実時間(ms)。並列区間の実測時間と
+    比べて『実効の並列度（＝直列合計÷実測）』を出すための診断用。"""
+    t0 = time.perf_counter()
     if tpl_gray.shape[0] > full_gray.shape[0] or tpl_gray.shape[1] > full_gray.shape[1]:
-        return 0.0, (0, 0)
+        return 0.0, (0, 0), (time.perf_counter() - t0) * 1000
     res = cv2.matchTemplate(full_gray, tpl_gray, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, max_loc = cv2.minMaxLoc(res)
     x, y = max_loc
@@ -89,7 +139,7 @@ def _run_match(full_gray: np.ndarray, tpl_gray: np.ndarray, tpl_std: float):
     window_std = _std_dev_of(roi)
     reliability = min(_std_ramp(tpl_std), _std_ramp(window_std))
     score = float(max_val) * (STD_PENALTY_FLOOR + (1 - STD_PENALTY_FLOOR) * reliability)
-    return score, (int(x), int(y))
+    return score, (int(x), int(y)), (time.perf_counter() - t0) * 1000
 
 
 def _build_angles(angle_range: float, angle_step: float) -> list[float]:
@@ -147,6 +197,8 @@ def match_all(
     #    まとめて並列実行する（角度/スケール単位で区切って並列化するより、
     #    アンカー数が少ない帳票でも常に並列度を確保できる）。
     n_workers = max(1, min(MAX_MATCH_WORKERS, len(prepared) * len(tpl_mats), os.cpu_count() or 4))
+    par_t0 = time.perf_counter()
+    serial_ms = 0.0
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         jobs = [
             (tm, angle, f, pool.submit(_run_match, scaled, tm['mat'], tm['std']))
@@ -154,7 +206,8 @@ def match_all(
             for tm in tpl_mats
         ]
         for tm, angle, f, fut in jobs:
-            score, (lx, ly) = fut.result()
+            score, (lx, ly), call_ms = fut.result()
+            serial_ms += call_ms
             cur = results[tm['id']]
             if score > cur['score']:
                 results[tm['id']] = {
@@ -166,6 +219,13 @@ def match_all(
                         'y': js_round(ly * f / work_scale),
                     },
                 }
+    # 実効の並列度を診断: 各照合の実時間合計(serial_ms)を並列区間の実測(par_wall)で割る。
+    # ≈workers なら並列が効いている（1回が重いだけ→テンプレ/画像を小さくする方針）。
+    # ≈1 なら並列が効いていない（GIL等で直列化→プロセス並列やcvThreads見直しが必要）。
+    par_wall = (time.perf_counter() - par_t0) * 1000
+    print(f'[perf]   match_all parallel: wall={par_wall:.0f}ms serialSum={serial_ms:.0f}ms '
+          f'speedup={serial_ms / par_wall:.1f}x workers={n_workers} calls={len(prepared) * len(tpl_mats)} '
+          f'avgCall={serial_ms / max(1, len(prepared) * len(tpl_mats)):.0f}ms')
 
     # -inf は「テンプレートが1件も無い」場合以外は起きないが、念のため 0 に丸める
     for r in results.values():
