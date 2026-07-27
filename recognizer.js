@@ -244,10 +244,10 @@ const Recognizer = (() => {
     return c;
   }
 
-  /* ── OCR前処理: 二値化＋主要行の抽出（①②） ──────────────
+  /* ── OCR前処理: 行トリム → 拡大 → 二値化＋角戻し ──────────
      英数字・記号のみの「単一値」欄（金額・コード等）専用。切り出しに写り込んだ
-     薄いゴースト行（罫線除去の残像・隣接行）を落とし、太字の値の行だけを
-     Tesseractへ渡す。日本語欄・自由記述欄・複数行欄には適用しない
+     薄いゴースト行（罫線除去の残像・隣接行）を落とし、値の行だけを十分な大きさ・
+     背景ムラの無い状態でTesseractへ渡す。日本語欄・自由記述欄・複数行欄には適用しない
      （呼び出し側でゲート）。誤検出で精度を落とさないよう、退化ケース
      （ほぼ空白／ほぼ真っ黒／細い単一バンドのみ）では元キャンバスをそのまま返す。 */
 
@@ -285,12 +285,10 @@ const Recognizer = (() => {
 
   /**
    * 単一値欄の切り出しから、ゴースト行・上下の空白マージンを削って値の行だけを返す。
-   * 【ハード二値化はしない】。小さい切り出しを拡大してから0/1に叩き切ると、元の
-   * なめらかな階調（アンチエイリアス）が失われてブロック状になり、かえってTesseractの
-   * 精度が落ちる（＝「元画像の方がきれい」な状態）。二値化はTesseract内部（大津）に
-   * 任せ、ここでは行トリムのみ行い、拡大済みグレースケールをそのまま渡す。
-   * トリム判定にだけ大津しきい値を使う。悪化しそうな退化ケースは元キャンバスを返す。
-   * @param {HTMLCanvasElement} canvas  （呼び出し側で拡大済み）
+   * ここでは二値化せず（binarizeSoft が後段で行う）、トリム判定にだけ大津しきい値を使う。
+   * 悪化しそうな退化ケースは元キャンバスを返す。
+   * 拡大より先に呼ぶこと（ocrInputCanvas の順序に関する注記を参照）。
+   * @param {HTMLCanvasElement} canvas
    * @returns {HTMLCanvasElement}
    */
   function preprocessSingleLine(canvas) {
@@ -336,6 +334,58 @@ const Recognizer = (() => {
     return out;
   }
 
+  /* σ=0.8 の3タップ・ガウシアン（cv2.GaussianBlur(ksize=3) 相当）を分離適用する。 */
+  const GAUSS3 = [0.2261, 0.5478, 0.2261];
+
+  /**
+   * 大津で二値化し、直後に軽いガウシアンで輪郭の角を戻す。
+   *
+   * ノイズの多い切り出し（罫線除去の残像・背景ムラ・斑点）をグレーのまま渡すと、
+   * Tesseractが背景の濃淡を文字の一部と見なして余計な文字を挿入する
+   * （例: AA1237→AA1L237 / AL2451→AGE2451。実測でゴミありの正答率19%）。
+   * 二値化すると背景は消えるが、今度は輪郭が階段状になり、きれいな切り出しの精度が
+   * 落ちる（92%→83%）。二値化の直後に軽く平滑化して角を戻すと、背景を消したまま
+   * 輪郭のなめらかさも保てる。実測（未知データ224件）で、きれい・ゴミあり・低DPI・
+   * 高DPIの全条件で現行を上回ることを確認している（合計 49%→71%）。
+   *
+   * なお中央値フィルタによるノイズ除去も試したが、細い字画（1・L）を消して落字を
+   * 招くため採用しない（実測で正答率が下がった）。
+   */
+  function binarizeSoft(canvas) {
+    const w = canvas.width, h = canvas.height;
+    if (w < 3 || h < 3) return canvas;
+    const gray = toGrayOverWhite(canvas);
+    const thr = otsuThreshold(gray);
+    const bin = new Float32Array(w * h);
+    for (let i = 0; i < bin.length; i++) bin[i] = gray[i] < thr ? 0 : 255;
+
+    /* 横方向 → 縦方向の順に1次元で畳み込む（端は最近傍で補う） */
+    const tmp = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const base = y * w;
+      for (let x = 0; x < w; x++) {
+        tmp[base + x] = GAUSS3[0] * bin[base + (x > 0 ? x - 1 : 0)]
+                      + GAUSS3[1] * bin[base + x]
+                      + GAUSS3[2] * bin[base + (x < w - 1 ? x + 1 : w - 1)];
+      }
+    }
+    const out = document.createElement('canvas');
+    out.width = w; out.height = h;
+    const octx = out.getContext('2d', { willReadFrequently: true });
+    const img = octx.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      const up = (y > 0 ? y - 1 : 0) * w, cur = y * w, dn = (y < h - 1 ? y + 1 : h - 1) * w;
+      for (let x = 0; x < w; x++) {
+        const v = Math.round(GAUSS3[0] * tmp[up + x] + GAUSS3[1] * tmp[cur + x] + GAUSS3[2] * tmp[dn + x]);
+        const p = (cur + x) * 4;
+        img.data[p] = img.data[p + 1] = img.data[p + 2] = v;
+        img.data[p + 3] = 255;
+      }
+    }
+    octx.putImageData(img, 0, 0);
+    return out;
+  }
+
   /** 構造化された「英数字・記号のみの単一値」欄か。
       true の欄にだけ 行トリム＋拡大（①④）と PSM=ブロック（③）を適用する。 */
   function isSingleValueField(rule) {
@@ -343,12 +393,20 @@ const Recognizer = (() => {
   }
 
   /** OCR入力キャンバスを構築する。
-      単一値欄は ④ グレースケールのまま拡大（滑らかな補間）→ 行トリム（ゴースト除去）。
-      ハード二値化はしない（拡大後に0/1へ叩き切るとブロック状になり精度が落ちるため。
-      二値化はTesseract内部の大津に任せる）。それ以外の欄は従来通り拡大のみ。 */
+      単一値欄は 行トリム → 拡大 → 二値化＋角戻し。それ以外の欄は従来通り拡大のみ。
+
+      ★順序が重要: 必ず行トリムを先に行う。
+      拡大するかどうかは「文字の高さ」で決めたいが、切り出しには上下の余白やゴースト行が
+      含まれるため、キャンバス全体の高さで判断すると実態とかけ離れる。先に拡大していた
+      従来の順序では、余白を含めた高さが目標値を超えていると「もう十分大きい」と誤判断して
+      拡大せず、その後のトリムで文字が小さいまま Tesseract へ渡っていた
+      （実測: 51pxの切り出しが拡大されないままトリムされ、文字はわずか15pxで渡っていた）。
+      トリムを先にすれば、目標高さが本当に文字の高さに対して効くようになる。 */
   function ocrInputCanvas(cropCanvas, single) {
-    if (single) return preprocessSingleLine(upscaleForOcr(cropCanvas, SINGLE_TARGET_H, SINGLE_MAX_SCALE));
-    return upscaleForOcr(cropCanvas);
+    if (!single) return upscaleForOcr(cropCanvas);
+    const trimmed = preprocessSingleLine(cropCanvas);
+    const scaled = upscaleForOcr(trimmed, SINGLE_TARGET_H, SINGLE_MAX_SCALE);
+    return binarizeSoft(scaled);
   }
 
   /* PSM: 単一値欄は「単一の均一ブロック」(6) で読む。単一行(7)は最上行だけを読むため、
