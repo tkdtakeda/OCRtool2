@@ -646,12 +646,22 @@
        （＝スコア自体は悪くなくても位置精度が落ちる）。scaleEdge/weakMatchのスコア閾値
        だけでは検出できないため、目印数からも独立して案内する。 */
     const singleAnchor = (form.anchors || []).length <= 1;
-    if (!(matchQuality.scaleEdge || matchQuality.weakMatch || singleAnchor)) return;
+    const dropped = matchQuality.droppedOutliers || 0;
+    if (!(matchQuality.scaleEdge || matchQuality.weakMatch || singleAnchor || dropped)) return;
     S.posWarnCounts[form.id] = (S.posWarnCounts[form.id] || 0) + 1;
     if (S.posWarnShown.has(form.id)) return;
     S.posWarnShown.add(form.id);
     const pct = Math.round((matchQuality.bestScale || 1) * 100);
     const scoreIssue = matchQuality.weakMatch || matchQuality.scaleEdge;
+    /* 誤マッチを除外できた場合は、位置合わせ自体は残りの目印で成立している。
+       ただし原因（他と見分けの付かない目印）は残るので、作り直しを促す。 */
+    if (dropped && !scoreIssue) {
+      UI.toast(
+        `⚠ 「${form.name}」: 目印${dropped}個が別の場所に一致したため、位置合わせから除外しました（残りの目印で位置合わせ済み）。枠や罫線だけの目印は他の四角と見分けが付きません。文字を含む範囲に描き直すと安定します。`,
+        'warning', 15000
+      );
+      return;
+    }
     if (!scoreIssue) {
       /* スコア上は問題なし＝「壊れている」わけではないので警告ではなく助言として出す。
          2つ目を足すだけでも「1点頼み」からは脱するが、広い識別用アンカー＋狭い精密用

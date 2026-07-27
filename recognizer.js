@@ -47,6 +47,39 @@ const Recognizer = (() => {
      使わず、各アンカーの照合倍率の中央値を採用し、平行移動だけを頑健に推定する。 */
   const MIN_SPAN_FOR_SCALE = 200;
 
+  /* 位置回帰で得た倍率を採用するために、各アンカーが自力で検出した倍率の中央値と
+     どこまで一致していればよいか（相対値）。
+     位置回帰はアンカー間の「位置の差」から倍率を出すため、1点でも別の場所（帳票は
+     似た四角が多く、罫線の交点や枠は互いに見分けが付きにくい）へ誤マッチすると倍率が
+     大きく振れる。実測で 54%×96% という、紙では起こり得ない異方性が出た。
+     一方、各アンカーはテンプレート探索で自分の倍率を独立に検出しており、その中央値は
+     3点中1点の誤りには汚染されない。両者が食い違うときは回帰ではなく中央値を採る。
+     許容を15%と広めに取っているのは、探索格子（細探索で±9%を3%刻み）より細かく倍率を
+     詰めるという回帰本来の役割を残すため。真に縦横比が違う入力では回帰が棄却されて
+     等方の倍率に落ちるが、テンプレート照合自体が等方の倍率でしか探索していない以上、
+     そこまで歪んだ入力は元々一致しないため、誤った異方性を通すより安全側に倒す。 */
+  const SCALE_AGREE_TOL = 0.15;
+
+  /* 誤マッチと判定する平行移動のばらつき(px)。正しく一致した点は「in - 倍率×ref」が
+     ほぼ同じ値に揃い、誤マッチ点だけが大きく外れる。 */
+  const OUTLIER_MIN_PX = 24;
+
+  /* ── 誤マッチした対応点を捨てる ──────────────────────────
+     仮の倍率 s（各アンカーが検出した倍率の中央値）で点ごとの平行移動 in - s*ref を
+     求めると、正しい点は集まり、別の場所に一致した点だけが飛ぶ。中央値絶対偏差(MAD)を
+     基準に外れ値を落とす。3点中1点までなら中央値・MADとも汚染されないため確実に効く。
+     2点は必ず残す（2点あれば倍率と平行移動を決められるため）。 */
+  function rejectOutliers(pairs, s) {
+    if (pairs.length < 3) return pairs;
+    const tx = pairs.map(p => p.inX - s * p.refX);
+    const ty = pairs.map(p => p.inY - s * p.refY);
+    const mx = median(tx), my = median(ty);
+    const dev = pairs.map((_, i) => Math.max(Math.abs(tx[i] - mx), Math.abs(ty[i] - my)));
+    const limit = Math.max(OUTLIER_MIN_PX, 4 * median(dev));
+    const kept = pairs.filter((_, i) => dev[i] <= limit);
+    return kept.length >= 2 ? kept : pairs;
+  }
+
   /* ── 幾何: 複数アンカーから軸ごとの拡大率＋平行移動を推定 ── */
   /**
    * 対応点 (ref → matched) から、回転なし・軸独立スケールの変換
@@ -66,15 +99,23 @@ const Recognizer = (() => {
    * @param {Array<{refX,refY,inX,inY,scale,score}>} pairs
    * @returns {{ sx:number, sy:number, tx:number, ty:number, n:number }}
    */
-  function estimateTransform(pairs) {
-    const n = pairs.length;
-    if (n === 0) return { sx: 1, sy: 1, tx: 0, ty: 0, n: 0 };
-    if (n === 1) {
-      const f = pairs[0].scale || 1;
-      return { sx: f, sy: f, tx: pairs[0].inX - f * pairs[0].refX, ty: pairs[0].inY - f * pairs[0].refY, n: 1 };
+  function estimateTransform(all) {
+    if (all.length === 0) return { sx: 1, sy: 1, tx: 0, ty: 0, n: 0, dropped: 0, kept: [] };
+    if (all.length === 1) {
+      const f = all[0].scale || 1;
+      return {
+        sx: f, sy: f, tx: all[0].inX - f * all[0].refX, ty: all[0].inY - f * all[0].refY,
+        n: 1, dropped: 0, kept: all,
+      };
     }
     /* 照合倍率の中央値（探索は 0.6〜2.0 と広く、密集アンカーでも安定して得られる） */
-    const medScale = median(pairs.map(p => p.scale || 1));
+    const medScaleAll = median(all.map(p => p.scale || 1));
+    /* 別の場所へ誤マッチした点を先に捨てる。倍率だけでなく平行移動も、誤マッチ点が
+       加重平均に混じるとその分だけ引きずられるため、推定前に取り除く必要がある。 */
+    const pairs = rejectOutliers(all, medScaleAll);
+    const dropped = all.length - pairs.length;
+    const n = pairs.length;
+    const medScale = dropped ? median(pairs.map(p => p.scale || 1)) : medScaleAll;
     /* 加重は score をそのまま使う（呼び出し側は score>=0.4 のみを渡すため、常に正）。
        スコア差を過度に増幅しないよう線形のまま用いる。 */
     const weights = pairs.map(p => Math.max(1e-3, p.score || 0));
@@ -91,13 +132,17 @@ const Recognizer = (() => {
         let num = 0, den = 0;
         pairs.forEach((p, i) => { const dr = gr(p) - mr, di = gi(p) - mi; num += weights[i] * dr * di; den += weights[i] * dr * dr; });
         const sReg = den > 1e-6 ? num / den : NaN;
-        if (isFinite(sReg) && sReg >= 0.4 && sReg <= 2.5) s = sReg;   // 十分広い＝位置回帰を信頼
+        /* 十分広い＝位置回帰を信頼。ただし各アンカーが独立に検出した倍率の中央値と
+           大きく食い違う場合は、残った誤マッチや位置ノイズで回帰が壊れた可能性が高い
+           ため採らない（SCALE_AGREE_TOL 参照）。 */
+        if (isFinite(sReg) && sReg >= 0.4 && sReg <= 2.5
+            && Math.abs(sReg - medScale) <= SCALE_AGREE_TOL * medScale) s = sReg;
       }
       return { s, t: mi - s * mr };
     };
     const X = axis(p => p.refX, p => p.inX);
     const Y = axis(p => p.refY, p => p.inY);
-    return { sx: X.s, sy: Y.s, tx: X.t, ty: Y.t, n };
+    return { sx: X.s, sy: Y.s, tx: X.t, ty: Y.t, n, dropped, kept: pairs };
   }
 
   /** 基準画像座標の矩形を軸独立スケール変換で入力画像座標へ写像 */
@@ -414,7 +459,7 @@ const Recognizer = (() => {
     let transform;
     if (good.length >= 1)        transform = estimateTransform(good);
     else if (allMatches.length)  transform = estimateTransform([allMatches[0]]);
-    else                         transform = { sx: 1, sy: 1, tx: 0, ty: 0, n: 0 };
+    else                         transform = { sx: 1, sy: 1, tx: 0, ty: 0, n: 0, dropped: 0, kept: [] };
     const tLocalize = performance.now();
 
     /* 一致品質の診断: 基準画像と入力画像の縮尺が大きく違うと、ここでの探索
@@ -422,9 +467,10 @@ const Recognizer = (() => {
        ずれたまま気づかれない恐れがある。検出倍率が探索範囲の端に張り付いて
        いる／信頼できる一致が1つも無い場合は、呼び出し側で警告できるように
        フラグを返す（例: PDFの読み込みDPIが登録時と違いすぎるケース）。 */
-    const usedMatches = good.length ? good : allMatches.slice(0, 1);
+    /* 誤マッチとして捨てた点は以降の判断からも外す（欄ごとの局所変換にも混ぜない）。 */
+    const usedMatches = transform.kept.length ? transform.kept : (good.length ? good : allMatches.slice(0, 1));
     /* 局所アンカー位置決め用の対応点（信頼できる一致が2点以上あるときだけ）。 */
-    const anchorPoints = good.length >= 2 ? good : null;
+    const anchorPoints = transform.kept.length >= 2 ? transform.kept : null;
     const scaleMin = LOCALIZE_SCALES[0], scaleMax = LOCALIZE_SCALES[LOCALIZE_SCALES.length - 1];
     const matchQuality = {
       n: transform.n,
@@ -432,6 +478,9 @@ const Recognizer = (() => {
       bestScale: allMatches.length ? allMatches[0].scale : 1,
       scaleEdge: usedMatches.some(p => p.scale <= scaleMin || p.scale >= scaleMax),
       weakMatch: !good.length,
+      /* 誤マッチとして除外した目印の数。0でなければ、その目印は他の場所（似た四角など）
+         と区別が付いていないため、利用者に作り直しを促す。 */
+      droppedOutliers: transform.dropped || 0,
     };
 
     /* ⑤ 罫線除去（登録された罫線除去パラメータを引き継ぎ） */
