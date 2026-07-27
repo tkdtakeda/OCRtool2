@@ -1331,9 +1331,17 @@
     /* idx件処理済み時点での「残り推定時間」の文字列（実測が無い最初の1件目は算出不可） */
     const etaText = idx => idx < 1 ? '' : `（残り約${formatDuration((Date.now() - batchStartTime) / idx * (total - idx))}）`;
     /* タブを離れて放置した場合にChromeのバックグラウンドタイマー間引きが起きていないか
-       ログで裏付けられるよう、一括処理中だけ可視状態の変化を記録する。 */
-    const onVisChange = () => console.log(`[perf] visibilitychange hidden=${document.hidden} at ${Date.now() - batchStartTime}ms`);
+       ログで裏付けられるよう、一括処理中だけ可視状態の変化を記録する。
+       実測（[perf] rasterize ログ）で、hidden中はPDFのラスタライズ(canvas描画)だけが
+       ブラウザの省電力機能により大幅に遅延する（同じ区間でもサーバー側のOCR/判定は
+       正常な速度のまま）ことを確認済み。処理を速くする手立てはこちら側には無い
+      （ブラウザの挙動）ため、タブを離れないよう促す注意書きを表示する。 */
+    const onVisChange = () => {
+      console.log(`[perf] visibilitychange hidden=${document.hidden} at ${Date.now() - batchStartTime}ms`);
+      UI.setBatchBgWarn(review, document.hidden);
+    };
     document.addEventListener('visibilitychange', onVisChange);
+    UI.setBatchBgWarn(review, document.hidden);   // 開始時点で既にhiddenの場合も反映
 
     let cur = ocrAt(0);                          // 先頭ページのOCRを先行開始
     try {
@@ -1365,6 +1373,7 @@
       }
     } finally {
       document.removeEventListener('visibilitychange', onVisChange);
+      UI.setBatchBgWarn(review, false);
       /* 詳細ペインでのページ送り用に PDF を保持するため、ここでは破棄しない */
     }
     if (review) reviewBatchClose();              // 確認カルーセルを閉じてからサマリを出す（重なり防止）

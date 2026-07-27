@@ -449,6 +449,14 @@ const StudioUI = (() => {
     $('batchProgressFill').style.width = `${Math.round((pct || 0) * 100)}%`;
     $('batchProgressMsg').textContent = msg || '処理中…';
   }
+  /* 一括OCR中、タブが非表示（バックグラウンド）の間だけ出す注意書き。実測で、
+     hidden中はPDFのラスタライズ(canvas描画)だけがブラウザの省電力機能により大幅に
+     遅延することを確認済み（サーバー側のOCR/判定は影響を受けない）。review=trueなら
+     レビュー用カルーセル側、falseなら一括結果モーダル側のバナーを切り替える。 */
+  function setBatchBgWarn(review, visible) {
+    const el = $(review ? 'reviewBgWarn' : 'batchBgWarn');
+    if (el) el.classList.toggle('hidden', !visible);
+  }
   const BATCH_RENDER_CAP = 200;   // 大量ページでもDOMが重くならないよう表示は上限まで
   function renderBatchResults(results, opts) {
     $('batchProgress').classList.add('hidden');
@@ -501,7 +509,7 @@ const StudioUI = (() => {
     setPipeline, resetPipeline,
     renderDecision, renderRecogPreview, renderFieldResults, symbolChipsHTML, confClass,
     showRecogProgress, updateRecogProgress, renderHistory,
-    openBatchModal, closeBatchModal, updateBatchProgress, renderBatchResults,
+    openBatchModal, closeBatchModal, updateBatchProgress, setBatchBgWarn, renderBatchResults,
   };
 
 })();
