@@ -63,10 +63,10 @@ const FormVoting = (() => {
       return r ? Math.max(0, r.score) : 0;   // 負の相関は 0 に丸める
     };
 
-    /* 1) 帳票ごとに集約。alignOnly（位置合わせ専用）アンカーは判定に使わない
+    /* 1) 帳票ごとに集約。「位置合わせのみ」の役割のアンカーは判定に使わない
        ＝狭い精密アンカーが他帳票へ誤マッチして判定を狂わせるのを防ぐ。 */
     const ranking = forms.map(form => {
-      const anchors = (form.anchors || []).filter(a => !a.alignOnly).map(a => {
+      const anchors = (form.anchors || []).filter(AnchorRoles.usedForClassify).map(a => {
         const r = anchorScores.get(a.id) || { score: 0, angle: 0, loc: { x: 0, y: 0 } };
         return { id: a.id, name: a.name, score: Math.max(0, r.score), angle: r.angle, loc: r.loc };
       }).sort((x, y) => y.score - x.score);
@@ -132,9 +132,9 @@ const FormVoting = (() => {
    * 採用判定には用いず、透明性のため UI 表示する補助指標。
    */
   function computeLegacySignal(forms, anchorScores, candidateFormId) {
-    /* anchorId → formId の逆引き（alignOnly は判定に使わないので除外） */
+    /* anchorId → formId の逆引き（判定に使わない役割のアンカーは除外） */
     const owner = new Map();
-    forms.forEach(f => (f.anchors || []).filter(a => !a.alignOnly).forEach(a => owner.set(a.id, f.id)));
+    forms.forEach(f => (f.anchors || []).filter(AnchorRoles.usedForClassify).forEach(a => owner.set(a.id, f.id)));
 
     const flat = [];
     anchorScores.forEach((r, id) => {

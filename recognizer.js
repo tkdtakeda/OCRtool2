@@ -23,12 +23,11 @@ const Recognizer = (() => {
   }
 
   /** 帳票配列から「帳票判定に使うアンカー」を matcher 用テンプレート配列へ展開（並列読み込み）。
-     alignOnly（位置合わせ専用）フラグの付いたアンカーは、他帳票への誤マッチで判定を
-     狂わせる／狭いアンカーが判定に混じるのを避けるため、ここ（=classify）では除外する。
-     除外したぶん照合するテンプレート数が減るので、一番重い classify の速度にもプラス。
-     位置合わせ（prepare の再ローカライズ）は精度のため引き続き全アンカーを使う。 */
+     「位置合わせのみ」の役割のアンカーは、他帳票への誤マッチで判定を狂わせるのを避ける
+     ため除外する。除外したぶん照合するテンプレート数が減るので、一番重い classify の
+     速度にもプラス（照合回数はテンプレート数に正比例する）。 */
   async function buildAnchorTemplates(forms) {
-    const anchors = forms.flatMap(form => (form.anchors || []).filter(a => !a.alignOnly));
+    const anchors = forms.flatMap(form => (form.anchors || []).filter(AnchorRoles.usedForClassify));
     return Promise.all(anchors.map(async a => ({ id: a.id, imageElement: await dataURLtoImg(a.dataURL) })));
   }
 
@@ -421,10 +420,14 @@ const Recognizer = (() => {
     const rotated = await LineRemovalProcessor.rotateCanvas(sourceCanvas, angle);
     const tRotate = performance.now();
 
-    /* ④ 原点の再ローカライズ: 全アンカーを角度固定で再マッチ → 相似変換を推定
-       （複数アンカーが取れればスケール=拡大率と位置ずれを同時に補正） */
+    /* ④ 原点の再ローカライズ: 位置合わせに使うアンカーを角度固定で再マッチ → 相似変換を
+       推定（複数アンカーが取れればスケール=拡大率と位置ずれを同時に補正）。
+       「帳票判定のみ」の役割のアンカーはここでは使わない。判定用は他の帳票と見分けるため
+       広く取ることが多く、広い範囲はページ内の局所的な印刷ズレを平均した「妥協点」に
+       一致しやすい。スコアは高くても位置がぶれるため、対応点に混ぜると位置合わせが悪化する
+       （判定を良くしようと目印を足したら位置合わせがずれる、という形で実際に現れる）。 */
     stage('原点の確定', 0.25);
-    const anchors = form.anchors || [];
+    const anchors = (form.anchors || []).filter(AnchorRoles.usedForAlign);
     const allMatches = [];
     try {
       const tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, imageElement: await dataURLtoImg(a.dataURL) })));

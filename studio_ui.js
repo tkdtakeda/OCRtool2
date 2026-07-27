@@ -68,29 +68,35 @@ const StudioUI = (() => {
      ため、「判定は少数の識別的な目印だけ・残りは位置合わせ専用」が速度と精度の
      両立になる。作業中にその配分が見えるようにしておく。 */
   function updateAnchorCount() {
-    const items = $('anchorList').querySelectorAll('.mini-item');
-    const alignOnly = $('anchorList').querySelectorAll('.mini-item.is-alignonly').length;
-    $('anchorCount').textContent = alignOnly
-      ? `${items.length}（判定${items.length - alignOnly} / 位置合わせ専用${alignOnly}）`
-      : String(items.length);
+    const items = [...$('anchorList').querySelectorAll('.mini-item')];
+    if (!items.length) { $('anchorCount').textContent = '0'; return; }
+    const roleOf = el => el.dataset.role || AnchorRoles.BOTH;
+    const nCls = items.filter(el => roleOf(el) !== AnchorRoles.ALIGN).length;
+    const nAln = items.filter(el => roleOf(el) !== AnchorRoles.CLASSIFY).length;
+    /* 判定と位置合わせは別工程で、それぞれ何本使われるかが精度と速度を決める
+       （判定の照合回数は本数に正比例、位置合わせは対応点の質と数で決まる）。 */
+    $('anchorCount').textContent = (nCls === items.length && nAln === items.length)
+      ? String(items.length)
+      : `${items.length}（判定${nCls} / 位置合わせ${nAln}）`;
   }
 
-  function renderAnchorList(anchors, onRemove, onRename, onReposition, onToggleAlign) {
+  function renderAnchorList(anchors, onRemove, onRename, onReposition, onSetRole) {
     const c = $('anchorList');
     $('anchorCount').textContent = anchors.length;
     if (!anchors.length) { c.innerHTML = '<div class="mini-empty">未登録（左の画像上にドラッグ）</div>'; return; }
     c.innerHTML = '';
     anchors.forEach((a, i) => {
+      const role = AnchorRoles.roleOf(a);
       const item = document.createElement('div'); item.className = 'mini-item'; item.dataset.anchorId = a.id;
-      if (a.alignOnly) item.classList.add('is-alignonly');
+      item.dataset.role = role;
+      const opts = [AnchorRoles.BOTH, AnchorRoles.CLASSIFY, AnchorRoles.ALIGN].map(v =>
+        `<option value="${v}"${v === role ? ' selected' : ''}>${esc(AnchorRoles.LABEL[v])}</option>`).join('');
       item.innerHTML = `
         <span class="midx" style="background:${ANCHOR_COLOR}">${i + 1}</span>
         <img class="mthumb" src="${a.dataURL}" alt="">
         <input class="mname-edit" value="${esc(a.name)}" title="名前を変更" spellcheck="false">
         <span class="mpos">${a.refX},${a.refY}</span>
-        <label class="malign" title="ONにすると、この目印は帳票の自動判定には使わず、位置合わせ（傾き・拡大率の補正）専用になります。狭い精密アンカーが他の帳票へ誤って一致して判定を狂わせるのを防ぎ、判定処理も少し速くなります。">
-          <input type="checkbox" ${a.alignOnly ? 'checked' : ''}><span>位置合わせ専用</span>
-        </label>
+        <select class="mrole" title="${esc(AnchorRoles.HINT[role])}">${opts}</select>
         <button class="btn-icon-sm mini-reposition" title="範囲を描き直す"><i class="fas fa-vector-square"></i></button>
         <button class="btn-icon-sm mini-del" title="削除"><i class="fas fa-xmark"></i></button>`;
       const nameInp = item.querySelector('.mname-edit');
@@ -99,11 +105,12 @@ const StudioUI = (() => {
         if (!v) { nameInp.value = a.name; return; }   // 空欄は許可しない
         onRename && onRename(a.id, v);
       });
-      const alignChk = item.querySelector('.malign input');
-      alignChk.addEventListener('change', () => {
-        item.classList.toggle('is-alignonly', alignChk.checked);
+      const roleSel = item.querySelector('.mrole');
+      roleSel.addEventListener('change', () => {
+        item.dataset.role = roleSel.value;
+        roleSel.title = AnchorRoles.HINT[roleSel.value] || '';
         updateAnchorCount();
-        onToggleAlign && onToggleAlign(a.id, alignChk.checked);
+        onSetRole && onSetRole(a.id, roleSel.value);
       });
       item.querySelector('.mini-reposition').addEventListener('click', () => onReposition && onReposition(a.id));
       item.querySelector('.mini-del').addEventListener('click', () => onRemove(a.id));
