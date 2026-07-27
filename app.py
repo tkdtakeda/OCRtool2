@@ -115,6 +115,25 @@ def create_app() -> Flask:
             print(f'[perf] /api/match failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
             return jsonify({'results': {}, 'error': str(e)})
 
+    # ── 目印のページ内一意性チェック（登録時の診断） ──────
+    @app.post('/api/anchor-uniqueness')
+    def api_anchor_uniqueness():
+        t0 = time.perf_counter()
+        try:
+            body = request.get_json(force=True, silent=False) or {}
+            full_rgba = data_url_to_rgba(body['image'])
+            templates = [
+                {'id': t['id'], 'rgba': data_url_to_rgba(t['image'])}
+                for t in (body.get('templates') or [])
+            ]
+            results = matcher.self_uniqueness(full_rgba, templates)
+            print(f'[perf] /api/anchor-uniqueness {(time.perf_counter() - t0) * 1000:.0f}ms '
+                  f'(templates={len(templates)})')
+            return jsonify({'results': results, 'error': None})
+        except Exception as e:  # noqa: BLE001 - JS側は必ずerrorを見て例外化する
+            print(f'[perf] /api/anchor-uniqueness failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
+            return jsonify({'results': {}, 'error': str(e)})
+
     # ── 傾き補正（LineRemovalProcessor.rotateCanvas 相当） ──
     @app.post('/api/rotate')
     def api_rotate():

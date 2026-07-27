@@ -97,6 +97,29 @@ const MatcherEngine = (() => {
     return results;
   }
 
+  /**
+   * 各テンプレートが「基準画像の中で一意か」を調べる（登録時の診断用）。
+   * 位置合わせ用の目印に必要なのは同じページ内で紛らわしい相手がいないことなので、
+   * 最良ピークと、その周辺を除いた次点ピークの差（margin）を返す。
+   *
+   * @param {HTMLCanvasElement|HTMLImageElement} refCanvas 基準画像
+   * @param {Array<{id:string, imageElement:HTMLImageElement}>} templates
+   * @returns {Promise<Map<string, {
+   *   best:number, bestLoc:{x,y}, second:number, secondLoc:{x,y}, margin:number
+   * }>>}
+   */
+  async function checkUniqueness(refCanvas, templates) {
+    const results = new Map();
+    if (!templates.length) return results;
+    const json = await postJSON('/api/anchor-uniqueness', {
+      image: toDataURL(refCanvas),
+      templates: templates.map(t => ({ id: t.id, image: toDataURL(t.imageElement) })),
+    });
+    if (json.error) throw new Error(json.error);
+    templates.forEach(t => { if (json.results[t.id]) results.set(t.id, json.results[t.id]); });
+    return results;
+  }
+
   /* ── 結果可視化 ─────────────────────────────────────── */
 
   /**
@@ -148,6 +171,6 @@ const MatcherEngine = (() => {
   }
 
   /* ── Public API ─────────────────────────────────────── */
-  return { matchAll, drawMatchResult };
+  return { matchAll, checkUniqueness, drawMatchResult };
 
 })();

@@ -446,6 +446,52 @@
       : '他の帳票との高い類似度は検出されませんでした', nWarn ? 'warning' : 'success', 4500);
   }
 
+  /* ── 目印のページ内一意性チェック（位置合わせの信頼性） ──
+     「他の帳票との類似度」が判定用アンカーの要件を見るのに対し、こちらは位置合わせ用
+     アンカーの要件＝同じページ内に紛らわしい相手がいないかを見る。帳票は同じ形の枠や
+     罫線交点が並ぶため、罫線と余白だけを切り取った目印は他の枠と区別が付かず、実運用で
+     別の場所へ一致して位置合わせを壊す（アンカー分布の端の点が誤マッチすると、その軸の
+     倍率だけが潰れる）。登録段階でその危険を可視化する。 */
+  /* 次点ピークが最良のこの割合以上に迫っていたら危険/注意。
+     この照合は基準画像そのものに対して行うため最良ピークはほぼ満点＝最良条件での測定に
+     なる。実際の入力ではノイズ・印刷ズレ・倍率差で両者とも劣化し差は縮むため、ここで
+     僅差なら実運用では容易に順位が入れ替わる。したがって厳しめに倒す。 */
+  const UNIQ_DANGER_RATIO = 0.85;
+  const UNIQ_WARN_RATIO   = 0.70;
+  function uniquenessVerdict(r) {
+    if (!r.best) return { level: null, text: '' };
+    const ratio = r.second / r.best;
+    const pct = Math.round(r.second * 100);
+    if (ratio >= UNIQ_DANGER_RATIO) return { level: 'danger', text: `ページ内に酷似 ${pct}%` };
+    if (ratio >= UNIQ_WARN_RATIO)   return { level: 'warn',   text: `紛らわしい ${pct}%` };
+    return { level: null, text: '' };
+  }
+  async function checkAnchorUniqueness() {
+    if (!S.anchors.length) return UI.toast('目印を1つ以上登録してから実行してください', 'warning');
+    if (!S.refImg) return UI.toast('先に基準画像を読み込んでください', 'warning');
+    if (!S.serverReady) return UI.toast('サーバーに接続中です', 'warning');
+    UI.toast('ページ内での一意性を確認中…', 'info', 2500);
+    try {
+      const templates = await Promise.all(S.anchors.map(async a => ({
+        id: a.id, imageElement: await dataURLtoImg(a.dataURL),
+      })));
+      const results = await MatcherEngine.checkUniqueness(canvasFromImg(S.refImg), templates);
+      UI.renderAnchorUniqueness(results, uniquenessVerdict);
+      let danger = 0, warn = 0;
+      results.forEach(r => {
+        const v = uniquenessVerdict(r);
+        if (v.level === 'danger') danger++; else if (v.level === 'warn') warn++;
+      });
+      if (danger) {
+        UI.toast(`⚠ ${danger} 件の目印がページ内の別の場所と酷似しています（一覧に表示）。位置合わせが別の場所に吸い寄せられる恐れがあります。枠や罫線だけでなく、文字を含む範囲へ描き直してください。`, 'warning', 15000);
+      } else if (warn) {
+        UI.toast(`${warn} 件の目印にやや紛らわしい相手がページ内にあります（一覧に表示）。文字を含めるとより安定します。`, 'warning', 9000);
+      } else {
+        UI.toast('すべての目印はページ内で十分に一意です', 'success', 4500);
+      }
+    } catch (e) { UI.toast('処理に失敗しました: ' + (e.message || e), 'error', 6000); }
+  }
+
   /* ── 罫線除去パラメータ UI 連携 ─────────────────────── */
   function applyLineRemovalToUI(p) {
     const set = (id, v) => { const e = $(id); if (e) e[e.type === 'checkbox' ? 'checked' : 'value'] = v; };
@@ -2418,6 +2464,7 @@
     setupDrop('anchorDropZone', f => acceptFile(f, useAsAnchor), 'anchorFileInput');
     $('anchorFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) acceptFile(f, useAsAnchor); e.target.value = ''; });
     $('btnCheckAnchorSimilarity').addEventListener('click', checkAnchorSimilarity);
+    $('btnCheckAnchorUniqueness').addEventListener('click', checkAnchorUniqueness);
     $('regBinaryMethod').addEventListener('change', updateBinaryRows);
 
     /* 描画 */

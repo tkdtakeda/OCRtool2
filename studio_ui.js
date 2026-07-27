@@ -129,6 +129,28 @@ const StudioUI = (() => {
     });
   }
 
+  /* 目印のページ内一意性チェック結果を各行にバッジ表示する。位置合わせは「同じページ内に
+     紛らわしい相手がいないこと」が要件なので、次点ピークとの差(margin)が小さい目印を
+     危険として示す。renderAnchorListは呼び直さない（結果が消えるため）。
+     @param {Map<string, {best,second,margin,bestLoc,secondLoc}>} results
+     @param {(r:object)=>{level:'danger'|'warn'|null, text:string}} classify  判定は呼び出し側 */
+  function renderAnchorUniqueness(results, classify) {
+    const list = $('anchorList');
+    list.querySelectorAll('.mini-item').forEach(item => {
+      const old = item.querySelector('.anchor-unique-warn'); if (old) old.remove();
+      const r = results.get(item.dataset.anchorId);
+      if (!r) return;
+      const verdict = classify(r);
+      if (!verdict.level) return;
+      const badge = document.createElement('span');
+      badge.className = `anchor-unique-warn is-${verdict.level}`;
+      badge.title = `最良 ${Math.round(r.best * 100)}% / 次点 ${Math.round(r.second * 100)}%`
+        + `（次点の位置 ${r.secondLoc.x},${r.secondLoc.y}）`;
+      badge.innerHTML = `<i class="fas fa-clone"></i> ${esc(verdict.text)}`;
+      item.appendChild(badge);
+    });
+  }
+
   function renderRegionList(regions, onRemove, onPattern, onEditConstraint, onRename, onReposition, onGlobalName) {
     const c = $('ocrRegionList'); $('ocrCount').textContent = regions.length;
     if (!regions.length) { c.innerHTML = '<div class="mini-empty">未登録（OCR領域モードで描画）</div>'; return; }
@@ -468,7 +490,7 @@ const StudioUI = (() => {
 
   return {
     $, esc, toast, REGION_COLORS, ANCHOR_COLOR, OCR_COLOR,
-    refreshRegSteps, renderFormLibrary, renderAnchorList, renderAnchorCollisions, renderRegionList,
+    refreshRegSteps, renderFormLibrary, renderAnchorList, renderAnchorCollisions, renderAnchorUniqueness, renderRegionList,
     setPipeline, resetPipeline,
     renderDecision, renderRecogPreview, renderFieldResults, symbolChipsHTML, confClass,
     showRecogProgress, updateRecogProgress, renderHistory,

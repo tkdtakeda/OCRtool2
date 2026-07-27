@@ -126,6 +126,10 @@
 .btn-xs { padding: 2px 7px; font-size: 10.5px; }
 /* 目印の識別性チェックで検出した「他の帳票との高い類似度」の警告バッジ */
 .anchor-collision-warn { display: inline-flex; align-items: center; gap: 4px; font-size: .66rem; font-weight: 700; color: #92400E; background: #FEF3C7; border-radius: 8px; padding: 1px 7px; white-space: nowrap; cursor: help; }
+/* ページ内一意性チェックの結果バッジ。danger=別の場所と酷似（位置合わせが壊れ得る）、warn=やや紛らわしい */
+.anchor-unique-warn { display: inline-flex; align-items: center; gap: 4px; font-size: .66rem; font-weight: 700; border-radius: 8px; padding: 1px 7px; white-space: nowrap; cursor: help; }
+.anchor-unique-warn.is-danger { color: #991B1B; background: #FEE2E2; }
+.anchor-unique-warn.is-warn   { color: #92400E; background: #FEF3C7; }
 .mini-list { display: flex; flex-direction: column; gap: 4px; }
 .mini-empty { font-size: .72rem; color: var(--c-text-3); padding: 6px; text-align: center; }
 /* 名前を最優先で読めるようにする: 位置表示・ボタンは幅固定（縮めない）にして、

@@ -242,6 +242,7 @@
             <div class="list-hdr">
               <span class="dot dot-anchor"></span> 目印（アンカー） <span id="anchorCount" class="list-count">0</span>
               <button type="button" id="btnCheckAnchorSimilarity" class="btn btn-ghost btn-xs list-hdr-act" title="各目印を他の登録済み帳票の基準画像と照合し、紛らわしい（高スコアで一致してしまう）目印がないか確認します"><i class="fas fa-shield-halved"></i> 他の帳票との類似度をチェック</button>
+              <button type="button" id="btnCheckAnchorUniqueness" class="btn btn-ghost btn-xs list-hdr-act" title="各目印をこの帳票自身の基準画像と照合し、ページ内に酷似した場所がないか確認します。位置合わせ用の目印は「ページ内で一意」であることが必要で、罫線や枠だけの目印は他の枠と区別が付かず、別の場所へ一致して位置合わせを壊します"><i class="fas fa-clone"></i> ページ内での一意性をチェック</button>
             </div>
             <div id="anchorList" class="mini-list"><div class="mini-empty">未登録</div></div>
           </div>

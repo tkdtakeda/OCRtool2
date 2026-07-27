@@ -163,6 +163,64 @@ def _run_match(full_gray: np.ndarray, tpl_gray: np.ndarray, tpl_std: float):
     )
 
 
+def self_uniqueness(full_rgba: np.ndarray, templates: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """各テンプレートが「自分の基準画像の中で一意か」を測る。
+
+    位置合わせ用の目印に必要なのは、他の帳票と違うことではなく、**同じページ内で
+    紛らわしい相手がいない**こと。帳票は同じ形の枠・罫線交点が並ぶため、罫線と余白
+    だけを切り取った目印は他の枠と数学的に区別が付かず、実運用で別の場所へ一致して
+    位置合わせを壊す（倍率が片方の軸だけ潰れる等）。
+
+    そこで基準画像に対してテンプレートを照合し、最良ピークと、その周辺を潰した上での
+    次点ピークを求める。目印は基準画像から切り出したものなので最良ピークは自分の登録
+    位置でほぼ満点になる。次点がそれに迫るほど「ページ内に双子がいる」＝危険。
+
+    抑制半径はテンプレートの半分。同一ピークの裾を次点と数え違えない程度に狭く、かつ
+    隣接するセル（表の隣の枠は現実によくある紛らわしい相手）は潰さない大きさにする。
+
+    戻り値: { id: {"best", "bestLoc", "second", "secondLoc", "margin"} }
+            スコアは match_all と同じ（コントラストによる信頼性減衰込み）で、実運用で
+            どちらが勝つかをそのまま反映する。
+    """
+    full_gray = _to_gray(full_rgba)
+    out: dict[str, dict[str, Any]] = {}
+    for t in templates:
+        tpl = _to_gray(t['rgba'])
+        th, tw = tpl.shape[:2]
+        if th > full_gray.shape[0] or tw > full_gray.shape[1]:
+            out[t['id']] = {'best': 0.0, 'bestLoc': {'x': 0, 'y': 0},
+                            'second': 0.0, 'secondLoc': {'x': 0, 'y': 0}, 'margin': 0.0}
+            continue
+        tpl_std = _std_dev_of(tpl)
+        res = cv2.matchTemplate(full_gray, tpl, cv2.TM_CCOEFF_NORMED)
+
+        def scored(loc: tuple[int, int], corr: float) -> float:
+            x, y = loc
+            window_std = _std_dev_of(full_gray[y:y + th, x:x + tw])
+            reliability = min(_std_ramp(tpl_std), _std_ramp(window_std))
+            return float(corr) * (STD_PENALTY_FLOOR + (1 - STD_PENALTY_FLOOR) * reliability)
+
+        _, best_corr, _, best_loc = cv2.minMaxLoc(res)
+        best = scored(best_loc, best_corr)
+
+        # 最良ピークの周辺を潰してから次点を探す（同じピークの裾を拾わないため）
+        rx, ry = max(1, tw // 2), max(1, th // 2)
+        x0, y0 = max(0, best_loc[0] - rx), max(0, best_loc[1] - ry)
+        x1, y1 = min(res.shape[1], best_loc[0] + rx + 1), min(res.shape[0], best_loc[1] + ry + 1)
+        res[y0:y1, x0:x1] = -1.0
+        _, second_corr, _, second_loc = cv2.minMaxLoc(res)
+        second = scored(second_loc, second_corr)
+
+        out[t['id']] = {
+            'best': best,
+            'bestLoc': {'x': int(best_loc[0]), 'y': int(best_loc[1])},
+            'second': second,
+            'secondLoc': {'x': int(second_loc[0]), 'y': int(second_loc[1])},
+            'margin': best - second,
+        }
+    return out
+
+
 def _build_angles(angle_range: float, angle_step: float) -> list[float]:
     if angle_range == 0 or angle_step == 0:
         return [0.0]
