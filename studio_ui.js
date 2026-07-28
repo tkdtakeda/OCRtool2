@@ -332,7 +332,10 @@ const StudioUI = (() => {
     if (!info) return '';
     const pre = info.preprocessed ? '行トリム→拡大→二値化+角戻し' : 'なし';
     const wl  = info.whitelist ? ` ・ 許可「${esc(info.whitelist)}」` : '';
-    return `<span class="field-detail-meta" style="font-size:11px;color:#64748b;line-height:1.4;">前処理: ${pre} ・ PSM ${esc(String(info.psm))} ・ ${esc(info.lang || '')}${wl}</span>`;
+    /* 文字制約に不合格で別PSMへ切り替えた欄はその旨を出す（なぜPSMが既定値と違うのかが
+       分かるようにするため）。 */
+    const psm = `PSM ${esc(String(info.psm))}${info.retried ? '（制約不合格のため読み直し）' : ''}`;
+    return `<span class="field-detail-meta" style="font-size:11px;color:#64748b;line-height:1.4;">前処理: ${pre} ・ ${psm} ・ ${esc(info.lang || '')}${wl}</span>`;
   }
   function renderFieldResults(fields) {
     const c = $('fieldResults'); c.innerHTML = '';

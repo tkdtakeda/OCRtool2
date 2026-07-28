@@ -414,6 +414,12 @@ const Recognizer = (() => {
      数字以外はwhitelistで落ちるので値だけが残る。一般欄は従来通りフォーム設定のPSM。 */
   const SINGLE_LINE_PSM = 6;
 
+  /* 文字制約に不合格だったときに読み直す代替PSM（7=単一行, 8=単一語, 13=生の行）。
+     実測（Tesseract 5.3.4・ゴミありの切り出し168件）で、PSM6が外した中の一部は
+     別のPSMなら正しく読めており、制約の合否で選ぶと 66%→73% に改善した。
+     救済されるのは「余分な1文字を拾う」失敗が中心で、報告された症状と一致する。 */
+  const RETRY_PSMS = [7, 8, 13];
+
   /* ④ 単一値欄の拡大目標。Tesseractは字形が小さいと 9↔G / 0↔O / 1↔I などの
      微妙な取り違えを起こしやすい。行の高さがこの値に満たない切り出しだけを拡大して
      認識する（最大 SINGLE_MAX_SCALE 倍）。
@@ -597,28 +603,9 @@ const Recognizer = (() => {
       const single = isSingleValueField(rule);   // 単一値欄は前処理＋単一行PSM
       return { region, rule, active: CharConstraint.isActive(rule), single, lang: p.lang, whitelist: p.whitelist, psm: single ? SINGLE_LINE_PSM : psm };
     });
-    /* 言語切替（worker再初期化）を最小化するため同一言語をまとめて処理する */
-    const order = plan.map((_, i) => i).sort((a, b) => (plan[a].lang < plan[b].lang ? -1 : plan[a].lang > plan[b].lang ? 1 : 0));
-    const fields = new Array(regions.length);
-    for (let oi = 0; oi < order.length; oi++) {
-      const i = order[oi];
-      const { region, rule, active, single, lang: useLang, whitelist: useWl, psm: usePsm } = plan[i];
-      stage(`OCR ${oi + 1}/${regions.length}`, 0.55 + 0.4 * (oi / Math.max(1, regions.length)));
-      /* 欄ごとに近傍アンカーを重く使った局所変換で切り出す（全体変換への安全なフォールバック付き） */
-      const cropCanvas = LineRemovalProcessor.extractRect(resultCanvas, mapRect(region, transformForRegion(anchorPoints, region, transform)));
-      if (!cropCanvas) {
-        fields[i] = { name: region.name, globalName: region.globalName || region.name, text: '', confidence: 0, error: '領域の切り出しに失敗しました' };
-        continue;
-      }
-      const tFieldStart = performance.now();
-      /* 実際にTesseractへ渡す画像。診断表示（切り出し画像との比較）用に保持する */
-      const inputCanvas = ocrInputCanvas(cropCanvas, single);
-      const res = await OcrProcessor.recognize(inputCanvas, usePsm, prog => {
-        cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
-      }, useLang, useWl);
-      /* 言語がページ間・領域間で切り替わるとTesseractの言語データ再読み込みが走り
-         大幅に遅くなることがあるため、領域ごとの所要時間と使用言語を記録する。 */
-      console.log(`[perf]   OCR "${region.name}" lang=${useLang} ${(performance.now() - tFieldStart).toFixed(0)}ms`);
+    /* OCR結果を最終的な値へ整える（行選択 → 正規化 → パターン抽出 → 文字制約）。
+       PSMを変えて読み直したときに同じ手順を再適用するため、関数へ切り出してある。 */
+    const finishText = (res, region, rule, active, single) => {
       let text = (res.fullText || '').trim();
       /* 単一値欄でTesseractが複数行として認識した場合（PSM=6は罫線除去の
          ゴースト行を別行として拾うことがある）、最も確信度の高い行だけを採用する。
@@ -636,6 +623,48 @@ const Recognizer = (() => {
       /* 文字制約による桁別チェック＋誤認補正（O↔0 等）＋前後の余分文字除去 */
       let constraintValid = true;
       if (active) { const cc = CharConstraint.apply(text, rule); text = cc.text; constraintValid = cc.valid; }
+      return { text, raw, constraintValid };
+    };
+
+    /* 言語切替（worker再初期化）を最小化するため同一言語をまとめて処理する */
+    const order = plan.map((_, i) => i).sort((a, b) => (plan[a].lang < plan[b].lang ? -1 : plan[a].lang > plan[b].lang ? 1 : 0));
+    const fields = new Array(regions.length);
+    for (let oi = 0; oi < order.length; oi++) {
+      const i = order[oi];
+      const { region, rule, active, single, lang: useLang, whitelist: useWl, psm: usePsm } = plan[i];
+      stage(`OCR ${oi + 1}/${regions.length}`, 0.55 + 0.4 * (oi / Math.max(1, regions.length)));
+      /* 欄ごとに近傍アンカーを重く使った局所変換で切り出す（全体変換への安全なフォールバック付き） */
+      const cropCanvas = LineRemovalProcessor.extractRect(resultCanvas, mapRect(region, transformForRegion(anchorPoints, region, transform)));
+      if (!cropCanvas) {
+        fields[i] = { name: region.name, globalName: region.globalName || region.name, text: '', confidence: 0, error: '領域の切り出しに失敗しました' };
+        continue;
+      }
+      const tFieldStart = performance.now();
+      /* 実際にTesseractへ渡す画像。診断表示（切り出し画像との比較）用に保持する */
+      const inputCanvas = ocrInputCanvas(cropCanvas, single);
+      const onProg = prog => cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
+      let res = await OcrProcessor.recognize(inputCanvas, usePsm, onProg, useLang, useWl);
+      let out = finishText(res, region, rule, active, single);
+      let readPsm = usePsm;
+      /* 文字制約に不合格なら、別のレイアウト解釈(PSM)で読み直して合格するものを探す。
+         Tesseractは同じ画像でもPSMによって字の切り出し方が変わり、汚れや字間を
+         余分な1文字として拾ってしまう失敗（AL2451→AL24521、JL3331→JIL3331 等）が
+         PSMを変えるだけで解けることがある。桁数と桁ごとの字種を宣言済みの欄だけが
+         対象で、合否という客観的な判定材料があるからこそ選べる。
+         1回目が合格ならそのまま採用するので、これまで正しく読めていた欄の結果は変わらない。
+         追加のOCRは不合格だった欄にだけ発生する。 */
+      if (single && !out.constraintValid) {
+        for (const altPsm of RETRY_PSMS) {
+          if (altPsm === usePsm) continue;
+          const altRes = await OcrProcessor.recognize(inputCanvas, altPsm, onProg, useLang, useWl);
+          const altOut = finishText(altRes, region, rule, active, single);
+          if (altOut.constraintValid) { res = altRes; out = altOut; readPsm = altPsm; break; }
+        }
+      }
+      const { text, raw, constraintValid } = out;
+      /* 言語がページ間・領域間で切り替わるとTesseractの言語データ再読み込みが走り
+         大幅に遅くなることがあるため、領域ごとの所要時間と使用言語を記録する。 */
+      console.log(`[perf]   OCR "${region.name}" lang=${useLang} psm=${readPsm}${readPsm !== usePsm ? '(再読取)' : ''} ${(performance.now() - tFieldStart).toFixed(0)}ms`);
       /* 信頼度は「最終的な値の文字」基準（周辺のゴミで下がらないように） */
       const conf = valueConfidence(text, res.symbols, confOf(res));
       fields[i] = {
@@ -653,7 +682,7 @@ const Recognizer = (() => {
            前処理が効いたか／ゴーストが除けたかを目視で確認できるようにする。
            前処理を通す単一値欄のみPNG化する（他欄は元切り出しとほぼ同一で無駄なため）。 */
         ocrInputDataURL: single ? inputCanvas.toDataURL('image/png') : null,
-        ocrInfo: { preprocessed: single, psm: usePsm, lang: useLang, whitelist: useWl },
+        ocrInfo: { preprocessed: single, psm: readPsm, retried: readPsm !== usePsm, lang: useLang, whitelist: useWl },
       };
     }
 
