@@ -514,6 +514,7 @@ const Recognizer = (() => {
         if (!r) return;
         const f = r.scale || 1;
         allMatches.push({
+          name: t.a.name || '',
           refX: (t.a.refX || 0) + t.a.w / 2, refY: (t.a.refY || 0) + t.a.h / 2,         // 基準中心
           inX:  r.loc.x + t.a.w * f / 2,     inY:  r.loc.y + t.a.h * f / 2,             // 入力中心（スケール考慮）
           score: r.score, scale: f,
@@ -528,6 +529,29 @@ const Recognizer = (() => {
     else if (allMatches.length)  transform = estimateTransform([allMatches[0]]);
     else                         transform = { sx: 1, sy: 1, tx: 0, ty: 0, n: 0, dropped: 0, kept: [] };
     const tLocalize = performance.now();
+
+    /* 位置合わせの診断。OCR欄の位置がずれたとき、原因が
+         ・目印が別の場所に一致した（誤マッチ）
+         ・基準画像と入力の解像度が違う（倍率が1.0のままでは合わない）
+         ・目印が近くに固まっていて倍率が決まらない
+       のどれなのかは、対応点そのものを見ないと切り分けられないため一覧で出す。
+       「ずれ」= 採用した変換で基準座標を写した位置と、実際に一致した位置との差。
+       正しく合っていれば全て数px以内に収まる。特定の1点だけ大きい＝その目印が犯人。 */
+    if (allMatches.length) {
+      console.log(`[align] 基準画像 ${form.referenceImage ? form.referenceImage.w + 'x' + form.referenceImage.h : '?'}`
+        + ` → 入力 ${rotated.width}x${rotated.height}`
+        + ` / 変換 倍率${transform.sx.toFixed(3)}x${transform.sy.toFixed(3)}`
+        + ` 平行移動(${Math.round(transform.tx)},${Math.round(transform.ty)})`
+        + ` 採用${transform.n}点 除外${transform.dropped || 0}点`);
+      allMatches.forEach(p => {
+        const used = transform.kept.includes(p);
+        const dx = p.inX - (transform.sx * p.refX + transform.tx);
+        const dy = p.inY - (transform.sy * p.refY + transform.ty);
+        console.log(`[align]   ${used ? '採用' : '除外'} "${p.name}" 基準(${Math.round(p.refX)},${Math.round(p.refY)})`
+          + ` → 一致(${Math.round(p.inX)},${Math.round(p.inY)})`
+          + ` ずれ(${Math.round(dx)},${Math.round(dy)}) スコア${p.score.toFixed(2)} 検出倍率${p.scale}`);
+      });
+    }
 
     /* 一致品質の診断: 基準画像と入力画像の縮尺が大きく違うと、ここでの探索
        （LOCALIZE_SCALES の範囲内）で真の倍率を捉えきれず、OCR領域の位置が
