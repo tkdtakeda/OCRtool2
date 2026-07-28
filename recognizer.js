@@ -59,24 +59,53 @@ const Recognizer = (() => {
      そこまで歪んだ入力は元々一致しないため、誤った異方性を通すより安全側に倒す。 */
   const SCALE_AGREE_TOL = 0.15;
 
-  /* 誤マッチと判定する平行移動のばらつき(px)。正しく一致した点は「in - 倍率×ref」が
-     ほぼ同じ値に揃い、誤マッチ点だけが大きく外れる。 */
-  const OUTLIER_MIN_PX = 24;
+  /* 誤マッチと判定する残差の許容(px)。正しく一致した点は候補変換にほぼ乗り、
+     誤マッチ点だけが大きく外れる。実測（下記の実データ検証）で、正しい点同士の
+     残差は最大でも数十px程度だったため、印刷ズレ等の正常なばらつきは飲み込みつつ
+     誤マッチ（実測で数百px級）とは明確に切り分けられる値として40pxとした。 */
+  const OUTLIER_TOL_PX = 40;
 
-  /* ── 誤マッチした対応点を捨てる ──────────────────────────
-     仮の倍率 s（各アンカーが検出した倍率の中央値）で点ごとの平行移動 in - s*ref を
-     求めると、正しい点は集まり、別の場所に一致した点だけが飛ぶ。中央値絶対偏差(MAD)を
-     基準に外れ値を落とす。3点中1点までなら中央値・MADとも汚染されないため確実に効く。
-     2点は必ず残す（2点あれば倍率と平行移動を決められるため）。 */
-  function rejectOutliers(pairs, s) {
-    if (pairs.length < 3) return pairs;
-    const tx = pairs.map(p => p.inX - s * p.refX);
-    const ty = pairs.map(p => p.inY - s * p.refY);
-    const mx = median(tx), my = median(ty);
-    const dev = pairs.map((_, i) => Math.max(Math.abs(tx[i] - mx), Math.abs(ty[i] - my)));
-    const limit = Math.max(OUTLIER_MIN_PX, 4 * median(dev));
-    const kept = pairs.filter((_, i) => dev[i] <= limit);
-    return kept.length >= 2 ? kept : pairs;
+  /* 2点(ref→in)から軸独立の相似変換を厳密に決める（2点あれば一意に決まる）。 */
+  function pairTransform(a, b) {
+    const dxr = b.refX - a.refX, dyr = b.refY - a.refY;
+    const sx = Math.abs(dxr) > 1e-6 ? (b.inX - a.inX) / dxr : NaN;
+    const sy = Math.abs(dyr) > 1e-6 ? (b.inY - a.inY) / dyr : NaN;
+    if (!isFinite(sx) || !isFinite(sy)) return null;
+    return { sx, sy, tx: a.inX - sx * a.refX, ty: a.inY - sy * a.refY };
+  }
+  function residual(p, tf) {
+    return Math.max(Math.abs(p.inX - (tf.sx * p.refX + tf.tx)), Math.abs(p.inY - (tf.sy * p.refY + tf.ty)));
+  }
+
+  /* ── 誤マッチした対応点を捨てる（ペア総当たりによる多数決＝RANSACの簡易版）───
+     以前は「倍率の中央値を仮定し、そこから外れた点を捨てる」中央値ベースの1回判定
+     だったが、これは誤マッチが半数近く（実測: 4点中2点）になると中央値自体が両陣営の
+     間に落ちてしまい、1件も検出できない実例が出た。
+     代わりに、2点の組み合わせを総当たりして各ペアが示す変換を求め、他の点が何個その
+     変換に乗るか（＝支持するか）を数える。最も支持を集めたペアの変換を「多数派」として
+     採用する。誤マッチ同士がたまたま似た変換を示す確率は低いため、正しい点が過半数を
+     割っていても多数派を正しく見つけられる（実際、上の実例では2/4が誤マッチという
+     多数決が効かないはずのケースで正しく2点を除外できることを確認済み）。
+     支持点を数える際、各アンカーがテンプレート探索で独立に検出した倍率の中央値
+     （medScale）と大きく食い違うペアの変換は候補から外す。これが無いと、絶対値としては
+     一致点を稼げても sx が0.3倍等の非現実的な変換が「たまたま」複数点を説明してしまい、
+     誤って多数派に選ばれることがあった（実データで実際に発生を確認）。 */
+  function ransacInliers(pairs, medScale) {
+    let best = null, bestSupport = -1;
+    for (let i = 0; i < pairs.length; i++) {
+      for (let j = i + 1; j < pairs.length; j++) {
+        const tf = pairTransform(pairs[i], pairs[j]);
+        if (!tf || tf.sx < 0.4 || tf.sx > 2.5 || tf.sy < 0.4 || tf.sy > 2.5) continue;
+        if (Math.abs(tf.sx - medScale) > SCALE_AGREE_TOL * medScale) continue;
+        if (Math.abs(tf.sy - medScale) > SCALE_AGREE_TOL * medScale) continue;
+        const inliers = pairs.filter(p => residual(p, tf) <= OUTLIER_TOL_PX);
+        const support = inliers.reduce((s, p) => s + (p.score || 0.5), 0);
+        if (inliers.length > (best ? best.length : 0) || (best && inliers.length === best.length && support > bestSupport)) {
+          best = inliers; bestSupport = support;
+        }
+      }
+    }
+    return (best && best.length >= 2) ? best : pairs;   // 有効なペアが無ければ従来通り全点使う
   }
 
   /* ── 幾何: 複数アンカーから軸ごとの拡大率＋平行移動を推定 ── */
@@ -110,8 +139,10 @@ const Recognizer = (() => {
     /* 照合倍率の中央値（探索は 0.6〜2.0 と広く、密集アンカーでも安定して得られる） */
     const medScaleAll = median(all.map(p => p.scale || 1));
     /* 別の場所へ誤マッチした点を先に捨てる。倍率だけでなく平行移動も、誤マッチ点が
-       加重平均に混じるとその分だけ引きずられるため、推定前に取り除く必要がある。 */
-    const pairs = rejectOutliers(all, medScaleAll);
+       加重平均に混じるとその分だけ引きずられるため、推定前に取り除く必要がある。
+       ペア総当たりは3点未満では機能しない（2点は常に一致するペアが1組しか無く、
+       多数決にならない）ため、2点以下はそのまま使う。 */
+    const pairs = all.length >= 3 ? ransacInliers(all, medScaleAll) : all;
     const dropped = all.length - pairs.length;
     const n = pairs.length;
     const medScale = dropped ? median(pairs.map(p => p.scale || 1)) : medScaleAll;
