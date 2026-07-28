@@ -65,11 +65,17 @@ const Recognizer = (() => {
      誤マッチ（実測で数百px級）とは明確に切り分けられる値として40pxとした。 */
   const OUTLIER_TOL_PX = 40;
 
-  /* 2点(ref→in)から軸独立の相似変換を厳密に決める（2点あれば一意に決まる）。 */
-  function pairTransform(a, b) {
+  /* 2点(ref→in)から軸独立の相似変換を決める。
+     基準座標の差(dxr/dyr)がMIN_SPAN_FOR_SCALE未満の軸は、2点だけからの倍率計算が
+     数pxの誤差で暴れる（estimateTransform本体のaxis関数と同じ理由）ため、その軸は
+     実測せず medScale（各アンカーが独立に検出した倍率の中央値）をそのまま使う。
+     これが無いと、たとえば基準座標でX方向に41pxしか離れていない2点の正しい組が、
+     わずかな検出誤差だけでsxが0.66等に暴れて候補から弾かれ、有効なペアが1つも
+     残らずに外れ値除去そのものが機能しなくなる（実データで発生を確認済み）。 */
+  function pairTransform(a, b, medScale) {
     const dxr = b.refX - a.refX, dyr = b.refY - a.refY;
-    const sx = Math.abs(dxr) > 1e-6 ? (b.inX - a.inX) / dxr : NaN;
-    const sy = Math.abs(dyr) > 1e-6 ? (b.inY - a.inY) / dyr : NaN;
+    const sx = Math.abs(dxr) >= MIN_SPAN_FOR_SCALE ? (b.inX - a.inX) / dxr : medScale;
+    const sy = Math.abs(dyr) >= MIN_SPAN_FOR_SCALE ? (b.inY - a.inY) / dyr : medScale;
     if (!isFinite(sx) || !isFinite(sy)) return null;
     return { sx, sy, tx: a.inX - sx * a.refX, ty: a.inY - sy * a.refY };
   }
@@ -94,7 +100,7 @@ const Recognizer = (() => {
     let best = null, bestSupport = -1;
     for (let i = 0; i < pairs.length; i++) {
       for (let j = i + 1; j < pairs.length; j++) {
-        const tf = pairTransform(pairs[i], pairs[j]);
+        const tf = pairTransform(pairs[i], pairs[j], medScale);
         if (!tf || tf.sx < 0.4 || tf.sx > 2.5 || tf.sy < 0.4 || tf.sy > 2.5) continue;
         if (Math.abs(tf.sx - medScale) > SCALE_AGREE_TOL * medScale) continue;
         if (Math.abs(tf.sy - medScale) > SCALE_AGREE_TOL * medScale) continue;
