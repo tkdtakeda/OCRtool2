@@ -39,6 +39,9 @@
   </div>
 
   <nav class="header-nav">
+    <button id="btnCopyDiagnostics" class="btn btn-icon" title="速度・精度の問題を報告するとき用。サーバーとブラウザの直近ログをまとめてコピーします（DevToolsを探す必要はありません）">
+      <i class="fas fa-clipboard-list"></i>
+    </button>
     <button id="btnSettings" class="btn btn-icon" title="設定（判定しきい値・マッチング精度）">
       <i class="fas fa-gear"></i>
     </button>
@@ -986,6 +989,9 @@
 
 <!-- Toast -->
 <div id="toastContainer" class="toast-container"></div>
+<!-- diag_log.js は他の全スクリプトより先に読み込む（console.log呼び出しを
+     1件も取りこぼさず診断バッファへ残すため）。 -->
+<script src="diag_log.js"></script>
 <!-- OCR・画像マッチングはPythonサーバー側（app.py等）へ移管したため、
      以前ここにあったOpenCV.js/Tesseract.jsのCDN読み込みは不要になった。
      PDFのページ画像化にのみ使うpdf.jsだけ残す。 -->

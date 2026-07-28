@@ -1226,6 +1226,40 @@
     navigator.clipboard.writeText(lines.join('\n')).then(() => UI.toast('全フィールドをコピーしました', 'success')).catch(() => UI.toast('コピーに失敗しました', 'error'));
   }
 
+  /* ── 診断情報をコピー ────────────────────────────────
+     速度・精度の問題を報告する際、これまではDevToolsのConsoleとサーバーのターミナルを
+     別々に開いて該当ログを自分で探す必要があった。この app.js の console.log 呼び出しは
+     [perf]/[align] 診断ログのみ（他の用途に使っていない）なので、diag_log.js が
+     溜めているブラウザ側の直近ログと、サーバー側の直近ログ（/api/diagnostics、
+     matcher.py/app.py の [perf] 出力を applog.py が保持）をまとめて1回のコピーで
+     渡せるようにする。DevToolsを開く必要自体を無くすのが狙い。 */
+  async function copyDiagnostics() {
+    const parts = [
+      '=== OCRtool2 診断情報 ===',
+      `生成日時: ${new Date().toLocaleString('ja-JP')}`,
+      `画面: ${navigator.userAgent}`,
+      '',
+    ];
+    try {
+      const res = await fetch('/api/diagnostics');
+      const json = await res.json();
+      parts.push(`--- サーバー (OpenCV ${json.opencvVersion || '?'} / ${json.ocrEngine || '?'} ${json.tesseractVersion || ''} / CPU${json.cpuCount || '?'}) ---`);
+      parts.push(...(json.serverLog && json.serverLog.length ? json.serverLog : ['(ログなし。サーバーが未起動か、まだ何も実行していません)']));
+    } catch (_) {
+      parts.push('--- サーバー ---', '(取得できませんでした。サーバーに接続できているか確認してください)');
+    }
+    parts.push('', '--- ブラウザ ---');
+    const clientLog = DiagLog.recent();
+    parts.push(...(clientLog.length ? clientLog : ['(ログなし。問題が起きた操作をもう一度行ってから押してください)']));
+
+    try {
+      await navigator.clipboard.writeText(parts.join('\n'));
+      UI.toast('診断情報をコピーしました。会話にそのまま貼り付けてください', 'success', 4000);
+    } catch (_) {
+      UI.toast('コピーに失敗しました', 'error');
+    }
+  }
+
   /* ════════════════════════════════════════════════════
      複数ページ一括OCR（PDFの全ページ）
      ════════════════════════════════════════════════════ */
@@ -2620,6 +2654,7 @@
     $('closeSampleFormModal').addEventListener('click', () => $('sampleFormModal').classList.add('hidden'));
     $('sampleFormModal').addEventListener('click', e => { if (e.target === $('sampleFormModal')) $('sampleFormModal').classList.add('hidden'); });
     $('btnHelp').addEventListener('click', () => $('helpModal').classList.remove('hidden'));
+    $('btnCopyDiagnostics').addEventListener('click', copyDiagnostics);
     $('closeHelpModal').addEventListener('click', () => $('helpModal').classList.add('hidden'));
     $('helpModal').addEventListener('click', e => { if (e.target === $('helpModal')) $('helpModal').classList.add('hidden'); });
     document.addEventListener('keydown', e => {

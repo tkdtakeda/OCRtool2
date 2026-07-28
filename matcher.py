@@ -34,6 +34,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+import applog
 from imaging import js_round
 
 # 並列化は下の ThreadPoolExecutor で (角度×スケール×アンカー) 単位に行う。その一方で
@@ -307,7 +308,7 @@ def match_all(
     # ≈1 なら並列が効いていない（GIL等で直列化→プロセス並列やcvThreads見直しが必要）。
     par_wall = (time.perf_counter() - par_t0) * 1000
     n_calls = max(1, len(prepared) * len(tpl_mats))
-    print(f'[perf]   match_all parallel: wall={par_wall:.0f}ms serialSum={serial_ms:.0f}ms '
+    applog.log(f'[perf]   match_all parallel: wall={par_wall:.0f}ms serialSum={serial_ms:.0f}ms '
           f'speedup={serial_ms / par_wall:.1f}x workers={n_workers} calls={len(prepared) * len(tpl_mats)} '
           f'avgCall={serial_ms / n_calls:.0f}ms '
           f'[match={sum_match / n_calls:.0f}ms minMaxLoc={sum_minmax / n_calls:.0f}ms '

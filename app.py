@@ -23,6 +23,7 @@ import time
 import cv2
 from flask import Flask, jsonify, request, send_from_directory
 
+import applog
 import matcher
 import ocr_server as ocr
 import processor_server as processor
@@ -80,6 +81,20 @@ def create_app() -> Flask:
             'error': None if ocr.is_ready() else ocr.init_error(),
         })
 
+    # ── 診断ログ（速度・精度の問題を報告する際、ブラウザ側の「診断情報をコピー」
+    #    ボタンがサーバー側の直近ログを取りに来る）。applog.log() が呼ばれるたび
+    #    バッファへ積まれているので、ここではそれを返すだけ。 ──
+    @app.get('/api/diagnostics')
+    def api_diagnostics():
+        info = ocr.health_info()
+        return jsonify({
+            'serverLog': applog.recent(),
+            'opencvVersion': cv2.__version__,
+            'ocrEngine': info['ocrEngine'],
+            'tesseractVersion': info['tesseractVersion'],
+            'cpuCount': os.cpu_count(),
+        })
+
     # ── 画像マッチング（MatcherEngine.matchAll 相当） ──────
     @app.post('/api/match')
     def api_match():
@@ -105,14 +120,14 @@ def create_app() -> Flask:
             # （他プロセスのCPU占有・メモリ逼迫など）だと確定できる。既定OFF。
             calib = matcher.calibration_ms()
             calib_txt = f', calibration={calib:.0f}ms' if calib is not None else ''
-            print(f'[perf] /api/match {(time.perf_counter() - t0) * 1000:.0f}ms '
+            applog.log(f'[perf] /api/match {(time.perf_counter() - t0) * 1000:.0f}ms '
                   f'(templates={len(templates)}, angleRange={angle_range}, angleStep={angle_step}, '
                   f'scales={len(scale_factors)}, image={full_rgba.shape[1]}x{full_rgba.shape[0]}, '
                   f'maxTemplate={max_tpl}, cpuCount={os.cpu_count()}, cvThreads={cv2.getNumThreads()}'
                   f'{calib_txt}{_load_hint()})')
             return jsonify({'results': results, 'error': None})
         except Exception as e:  # noqa: BLE001 - JS側は必ずerrorを見て例外化する
-            print(f'[perf] /api/match failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
+            applog.log(f'[perf] /api/match failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
             return jsonify({'results': {}, 'error': str(e)})
 
     # ── 目印のページ内一意性チェック（登録時の診断） ──────
@@ -127,11 +142,11 @@ def create_app() -> Flask:
                 for t in (body.get('templates') or [])
             ]
             results = matcher.self_uniqueness(full_rgba, templates)
-            print(f'[perf] /api/anchor-uniqueness {(time.perf_counter() - t0) * 1000:.0f}ms '
+            applog.log(f'[perf] /api/anchor-uniqueness {(time.perf_counter() - t0) * 1000:.0f}ms '
                   f'(templates={len(templates)})')
             return jsonify({'results': results, 'error': None})
         except Exception as e:  # noqa: BLE001 - JS側は必ずerrorを見て例外化する
-            print(f'[perf] /api/anchor-uniqueness failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
+            applog.log(f'[perf] /api/anchor-uniqueness failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
             return jsonify({'results': {}, 'error': str(e)})
 
     # ── 傾き補正（LineRemovalProcessor.rotateCanvas 相当） ──
@@ -142,10 +157,10 @@ def create_app() -> Flask:
             body = request.get_json(force=True, silent=False) or {}
             rgba = data_url_to_rgba(body['image'])
             rotated = processor.rotate(rgba, float(body.get('angle', 0)))
-            print(f'[perf] /api/rotate {(time.perf_counter() - t0) * 1000:.0f}ms')
+            applog.log(f'[perf] /api/rotate {(time.perf_counter() - t0) * 1000:.0f}ms')
             return jsonify({'image': rgba_to_data_url(rotated), 'error': None})
         except Exception as e:  # noqa: BLE001 - JS側は失敗時ローカルコピーへフォールバック
-            print(f'[perf] /api/rotate failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
+            applog.log(f'[perf] /api/rotate failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
             return jsonify({'image': None, 'error': str(e)})
 
     # ── 罫線除去（LineRemovalProcessor.process 相当） ──────
@@ -156,11 +171,11 @@ def create_app() -> Flask:
             body = request.get_json(force=True, silent=False) or {}
             rgba = data_url_to_rgba(body['image'])
             mats = processor.process(rgba, body.get('params') or {})
-            print(f'[perf] /api/line-removal {(time.perf_counter() - t0) * 1000:.0f}ms '
+            applog.log(f'[perf] /api/line-removal {(time.perf_counter() - t0) * 1000:.0f}ms '
                   f'(image={rgba.shape[1]}x{rgba.shape[0]})')
             return jsonify({'images': [rgba_to_data_url(m) for m in mats], 'error': None})
         except Exception as e:  # noqa: BLE001
-            print(f'[perf] /api/line-removal failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
+            applog.log(f'[perf] /api/line-removal failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
             return jsonify({'images': [], 'error': str(e)})
 
     # ── OCR（OcrProcessor.recognize 相当） ────────────────
@@ -176,11 +191,11 @@ def create_app() -> Flask:
                 lang=body.get('lang') or 'eng',
                 whitelist=body.get('whitelist') or '',
             )
-            print(f'[perf] /api/ocr {(time.perf_counter() - t0) * 1000:.0f}ms')
+            applog.log(f'[perf] /api/ocr {(time.perf_counter() - t0) * 1000:.0f}ms')
             return jsonify(result)
         except Exception as e:  # noqa: BLE001 - ocr.recognize自体は例外を投げないが、
             # デコード失敗などここより手前の異常はここで拾う
-            print(f'[perf] /api/ocr failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
+            applog.log(f'[perf] /api/ocr failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
             return jsonify({'fullText': '', 'words': [], 'symbols': [], 'lines': [],
                              'confidence': 0, 'error': str(e)})
 
