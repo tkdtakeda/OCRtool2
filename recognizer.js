@@ -228,13 +228,18 @@ const Recognizer = (() => {
     if (active && CharConstraint.isLatinOnly(rule)) {
       /* ⑤ engモデルでは字種whitelistがよく効く（数字1→漢字誤認で守れないjpnと異なる）。
          数字欄で "9,218"→"HWNgy~EN" のような英字誤読を根本から封じるため、
-         導出したwhitelistをそのまま渡す。純数字の欄では桁区切り記号
-         （, ， 空白 ¥ ￥ $）も許可し、Tesseractに記号として分類させたうえで
-         後段のNUM_NOISE除去で落とす（記号を無理に数字化させないため）。 */
+         導出したwhitelistをそのまま渡す。数字（小数点を含めてもよい）の欄では
+         桁区切り記号（, ， 空白 ¥ ￥ $）も許可し、Tesseractに記号として分類させた
+         うえで後段のNUM_NOISE除去で落とす（記号を無理に数字化させないため）。
+         小数点「.」を許可文字に加えた欄（例: 1,234.56）もここに含める。以前は
+         「全桁が数字」だけを見ていたため、小数点を加えただけで桁区切り記号の
+         whitelistが付かなくなり、Tesseractがカンマを出力できず最も近い許可文字
+         （小数点自身等）に丸めてしまっていた（"1,234.56"→"1,234,56"のように
+         カンマと小数点が区別できなくなる）。 */
       const wl = CharConstraint.derivedWhitelist(rule);
       if (!wl) return { lang: 'eng', whitelist: '' };
-      const pureDigit = [...wl].every(c => c >= '0' && c <= '9');
-      return { lang: 'eng', whitelist: pureDigit ? wl + ',， ¥￥$' : wl };
+      const isDigitOrDot = [...wl].every(c => (c >= '0' && c <= '9') || c === '.');
+      return { lang: 'eng', whitelist: isDigitOrDot ? wl + ',， ¥￥$' : wl };
     }
     return { lang: fallbackLang, whitelist: active ? (CharConstraint.derivedWhitelist(rule) || fallbackWhitelist) : fallbackWhitelist };
   }
