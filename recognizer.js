@@ -457,6 +457,18 @@ const Recognizer = (() => {
      救済されるのは「余分な1文字を拾う」失敗が中心で、報告された症状と一致する。 */
   const RETRY_PSMS = [7, 8, 13];
 
+  /* 生データの文字数と固定長ルールの桁数の許容ズレ。これを超えたら「桁数が大きく
+     違うので信頼できない」と判定し、制約自体はvalid=trueでも読み直しの対象にする。
+     extractStr（値の前後の余分な文字を除去する仕組み）は「最も一致する固定長の窓」を
+     機械的に選ぶだけで、窓の外にどれだけ余分な文字があったかは見ない。そのため
+     生データが桁数を大きく超過していても（例: 6桁のところ9文字読んでしまった）、
+     窓選択後にcorrectCharの誤認補正（0↔Q等）が偶然辻褄を合わせてしまうと、
+     本来は信頼できない読み取りが constraintValid=true になり得る（実例:
+     "-AB0Q0684"→"AB0006"とvalid判定されたが、正しい値は"AB0684"だった）。
+     1文字程度の超過（薄いゴミ1文字の混入）はextractStrの本来の役割なので許容し、
+     2文字以上の乖離だけを「疑わしい」とみなす。 */
+  const LENGTH_MISMATCH_TOL = 2;
+
   /* ④ 単一値欄の拡大目標。Tesseractは字形が小さいと 9↔G / 0↔O / 1↔I などの
      微妙な取り違えを起こしやすい。行の高さがこの値に満たない切り出しだけを拡大して
      認識する（最大 SINGLE_MAX_SCALE 倍）。
@@ -682,9 +694,16 @@ const Recognizer = (() => {
       const raw = text;
       if (region.pattern) text = applyPattern(text, region.pattern);   // 期待書式で抽出
       /* 文字制約による桁別チェック＋誤認補正（O↔0 等）＋前後の余分文字除去 */
-      let constraintValid = true;
-      if (active) { const cc = CharConstraint.apply(text, rule); text = cc.text; constraintValid = cc.valid; }
-      return { text, raw, constraintValid };
+      let constraintValid = true, lengthSuspicious = false;
+      if (active) {
+        const cc = CharConstraint.apply(text, rule);
+        text = cc.text; constraintValid = cc.valid;
+        const norm = CharConstraint.normalize(rule);
+        if (norm && !norm.variable) {
+          lengthSuspicious = Math.abs([...raw.trim()].length - norm.len) >= LENGTH_MISMATCH_TOL;
+        }
+      }
+      return { text, raw, constraintValid, lengthSuspicious };
     };
 
     /* 言語切替（worker再初期化）を最小化するため同一言語をまとめて処理する */
@@ -707,22 +726,29 @@ const Recognizer = (() => {
       let res = await OcrProcessor.recognize(inputCanvas, usePsm, onProg, useLang, useWl);
       let out = finishText(res, region, rule, active, single);
       let readPsm = usePsm;
-      /* 文字制約に不合格なら、別のレイアウト解釈(PSM)で読み直して合格するものを探す。
+      /* 文字制約に不合格、または桁数が大きく食い違うなら、別のレイアウト解釈(PSM)で
+         読み直して両方満たすものを探す。
          Tesseractは同じ画像でもPSMによって字の切り出し方が変わり、汚れや字間を
          余分な1文字として拾ってしまう失敗（AL2451→AL24521、JL3331→JIL3331 等）が
          PSMを変えるだけで解けることがある。桁数と桁ごとの字種を宣言済みの欄だけが
          対象で、合否という客観的な判定材料があるからこそ選べる。
-         1回目が合格ならそのまま採用するので、これまで正しく読めていた欄の結果は変わらない。
-         追加のOCRは不合格だった欄にだけ発生する。 */
-      if (single && !out.constraintValid) {
+         lengthSuspiciousも見るのは、extractStr（前後の余分な文字を除去する仕組み）が
+         「桁数に最も合う窓」を機械的に選ぶだけで、窓の外にどれだけ余分な文字が
+         あったかは見ないため。生データが桁数を大きく超過していても、窓選択後に
+         誤認補正（0↔Q等）が偶然辻褄を合わせてしまうと、本来信頼できない読み取りが
+         constraintValid=trueになり得る（実例: "-AB0Q0684"→"AB0006"とvalid判定
+         されたが、正しい値は"AB0684"だった）。
+         1回目が両方満たせばそのまま採用するので、これまで正しく読めていた欄の結果は
+         変わらない。追加のOCRは疑わしい欄にだけ発生する。 */
+      if (single && (!out.constraintValid || out.lengthSuspicious)) {
         for (const altPsm of RETRY_PSMS) {
           if (altPsm === usePsm) continue;
           const altRes = await OcrProcessor.recognize(inputCanvas, altPsm, onProg, useLang, useWl);
           const altOut = finishText(altRes, region, rule, active, single);
-          if (altOut.constraintValid) { res = altRes; out = altOut; readPsm = altPsm; break; }
+          if (altOut.constraintValid && !altOut.lengthSuspicious) { res = altRes; out = altOut; readPsm = altPsm; break; }
         }
       }
-      const { text, raw, constraintValid } = out;
+      const { text, raw, constraintValid, lengthSuspicious } = out;
       /* 言語がページ間・領域間で切り替わるとTesseractの言語データ再読み込みが走り
          大幅に遅くなることがあるため、領域ごとの所要時間と使用言語を記録する。 */
       console.log(`[perf]   OCR "${region.name}" lang=${useLang} psm=${readPsm}${readPsm !== usePsm ? '(再読取)' : ''} ${(performance.now() - tFieldStart).toFixed(0)}ms`);
@@ -736,7 +762,10 @@ const Recognizer = (() => {
         confidence: conf,
         error: res.error || null,
         constraint: active ? CharConstraint.describe(rule) : '',
-        constraintValid,
+        /* 桁数超過が読み直しでも解消しなかった場合は、既存の「制約不合格」表示に
+           乗せて利用者へ伝える（constraintValid自体はtrueでも、値としては信用できない
+           ことに変わりないため。LENGTH_MISMATCH_TOL参照）。 */
+        constraintValid: constraintValid && !lengthSuspicious,
         symbols: res.symbols || [],
         cropDataURL: cropCanvas.toDataURL('image/png'),
         /* 診断: 実際にOCRへ渡した画像（前処理後）と使用パラメータ。
