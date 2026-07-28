@@ -83,12 +83,15 @@ def create_app() -> Flask:
 
     # ── 診断ログ（速度・精度の問題を報告する際、ブラウザ側の「診断情報をコピー」
     #    ボタンがサーバー側の直近ログを取りに来る）。applog.log() が呼ばれるたび
-    #    バッファへ積まれているので、ここではそれを返すだけ。 ──
+    #    バッファへ積まれているので、ここではそれを返すだけ。
+    #    校正だけは「ボタンを押した今この瞬間」の値が欲しいので、ここで都度測る
+    #    （health_monitor.py の定点観測とは別に、押した直後の状態を確実に含めるため）。 ──
     @app.get('/api/diagnostics')
     def api_diagnostics():
         info = ocr.health_info()
         return jsonify({
             'serverLog': applog.recent(),
+            'calibrationNowMs': round(matcher._measure_calibration(), 0),
             'opencvVersion': cv2.__version__,
             'ocrEngine': info['ocrEngine'],
             'tesseractVersion': info['tesseractVersion'],

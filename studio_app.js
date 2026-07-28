@@ -1244,6 +1244,9 @@
       const res = await fetch('/api/diagnostics');
       const json = await res.json();
       parts.push(`--- サーバー (OpenCV ${json.opencvVersion || '?'} / ${json.ocrEngine || '?'} ${json.tesseractVersion || ''} / CPU${json.cpuCount || '?'}) ---`);
+      /* 健全なら概ね50〜150ms。これより大きい場合、機械側の要因（他プロセスの負荷・
+         サーマルスロットリング等）でこのサーバー全体が遅くなっている可能性が高い。 */
+      if (typeof json.calibrationNowMs === 'number') parts.push(`[health] 今の校正値=${json.calibrationNowMs}ms（健全な目安: 50〜150ms）`);
       parts.push(...(json.serverLog && json.serverLog.length ? json.serverLog : ['(ログなし。サーバーが未起動か、まだ何も実行していません)']));
     } catch (_) {
       parts.push('--- サーバー ---', '(取得できませんでした。サーバーに接続できているか確認してください)');

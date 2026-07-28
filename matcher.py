@@ -85,11 +85,10 @@ _CALIB_IMG: np.ndarray | None = None
 _CALIB_TPL: np.ndarray | None = None
 
 
-def calibration_ms() -> float | None:
+def _measure_calibration() -> float:
     """既知コストの matchTemplate を1回実行し、所要ミリ秒を返す（健全なら概ね50〜150ms）。
-    OCRTOOL_CALIBRATION が未設定なら計測せず None を返す。"""
-    if not CALIBRATION_ENABLED:
-        return None
+    OCRTOOL_CALIBRATION の設定に関わらず常に測る内部版。calibration_ms()（既存の
+    オンデマンドAPI）と health_monitor.py（バックグラウンド定点観測）の両方から使う。"""
     global _CALIB_IMG, _CALIB_TPL
     if _CALIB_IMG is None:
         rng = np.random.default_rng(12345)
@@ -99,6 +98,13 @@ def calibration_ms() -> float | None:
     res = cv2.matchTemplate(_CALIB_IMG, _CALIB_TPL, cv2.TM_CCOEFF_NORMED)
     cv2.minMaxLoc(res)
     return (time.perf_counter() - t0) * 1000
+
+
+def calibration_ms() -> float | None:
+    """既知コストの校正を1回実行し、所要ミリ秒を返す。OCRTOOL_CALIBRATION が
+    未設定なら計測せず None を返す（/api/match 等、頻繁に呼ばれる経路からの
+    オンデマンド呼び出し用。常時測りたい場合は health_monitor.py を使う）。"""
+    return _measure_calibration() if CALIBRATION_ENABLED else None
 
 
 def _clamp01(v: float) -> float:
