@@ -483,25 +483,37 @@ const Recognizer = (() => {
      取りこぼしと誤検出の双方に余裕を持たせて中間の0.35に置く。 */
   const GLYPH_OVERLAP_RATIO = 0.35;
 
-  /* 重なった2文字のどちらを残すかを「字形らしい幅か」で決める際の、決着に
+  /* 重なった文字群からどれを残すかを「字形らしい幅か」で決める際の、決着に
      必要な差（重なっていない文字の幅の中央値に対する比）。分割された偽の
-     検出は字形の一部しか覆わないため中央値から外れた幅になる。両者の外れ方
-     が同程度＝どちらが本物か幅からは決められない場合に無理に選ぶと、今度は
-     自信満々に別の誤った値を出してしまうため、その場合は修復を諦めて
+     検出は字形の一部しか覆わないため中央値から外れた幅になる。上位2つの
+     外れ方が同程度＝どれが本物か幅からは決められない場合に無理に選ぶと、
+     今度は自信満々に別の誤った値を出してしまうため、その場合は修復を諦めて
      ambiguousのまま上位へ返す（誤った値を確定させるより「要確認」の方が安全）。 */
   const GLYPH_WIDTH_MARGIN = 0.15;
 
-  /* 文字単位の外接矩形から「同じ字形を二重に読んだ」ゴースト文字を取り除く。
+  /* 重なりの連なり（クラスタ）を「1つの字形」とみなせる横幅の上限。
+     字形1つ分の幅（中央値）に対する比で見る。実測では、1つの"0"が3つに
+     分割された例でクラスタ幅は字形1つ分の約1.6倍だった。一方、本当に隣り
+     合う2文字がくっついている場合は2倍前後になるため、その手前で線を引く。
+     これを超えるクラスタは複数の字形を含んでいる可能性があるので、1文字へ
+     まとめると本物の桁を消しかねない＝修復せず要確認のまま返す。 */
+  const GLYPH_CLUSTER_MAX_SPAN = 1.8;
+
+  /* 文字単位の外接矩形から「同じ字形を重複して読んだ」ゴースト文字を取り除く。
      文字種の情報だけでは原理的に解けない誤読（例: 生データ "ABOT750" は
      "O"を消せば"AB7750"、"T"を消せば"AB0750"となり、どちらも「1文字だけ
      CONFUSE表で補正すれば桁が揃う」ため同点になる）を、字形の位置という
      別の情報で決着させるために使う。
-     残す方は「重なっていない文字たちの幅の中央値に近い＝字形として自然な幅」
-     で選ぶ。単純に広い方を残す方式も試したが、ゴースト側がたまたま広く出た
-     場合に誤った文字を残して確信ありと誤判定するため採らない。
+     重なりは2文字とは限らない（実測で1つの"0"が 0[127-143] O[132-156]
+     Q[147-167] の3つに分割された例がある。0とQは直接重なっていないが、間の
+     Oを介して繋がっている）ため、隣接する重なりを連鎖的に辿って1つの
+     クラスタにまとめ、クラスタ全体を1文字へ畳む。
+     残す1つは「重なっていない文字たちの幅の中央値に近い＝字形として自然な
+     幅」で選ぶ。単純に広い方を残す方式も試したが、ゴースト側がたまたま広く
+     出た場合に誤った文字を残して確信ありと誤判定するため採らない。
      @returns {{ text:string, dropped:Array }|null}
        修復できない場合（矩形が無い・文字列と対応しない・重なりが無い・
-       幅から決められない）は null。 */
+       クラスタが広すぎる・幅から決められない）は null。 */
   function repairSplitGlyphs(text, charBoxes) {
     if (!Array.isArray(charBoxes) || charBoxes.length < 2) return null;
     /* 矩形列と実際に採用したテキストがずれている場合（PSMやTSVとboxで
@@ -511,33 +523,38 @@ const Recognizer = (() => {
 
     const widthOf = b => b.x1 - b.x0;
     const sorted = charBoxes.map((b, i) => ({ b, i })).sort((p, q) => p.b.x0 - q.b.x0);
-    /* 重なっている隣接ペアを先に洗い出す（幅の基準は重なっていない文字だけから
-       取りたいため、判定より前に求めておく）。 */
-    const pairs = [];
-    const inPair = new Set();
-    for (let k = 0; k + 1 < sorted.length; k++) {
-      const a = sorted[k], c = sorted[k + 1];
-      if (inPair.has(a.i) || inPair.has(c.i)) continue;
-      const overlap = Math.min(a.b.x1, c.b.x1) - Math.max(a.b.x0, c.b.x0);
-      const narrow = Math.min(widthOf(a.b), widthOf(c.b));
-      if (overlap <= 0 || narrow <= 0 || overlap / narrow < GLYPH_OVERLAP_RATIO) continue;
-      pairs.push([a, c]);
-      inPair.add(a.i); inPair.add(c.i);
+    /* 隣接する重なりを連鎖的に辿ってクラスタ化する（0—O—Q のように、両端は
+       直接重なっていなくても間を介して繋がっていれば同じ字形とみなす）。 */
+    const clusters = [[sorted[0]]];
+    for (let k = 1; k < sorted.length; k++) {
+      const prev = sorted[k - 1], cur = sorted[k];
+      const overlap = Math.min(prev.b.x1, cur.b.x1) - Math.max(prev.b.x0, cur.b.x0);
+      const narrow = Math.min(widthOf(prev.b), widthOf(cur.b));
+      if (overlap > 0 && narrow > 0 && overlap / narrow >= GLYPH_OVERLAP_RATIO) {
+        clusters[clusters.length - 1].push(cur);
+      } else {
+        clusters.push([cur]);
+      }
     }
-    if (!pairs.length) return null;
+    if (!clusters.some(c => c.length > 1)) return null;
 
-    const cleanW = sorted.filter(p => !inPair.has(p.i)).map(p => widthOf(p.b)).sort((x, y) => x - y);
+    const cleanW = clusters.filter(c => c.length === 1).map(c => widthOf(c[0].b)).sort((x, y) => x - y);
     const basis = cleanW.length ? cleanW : sorted.map(p => widthOf(p.b)).sort((x, y) => x - y);
     const median = basis[Math.floor(basis.length / 2)];
     if (!median) return null;
 
     const drop = new Set();
-    for (const [a, c] of pairs) {
-      const devA = Math.abs(widthOf(a.b) - median);
-      const devC = Math.abs(widthOf(c.b) - median);
-      /* 幅の自然さに有意な差が無ければ、どちらが本物か決められない。 */
-      if (Math.abs(devA - devC) < GLYPH_WIDTH_MARGIN * median) return null;
-      drop.add(devA > devC ? a.i : c.i);
+    for (const cluster of clusters) {
+      if (cluster.length < 2) continue;
+      /* 複数の字形を巻き込んでいそうなクラスタは1文字へ畳まない。 */
+      const span = Math.max(...cluster.map(p => p.b.x1)) - Math.min(...cluster.map(p => p.b.x0));
+      if (span > GLYPH_CLUSTER_MAX_SPAN * median) return null;
+      const ranked = cluster
+        .map(p => ({ p, dev: Math.abs(widthOf(p.b) - median) }))
+        .sort((a, b) => a.dev - b.dev);
+      /* 幅の自然さに有意な差が無ければ、どれが本物か決められない。 */
+      if (ranked[1].dev - ranked[0].dev < GLYPH_WIDTH_MARGIN * median) return null;
+      for (const r of ranked.slice(1)) drop.add(r.p.i);
     }
     if (!drop.size) return null;
     return {
