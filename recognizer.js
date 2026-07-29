@@ -625,37 +625,61 @@ const Recognizer = (() => {
     }
     return groups.length === L ? groups : null;
   }
+  /* 隣接する矩形が物理的に重なっている（同じ横位置を取り合っている）とみなす
+     重なり率（狭い方の幅に対する比）。2文字が印字上・本当に重なることは
+     無いので、これを超える重なりは「同じ字形を二重に検出した」ことの直接
+     証拠になる（実機ログで確認: "704"の"7"が"7"+ゴースト"1"の2検出に分裂
+     した例で、重なりは狭い方(ゴースト)の幅のちょうど50%だった）。間隔の
+     自然な境目（GLYPH_NATURAL_BREAK_MIN_RATIO）と違い、他の桁との比較なしに
+     2矩形だけで判定できるため、可変長で参照点が少ない場合でも効く。 */
+  const GLYPH_OVERLAP_MERGE_RATIO = 0.3;
+
   /* 可変長ルール向け（期待桁数が無い金額欄等）: 桁数を仮定できないため、
-     間隔の分布そのものから「断片同士の狭い間隔」と「本物の字送り」の境目を
-     探す。間隔を昇順に並べ、隣り合う値の比が最も大きく開く箇所（自然な
-     境目・1次元のJenks breaksに相当）を探し、それより小さい間隔だけを
-     断片としてまとめる。境目の飛び幅が乏しい（全体になだらか）場合は
-     断片と本物を区別する根拠が無いとみなし、手を出さない。
+     ①物理的な重なり、②間隔の分布から見つかる自然な境目、の2つの根拠で
+     「同じ字形の断片」を判定する。
+     ①は上記の通り2矩形だけで判定できる直接証拠。②は間隔を昇順に並べ、
+     隣り合う値の比が最も大きく開く箇所（自然な境目・1次元のJenks breaksに
+     相当）を探し、それより小さい間隔だけを断片とみなす方式で、重なっては
+     いないが明らかに詰まっている断片（実機ログの"AB0684"の3分割例等）を
+     拾うために残している。境目の飛び幅が乏しい（全体になだらか）場合は
+     ②の根拠は使えないが、①（重なり）だけでも判定は成立する。
 
      固定長ルールと違い「桁数が合うまとまり数に絞り込む」検算が使えないため
-     （可変長は最終的に何文字になるべきか分からない）、しきい値は保守的に
+     （可変長は最終的に何文字になるべきか分からない）、②のしきい値は保守的に
      取る。実測（固定長の実機ログ3件）では本物の間隔が48〜53pxに対し断片が
      2.5〜14.5pxで、比にすると3.3倍以上あった。一方、単に「別々の本物の
      文字がたまたま少し詰まっている」場合の間隔の揺れは経験上2倍未満に収まる
      ため、その中間である3.0倍を境目の採用ラインとする（これ未満の飛び幅は
-     「断片が混じっている」と決め打つ根拠として弱いとみなし、手を出さない）。 */
+     「断片が混じっている」と決め打つ根拠として弱いとみなし、①が無ければ
+     手を出さない）。 */
   const GLYPH_NATURAL_BREAK_MIN_RATIO = 3.0;
   function groupByNaturalGaps(items, gaps) {
-    if (gaps.length < 2) return null;   // 比較対象が無いと「狭い/広い」を判定できない
-    const sorted = [...gaps].sort((a, b) => a - b);
-    let breakIdx = -1, breakRatio = GLYPH_NATURAL_BREAK_MIN_RATIO;
-    for (let i = 0; i + 1 < sorted.length; i++) {
-      const ratio = (sorted[i + 1] + 1) / (sorted[i] + 1);
-      if (ratio > breakRatio) { breakRatio = ratio; breakIdx = i; }
+    const overlapRatios = items.slice(1).map((cur, k) => {
+      const prev = items[k].b, c = cur.b;
+      const overlap = Math.min(prev.x1, c.x1) - Math.max(prev.x0, c.x0);
+      const narrow = Math.min(prev.x1 - prev.x0, c.x1 - c.x0);
+      return narrow > 0 ? overlap / narrow : 0;
+    });
+
+    let gapThreshold = null;
+    if (gaps.length >= 2) {   // 比較対象が2つ以上あれば「狭い/広い」の境目を探せる
+      const sorted = [...gaps].sort((a, b) => a - b);
+      let breakIdx = -1, breakRatio = GLYPH_NATURAL_BREAK_MIN_RATIO;
+      for (let i = 0; i + 1 < sorted.length; i++) {
+        const ratio = (sorted[i + 1] + 1) / (sorted[i] + 1);
+        if (ratio > breakRatio) { breakRatio = ratio; breakIdx = i; }
+      }
+      if (breakIdx >= 0) gapThreshold = (sorted[breakIdx] + sorted[breakIdx + 1]) / 2;
     }
-    if (breakIdx < 0) return null;   // 明確な境目が無い＝断片が混ざっている根拠が無い
-    const threshold = (sorted[breakIdx] + sorted[breakIdx + 1]) / 2;
+
     const groups = [[items[0]]];
     for (let k = 1; k < items.length; k++) {
-      if (items[k].c - items[k - 1].c < threshold) groups[groups.length - 1].push(items[k]);
+      const byOverlap = overlapRatios[k - 1] >= GLYPH_OVERLAP_MERGE_RATIO;
+      const byGap = gapThreshold != null && (items[k].c - items[k - 1].c) < gapThreshold;
+      if (byOverlap || byGap) groups[groups.length - 1].push(items[k]);
       else groups.push([items[k]]);
     }
-    return groups;
+    return groups.length < items.length ? groups : null;   // 何も併合されなければ判定材料なし
   }
 
   /* ④ 単一値欄の拡大目標。Tesseractは字形が小さいと 9↔G / 0↔O / 1↔I などの
