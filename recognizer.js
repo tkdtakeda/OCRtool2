@@ -487,6 +487,11 @@ const Recognizer = (() => {
      ＝信用できないので修復しない。 */
   const GLYPH_SLOT_TOLERANCE = 0.4;
 
+  /* pickByWidthで、幅の自然さの決着に必要な上位2候補の差（中央値に対する比）。
+     これ未満の差では「どちらが本物か幅からは決められない」とみなし、その
+     まとまりの修復自体を諦める（誤った方を自信満々に確定させるより安全）。 */
+  const GLYPH_WIDTH_MARGIN = 0.15;
+
   /** 数値配列の中央値。 */
   function medianOf(nums) {
     if (!nums.length) return null;
@@ -518,14 +523,19 @@ const Recognizer = (() => {
      まとまりの数が桁数と一致しない場合は、値の前後に付いた本物のゴミなど
      別の要因が混ざっているので手を出さない（既存の前後除去に任せる）。
 
+     金額欄等の可変長ルールには「期待される桁数」自体が無い（帳票ごとに
+     金額の桁が違って当然のため）。この場合はexpectedLenを渡せないので、
+     等間隔の当てはめではなく「間隔の分布そのものから断片と本物の境目を
+     見つける」自己整合的な方式（groupByNaturalGaps）に切り替える。
+
      @param {string} text        矩形と対応する生の認識文字列
      @param {Array}  charBoxes   文字単位の外接矩形
-     @param {number} expectedLen 期待される桁数（固定長ルールのみ）
+     @param {number} expectedLen 期待される桁数（固定長ルールのみ。0/未指定なら可変長として扱う）
      @returns {{ text:string, dropped:Array }|null} 修復できない場合は null。 */
   function repairSplitGlyphs(text, charBoxes, expectedLen) {
     const L = expectedLen | 0;
     if (!Array.isArray(charBoxes) || charBoxes.length < 2) return null;
-    if (!L || charBoxes.length <= L) return null;   // 余分が無ければ何もしない
+    if (L && charBoxes.length <= L) return null;   // 桁数既知で余分が無ければ何もしない
     /* 矩形列と実際に採用したテキストがずれている場合（PSMやTSVとboxで
        セグメンテーションが食い違う等）は、対応が取れないので手を出さない。 */
     if (charBoxes.map(b => b.text).join('') !== [...text].filter(c => !/\s/.test(c)).join('')) return null;
@@ -533,24 +543,29 @@ const Recognizer = (() => {
     const items = charBoxes.map((b, i) => ({ b, i, c: (b.x0 + b.x1) / 2 })).sort((p, q) => p.c - q.c);
     const gaps = [];
     for (let k = 0; k + 1 < items.length; k++) gaps.push(items[k + 1].c - items[k].c);
-    if (gaps.length < L - 1) return null;
-    /* ピッチは「大きい方から桁数-1個」の間隔の中央値で見る（小さい間隔＝
-       断片同士なので、これを混ぜるとピッチが過小評価される）。 */
-    const pitch = medianOf([...gaps].sort((a, b) => b - a).slice(0, L - 1));
-    if (!pitch || pitch <= 0) return null;
 
-    /* 間隔がピッチの半分未満なら同じ字形の断片としてまとめる。 */
-    const groups = [[items[0]]];
-    for (let k = 1; k < items.length; k++) {
-      if (items[k].c - items[k - 1].c < GLYPH_MERGE_PITCH_RATIO * pitch) groups[groups.length - 1].push(items[k]);
-      else groups.push([items[k]]);
-    }
-    if (groups.length !== L) return null;   // 桁数と合わない＝別の要因。手を出さない
-    if (!groups.some(g => g.length > 1)) return null;
+    const groups = L ? groupByExpectedLen(items, gaps, L) : groupByNaturalGaps(items, gaps);
+    if (!groups || !groups.some(g => g.length > 1)) return null;
 
-    /* 等間隔の並び（中心 ≒ 切片 + ピッチ×番号）を、断片を含まないまとまり
-       だけから当てはめる。左端のゴミを巻き込んで太った矩形など外れ値が
-       あっても効くよう、全ペアの傾きと切片の中央値で求める。 */
+    /* まとまりの中でどれを残すかは、桁数が既知かどうかで信頼できる根拠が違う。
+       桁数既知（固定長）なら「等間隔に並ぶはずの位置」を他の桁から当てはめられる
+       （4〜5桁分の参照点があり、内挿で済むことが多い）。桁数不明（可変長）だと
+       参照点が少なく（最少2つ）、まとまりが先頭・末尾にあると外挿になり信頼性が
+       落ちる（実際、2参照点からの外挿で先頭のゴーストの方を残し本物の桁を
+       落とす誤判定をテストで確認した）。そのため可変長では位置の当てはめを
+       使わず、より単純で外挿に頼らない「幅の自然さ」だけで決める
+       （pickByWidth）。 */
+    const drop = L ? pickByPositionFit(groups) : pickByWidth(groups);
+    if (!drop || !drop.size) return null;
+    return {
+      text: charBoxes.filter((_, i) => !drop.has(i)).map(b => b.text).join(''),
+      dropped: charBoxes.filter((_, i) => drop.has(i)),
+    };
+  }
+  /* 固定長ルール向け: 断片を含まないまとまりだけから「等間隔に並ぶはずの位置」
+     （中心 ≒ 切片 + ピッチ×番号）を当てはめる。左端のゴミを巻き込んで太った
+     矩形など外れ値があっても効くよう、全ペアの傾きと切片の中央値で求める。 */
+  function pickByPositionFit(groups) {
     const solo = groups.map((g, gi) => ({ gi, c: g[0].c, single: g.length === 1 })).filter(s => s.single);
     if (solo.length < 2) return null;
     const slopes = [];
@@ -572,11 +587,75 @@ const Recognizer = (() => {
       if (ranked[0].off > GLYPH_SLOT_TOLERANCE * fitPitch) return null;
       for (const r of ranked.slice(1)) drop.add(r.p.i);
     }
-    if (!drop.size) return null;
-    return {
-      text: charBoxes.filter((_, i) => !drop.has(i)).map(b => b.text).join(''),
-      dropped: charBoxes.filter((_, i) => drop.has(i)),
-    };
+    return drop;
+  }
+  /* 可変長ルール向け: 断片を含まないまとまり（幅）の中央値に対して、
+     まとまり内の各候補が「補正なしでどれだけ自然な幅か」で決める。
+     位置の当てはめ（pickByPositionFit）は参照点が少ない可変長では外挿に
+     頼りがちで信頼できないため使わない。上位2つの幅の差が乏しい場合は
+     決められないとみなし、そのまとまりごと諦める（無理に選ばない）。 */
+  function pickByWidth(groups) {
+    const widthOf = g => g.b.x1 - g.b.x0;
+    const soloWidths = groups.filter(g => g.length === 1).map(g => widthOf(g[0]));
+    const basis = soloWidths.length ? soloWidths : groups.flat().map(widthOf);
+    const median = medianOf(basis);
+    if (!median) return null;
+
+    const drop = new Set();
+    for (const g of groups) {
+      if (g.length < 2) continue;
+      const ranked = g.map(p => ({ p, dev: Math.abs(widthOf(p) - median) })).sort((a, b) => a.dev - b.dev);
+      if (ranked[1].dev - ranked[0].dev < GLYPH_WIDTH_MARGIN * median) return null;
+      for (const r of ranked.slice(1)) drop.add(r.p.i);
+    }
+    return drop;
+  }
+  /* 固定長ルール向け: ピッチを「大きい方から桁数-1個」の間隔の中央値で見積もり
+     （小さい間隔＝断片同士なので混ぜると過小評価される）、ピッチの半分未満の
+     間隔をひとかたまりにする。まとまりの数が桁数と一致しない場合は別の要因
+     （前後の本物のゴミ等）が混ざっているとみなし null を返す。 */
+  function groupByExpectedLen(items, gaps, L) {
+    if (gaps.length < L - 1) return null;
+    const pitch = medianOf([...gaps].sort((a, b) => b - a).slice(0, L - 1));
+    if (!pitch || pitch <= 0) return null;
+    const groups = [[items[0]]];
+    for (let k = 1; k < items.length; k++) {
+      if (items[k].c - items[k - 1].c < GLYPH_MERGE_PITCH_RATIO * pitch) groups[groups.length - 1].push(items[k]);
+      else groups.push([items[k]]);
+    }
+    return groups.length === L ? groups : null;
+  }
+  /* 可変長ルール向け（期待桁数が無い金額欄等）: 桁数を仮定できないため、
+     間隔の分布そのものから「断片同士の狭い間隔」と「本物の字送り」の境目を
+     探す。間隔を昇順に並べ、隣り合う値の比が最も大きく開く箇所（自然な
+     境目・1次元のJenks breaksに相当）を探し、それより小さい間隔だけを
+     断片としてまとめる。境目の飛び幅が乏しい（全体になだらか）場合は
+     断片と本物を区別する根拠が無いとみなし、手を出さない。
+
+     固定長ルールと違い「桁数が合うまとまり数に絞り込む」検算が使えないため
+     （可変長は最終的に何文字になるべきか分からない）、しきい値は保守的に
+     取る。実測（固定長の実機ログ3件）では本物の間隔が48〜53pxに対し断片が
+     2.5〜14.5pxで、比にすると3.3倍以上あった。一方、単に「別々の本物の
+     文字がたまたま少し詰まっている」場合の間隔の揺れは経験上2倍未満に収まる
+     ため、その中間である3.0倍を境目の採用ラインとする（これ未満の飛び幅は
+     「断片が混じっている」と決め打つ根拠として弱いとみなし、手を出さない）。 */
+  const GLYPH_NATURAL_BREAK_MIN_RATIO = 3.0;
+  function groupByNaturalGaps(items, gaps) {
+    if (gaps.length < 2) return null;   // 比較対象が無いと「狭い/広い」を判定できない
+    const sorted = [...gaps].sort((a, b) => a - b);
+    let breakIdx = -1, breakRatio = GLYPH_NATURAL_BREAK_MIN_RATIO;
+    for (let i = 0; i + 1 < sorted.length; i++) {
+      const ratio = (sorted[i + 1] + 1) / (sorted[i] + 1);
+      if (ratio > breakRatio) { breakRatio = ratio; breakIdx = i; }
+    }
+    if (breakIdx < 0) return null;   // 明確な境目が無い＝断片が混ざっている根拠が無い
+    const threshold = (sorted[breakIdx] + sorted[breakIdx + 1]) / 2;
+    const groups = [[items[0]]];
+    for (let k = 1; k < items.length; k++) {
+      if (items[k].c - items[k - 1].c < threshold) groups[groups.length - 1].push(items[k]);
+      else groups.push([items[k]]);
+    }
+    return groups;
   }
 
   /* ④ 単一値欄の拡大目標。Tesseractは字形が小さいと 9↔G / 0↔O / 1↔I などの
@@ -845,12 +924,19 @@ const Recognizer = (() => {
          分割して読んでしまった」断片を字送りの規則性から特定する。文字種だけでは
          同点で決められない誤読（ambiguous）を解くための追加情報で、pytesseract
          経路ではtesseractの再起動を伴うため疑わしい欄だけで実行する。ここで
-         解決できればこの後のPSM読み直し（最大3回のOCR）自体が不要になる。 */
-      if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous)) {
+         解決できればこの後のPSM読み直し（最大3回のOCR）自体が不要になる。
+         金額欄等の可変長ルールは「桁数」という判定材料自体が無いため、
+         constraintValid/lengthSuspicious/ambiguousがどれも常にtrue/false側に
+         倒れて疑わしさを検知できない（実例: "704"のはずが"7104"・"104"と
+         誤読されても、可変長ルールはどちらも普通に受理してしまう）。他に
+         安価な判定材料が無い以上、可変長の単一値欄は毎回この矩形チェックに
+         回す（固定長欄のような「合否で絞ってから」はできない）。 */
+      const norm = active ? CharConstraint.normalize(rule) : null;
+      const isVariableSingle = single && !!(norm && norm.variable);
+      if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous || isVariableSingle)) {
         const boxRes = await OcrProcessor.recognize(inputCanvas, usePsm, onProg, useLang, useWl, true);
         const boxes = boxRes.charBoxes;
         if (Array.isArray(boxes) && boxes.length) {
-          const norm = active ? CharConstraint.normalize(rule) : null;
           const expectedLen = (norm && !norm.variable) ? norm.len : 0;
           const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes, expectedLen);
           const dropped = new Set((rep ? rep.dropped : []));
