@@ -231,6 +231,7 @@ def create_app() -> Flask:
                 psm=body.get('psm', 3),
                 lang=body.get('lang') or 'eng',
                 whitelist=body.get('whitelist') or '',
+                char_boxes=bool(body.get('charBoxes')),
             )
             applog.log(f'[perf] /api/ocr {(time.perf_counter() - t0) * 1000:.0f}ms')
             return jsonify(result)

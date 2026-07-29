@@ -57,7 +57,7 @@ const OcrProcessor = (() => {
    *   error:    string|null
    * }>}
    */
-  async function recognize(canvas, psm, onProgress, lang, whitelist) {
+  async function recognize(canvas, psm, onProgress, lang, whitelist, charBoxes) {
     /* サーバー呼び出しは1リクエストで完結し、Tesseract.js時代のような
        ワーカー言語切替の待ち時間（数十秒）が無くなったため、途中経過は
        出せない。進捗表示が前の欄の文言のまま古く見えないよう、リクエスト
@@ -70,6 +70,9 @@ const OcrProcessor = (() => {
         psm,
         lang: lang || 'eng',
         whitelist: whitelist || '',
+        /* 文字単位の外接矩形。pytesseract経路ではtesseractの再起動を伴うため、
+           呼び出し側が疑わしいと判断した欄でのみ true を渡すこと。 */
+        charBoxes: !!charBoxes,
       });
       return {
         fullText:   json.fullText || '',
@@ -77,6 +80,7 @@ const OcrProcessor = (() => {
         symbols:    json.symbols || [],
         lines:      json.lines || [],
         confidence: typeof json.confidence === 'number' ? json.confidence : 0,
+        charBoxes:  json.charBoxes || null,
         error:      json.error || null,
       };
     } catch (e) {
@@ -86,6 +90,7 @@ const OcrProcessor = (() => {
         symbols:  [],
         lines:    [],
         confidence: 0,
+        charBoxes: null,
         error:    (e && e.message) ? e.message : String(e),
       };
     }

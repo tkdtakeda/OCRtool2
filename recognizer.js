@@ -474,6 +474,78 @@ const Recognizer = (() => {
      2文字以上の乖離だけを「疑わしい」とみなす。 */
   const LENGTH_MISMATCH_TOL = 2;
 
+  /* 「1つの字形を2文字として読んでしまった」と判定する重なり率のしきい値。
+     狭い方の文字幅に対して、隣の文字とこれ以上重なっていれば別々の字形では
+     あり得ない＝一方は同じ字形を二重に拾ったゴーストとみなす。
+     実測（サンドボックスで再現した "AB0750" の誤読 "AB0O750"）では、
+     ゴースト対の重なりが狭い方の幅の約58%だったのに対し、正しく隣り合う
+     文字同士は重ならず十数pxの隙間が空いていた。両者の差は大きいので、
+     取りこぼしと誤検出の双方に余裕を持たせて中間の0.35に置く。 */
+  const GLYPH_OVERLAP_RATIO = 0.35;
+
+  /* 重なった2文字のどちらを残すかを「字形らしい幅か」で決める際の、決着に
+     必要な差（重なっていない文字の幅の中央値に対する比）。分割された偽の
+     検出は字形の一部しか覆わないため中央値から外れた幅になる。両者の外れ方
+     が同程度＝どちらが本物か幅からは決められない場合に無理に選ぶと、今度は
+     自信満々に別の誤った値を出してしまうため、その場合は修復を諦めて
+     ambiguousのまま上位へ返す（誤った値を確定させるより「要確認」の方が安全）。 */
+  const GLYPH_WIDTH_MARGIN = 0.15;
+
+  /* 文字単位の外接矩形から「同じ字形を二重に読んだ」ゴースト文字を取り除く。
+     文字種の情報だけでは原理的に解けない誤読（例: 生データ "ABOT750" は
+     "O"を消せば"AB7750"、"T"を消せば"AB0750"となり、どちらも「1文字だけ
+     CONFUSE表で補正すれば桁が揃う」ため同点になる）を、字形の位置という
+     別の情報で決着させるために使う。
+     残す方は「重なっていない文字たちの幅の中央値に近い＝字形として自然な幅」
+     で選ぶ。単純に広い方を残す方式も試したが、ゴースト側がたまたま広く出た
+     場合に誤った文字を残して確信ありと誤判定するため採らない。
+     @returns {{ text:string, dropped:Array }|null}
+       修復できない場合（矩形が無い・文字列と対応しない・重なりが無い・
+       幅から決められない）は null。 */
+  function repairSplitGlyphs(text, charBoxes) {
+    if (!Array.isArray(charBoxes) || charBoxes.length < 2) return null;
+    /* 矩形列と実際に採用したテキストがずれている場合（PSMやTSVとboxで
+       セグメンテーションが食い違う等）は、対応が取れないので手を出さない。 */
+    const boxChars = charBoxes.map(b => b.text).join('');
+    if (boxChars !== [...text].filter(c => !/\s/.test(c)).join('')) return null;
+
+    const widthOf = b => b.x1 - b.x0;
+    const sorted = charBoxes.map((b, i) => ({ b, i })).sort((p, q) => p.b.x0 - q.b.x0);
+    /* 重なっている隣接ペアを先に洗い出す（幅の基準は重なっていない文字だけから
+       取りたいため、判定より前に求めておく）。 */
+    const pairs = [];
+    const inPair = new Set();
+    for (let k = 0; k + 1 < sorted.length; k++) {
+      const a = sorted[k], c = sorted[k + 1];
+      if (inPair.has(a.i) || inPair.has(c.i)) continue;
+      const overlap = Math.min(a.b.x1, c.b.x1) - Math.max(a.b.x0, c.b.x0);
+      const narrow = Math.min(widthOf(a.b), widthOf(c.b));
+      if (overlap <= 0 || narrow <= 0 || overlap / narrow < GLYPH_OVERLAP_RATIO) continue;
+      pairs.push([a, c]);
+      inPair.add(a.i); inPair.add(c.i);
+    }
+    if (!pairs.length) return null;
+
+    const cleanW = sorted.filter(p => !inPair.has(p.i)).map(p => widthOf(p.b)).sort((x, y) => x - y);
+    const basis = cleanW.length ? cleanW : sorted.map(p => widthOf(p.b)).sort((x, y) => x - y);
+    const median = basis[Math.floor(basis.length / 2)];
+    if (!median) return null;
+
+    const drop = new Set();
+    for (const [a, c] of pairs) {
+      const devA = Math.abs(widthOf(a.b) - median);
+      const devC = Math.abs(widthOf(c.b) - median);
+      /* 幅の自然さに有意な差が無ければ、どちらが本物か決められない。 */
+      if (Math.abs(devA - devC) < GLYPH_WIDTH_MARGIN * median) return null;
+      drop.add(devA > devC ? a.i : c.i);
+    }
+    if (!drop.size) return null;
+    return {
+      text: charBoxes.filter((_, i) => !drop.has(i)).map(b => b.text).join(''),
+      dropped: charBoxes.filter((_, i) => drop.has(i)),
+    };
+  }
+
   /* ④ 単一値欄の拡大目標。Tesseractは字形が小さいと 9↔G / 0↔O / 1↔I などの
      微妙な取り違えを起こしやすい。行の高さがこの値に満たない切り出しだけを拡大して
      認識する（最大 SINGLE_MAX_SCALE 倍）。
@@ -736,6 +808,29 @@ const Recognizer = (() => {
          （抽出窓の誤選択・途中への1文字混入等の切り分けに使う）。 */
       console.log(`[ocr]   "${region.name}" psm=${usePsm} raw=${JSON.stringify(out.raw)} `
         + `→ ${JSON.stringify(out.text)} valid=${out.constraintValid} lengthSuspicious=${out.lengthSuspicious} ambiguous=${out.ambiguous}`);
+      /* 疑わしい欄に限り、文字単位の外接矩形を取り直して「1つの字形を2文字として
+         読んでしまった」ゴーストを字形の位置から特定する。文字種だけでは同点で
+         決められない誤読（ambiguous）を解くための追加情報で、pytesseract経路では
+         tesseractの再起動を伴うため疑わしい欄だけで実行する。ここで解決できれば
+         この後のPSM読み直し（最大3回のOCR）自体が不要になる。 */
+      if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous)) {
+        const boxRes = await OcrProcessor.recognize(inputCanvas, usePsm, onProg, useLang, useWl, true);
+        const boxes = boxRes.charBoxes;
+        if (Array.isArray(boxes) && boxes.length) {
+          const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes);
+          const dropped = new Set((rep ? rep.dropped : []));
+          console.log(`[ocr]   "${region.name}" 文字矩形: `
+            + boxes.map(b => `${b.text}[${b.x0}-${b.x1}]${dropped.has(b) ? '←除外' : ''}`).join(' '));
+          if (rep) {
+            const repRes = { ...boxRes, fullText: rep.text, lines: [{ text: rep.text, confidence: boxRes.confidence || 0 }] };
+            const repOut = finishText(repRes, region, rule, active, single);
+            console.log(`[ocr]   "${region.name}" 字形重なりを除去 raw=${JSON.stringify(rep.text)} `
+              + `→ ${JSON.stringify(repOut.text)} valid=${repOut.constraintValid} `
+              + `lengthSuspicious=${repOut.lengthSuspicious} ambiguous=${repOut.ambiguous}`);
+            if (repOut.constraintValid && !repOut.lengthSuspicious && !repOut.ambiguous) { res = repRes; out = repOut; }
+          }
+        }
+      }
       /* 文字制約に不合格、桁数が大きく食い違う、または抽出候補が複数同点で
          決められない(ambiguous)なら、別のレイアウト解釈(PSM)で読み直して
          いずれも満たすものを探す。

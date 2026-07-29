@@ -160,7 +160,8 @@ def _iterate_level(api, level) -> list[dict[str, Any]]:
     return items
 
 
-def _recognize_tesserocr(rgba: np.ndarray, psm: int, lang: str, whitelist: str) -> dict[str, Any]:
+def _recognize_tesserocr(rgba: np.ndarray, psm: int, lang: str, whitelist: str,
+                         char_boxes: bool = False) -> dict[str, Any]:
     pil_img = Image.fromarray(rgba).convert('RGB')
     with _tesserocr_lock:
         api = _get_tesserocr_api(lang)
@@ -181,6 +182,9 @@ def _recognize_tesserocr(rgba: np.ndarray, psm: int, lang: str, whitelist: str) 
         'symbols': [{'text': s['text'], 'confidence': s['confidence']} for s in symbols_raw],
         'lines': [{'text': l['text'], 'confidence': l['confidence']} for l in lines_raw],
         'confidence': int(overall_conf) if overall_conf is not None else 0,
+        # tesserocr は文字単位の外接矩形を元から持っているので追加コストなしで返せる。
+        'charBoxes': ([{'text': s['text'], 'confidence': s['confidence'], **s['bbox']}
+                       for s in symbols_raw] if char_boxes else None),
         'error': None,
     }
 
@@ -314,12 +318,41 @@ def _group_words_and_lines(data: dict[str, list]) -> tuple[list[dict], list[dict
     return words, lines
 
 
-def _recognize_pytesseract(rgba: np.ndarray, psm: int, lang: str, whitelist: str) -> dict[str, Any]:
+def _parse_box_output(text: str, img_h: int) -> list[dict[str, Any]]:
+    """image_to_boxes の出力（1行 = "文字 left bottom right top page"）を、
+    words/symbols と同じ左上原点の座標系へ直して返す。Tesseractのbox形式だけは
+    左下原点（PDF等と同じ数学座標系）なので、y をここで反転させる。
+    未認識を表す "~" 行や、桁数の足りない壊れた行は黙って捨てる。"""
+    boxes: list[dict[str, Any]] = []
+    for line in (text or '').splitlines():
+        parts = line.split(' ')
+        if len(parts) < 5 or parts[0] == '~':
+            continue
+        try:
+            left, bottom, right, top = (int(parts[i]) for i in range(1, 5))
+        except ValueError:
+            continue
+        boxes.append({
+            'text': parts[0],
+            'x0': left, 'x1': right,
+            'y0': img_h - top, 'y1': img_h - bottom,
+        })
+    return boxes
+
+
+def _recognize_pytesseract(rgba: np.ndarray, psm: int, lang: str, whitelist: str,
+                           char_boxes: bool = False) -> dict[str, Any]:
     pil_img = Image.fromarray(rgba).convert('RGB')
     config, tmp_path = _pytesseract_config(psm, whitelist)
+    box_text = None
     try:
         data = _pytesseract.image_to_data(pil_img, lang=lang, config=config,
                                            output_type=_pytesseract.Output.DICT)
+        # 文字単位の外接矩形は image_to_data（TSV）には無く、別形式(box)でしか
+        # 取得できない＝tesseractをもう一度起動する必要がある。呼び出し側が
+        # 明示的に要求した時だけ実行し、通常の認識には余計なコストを掛けない。
+        if char_boxes:
+            box_text = _pytesseract.image_to_boxes(pil_img, lang=lang, config=config)
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:
@@ -339,21 +372,29 @@ def _recognize_pytesseract(rgba: np.ndarray, psm: int, lang: str, whitelist: str
         'symbols': symbols,
         'lines': lines,
         'confidence': confidence,
+        'charBoxes': _parse_box_output(box_text, rgba.shape[0]) if box_text is not None else None,
         'error': None,
     }
 
 
 # ── 公開API ─────────────────────────────────────────────────
-def recognize(rgba: np.ndarray, psm: int, lang: str, whitelist: str) -> dict[str, Any]:
+def recognize(rgba: np.ndarray, psm: int, lang: str, whitelist: str,
+              char_boxes: bool = False) -> dict[str, Any]:
     """ocr.js の OcrProcessor.recognize と同じ契約：例外を投げず、失敗時は
-    error にメッセージを入れて返す。"""
-    empty = {'fullText': '', 'words': [], 'symbols': [], 'lines': [], 'confidence': 0, 'error': None}
+    error にメッセージを入れて返す。
+
+    char_boxes=True のときだけ、文字単位の外接矩形を charBoxes として返す
+    （1文字が2つに分割されて読まれた等、文字種だけでは判別できない誤読の
+    切り分けに使う）。pytesseract経路ではtesseractの再起動を伴うので、
+    疑わしい欄に限って要求すること。"""
+    empty = {'fullText': '', 'words': [], 'symbols': [], 'lines': [], 'confidence': 0,
+             'charBoxes': None, 'error': None}
     if _ENGINE is None:
         empty['error'] = f'OCRエンジンを初期化できませんでした: {_INIT_ERROR or "不明なエラー"}'
         return empty
     try:
         fn = _recognize_tesserocr if _ENGINE == 'tesserocr' else _recognize_pytesseract
-        return fn(rgba, psm, lang or 'eng', whitelist or '')
+        return fn(rgba, psm, lang or 'eng', whitelist or '', char_boxes)
     except Exception as e:  # noqa: BLE001 - ocr.js同様、呼び出し側へは例外を伝播させない
         empty['error'] = str(e)
         return empty
