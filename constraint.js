@@ -219,19 +219,53 @@ const CharConstraint = (() => {
       const setS = new Set(r.set);
       return arr.filter(c => correctChar(c, setS, r.sub) != null).join('');
     }
-    /* 固定長: 制約に最も合う len 文字の窓を探す */
+    /* 固定長: 制約に最も合う len 文字の候補を探す。
+       候補は「連続する窓」（値の前後にある余分な文字を想定）に加え、
+       過剰1文字（例: "AB0T746"→正しくは"AB0746"）のときだけ「途中の
+       どこか1文字を削除」も候補に加える（窓＝連続範囲の切り出ししか
+       できないため、値の途中に紛れ込んだ1文字は本来どの窓を選んでも
+       除去できず、代わりに前後どちらかの本物の桁を切り捨ててしまって
+       いた）。
+       評価は「桁ごとの許可集合にそのまま入っている（補正不要）」個数を
+       最優先し、CONFUSE表による1文字補正（0↔O・7↔T等）で辻褄が合った
+       個数は同点時のタイブレークにのみ使う。補正一致は「たまたま辻褄が
+       合っただけ」の可能性があり、これを窓の完全一致と同列に扱うと、
+       本来削除すべき紛れ込み文字を残したまま真の桁を捨てる窓と、
+       正しく紛れ込み文字だけを削除した候補とが同点になり、常に先に
+       見つかる（＝連続窓が先に走査される）誤った側が選ばれてしまう
+       ため。 */
     const L = r.len;
     if (arr.length <= L) return arr.join('');
-    let best = 0, bestScore = -1;
-    for (let i = 0; i + L <= arr.length; i++) {
-      let sc = 0;
+
+    const scoreIdxs = idxs => {
+      let direct = 0, resolved = 0;
       for (let k = 0; k < L; k++) {
         const s = r.pos[k];
-        if (!s || correctChar(arr[i + k], new Set(s), r.subs[k]) != null) sc++;
+        const c = arr[idxs[k]];
+        if (!s) { direct++; resolved++; continue; }
+        const set = new Set(s);
+        if (set.has(c)) { direct++; resolved++; }
+        else if (correctChar(c, set, r.subs[k]) != null) { resolved++; }
       }
-      if (sc > bestScore) { bestScore = sc; best = i; }
+      return { direct, resolved };
+    };
+    const better = (a, b) => (a.direct !== b.direct ? a.direct > b.direct : a.resolved > b.resolved);
+
+    let best = null, bestScore = null;
+    for (let i = 0; i + L <= arr.length; i++) {
+      const idxs = Array.from({ length: L }, (_, k) => i + k);
+      const sc = scoreIdxs(idxs);
+      if (!bestScore || better(sc, bestScore)) { bestScore = sc; best = idxs; }
     }
-    return arr.slice(best, best + L).join('');
+    if (arr.length === L + 1) {
+      for (let drop = 0; drop < arr.length; drop++) {
+        const idxs = [];
+        for (let k = 0; k < arr.length; k++) if (k !== drop) idxs.push(k);
+        const sc = scoreIdxs(idxs);
+        if (better(sc, bestScore)) { bestScore = sc; best = idxs; }
+      }
+    }
+    return best.map(i => arr[i]).join('');
   }
 
   /**

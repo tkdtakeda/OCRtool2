@@ -731,6 +731,11 @@ const Recognizer = (() => {
       let res = await OcrProcessor.recognize(inputCanvas, usePsm, onProg, useLang, useWl);
       let out = finishText(res, region, rule, active, single);
       let readPsm = usePsm;
+      /* 診断: 生データ→制約適用後の値と合否をPSM試行ごとに残す。スクリーンショット
+         なしでも「どのPSMで何が読めたか」を診断コピーだけで追跡できるようにする
+         （抽出窓の誤選択・途中への1文字混入等の切り分けに使う）。 */
+      console.log(`[ocr]   "${region.name}" psm=${usePsm} raw=${JSON.stringify(out.raw)} `
+        + `→ ${JSON.stringify(out.text)} valid=${out.constraintValid} lengthSuspicious=${out.lengthSuspicious}`);
       /* 文字制約に不合格、または桁数が大きく食い違うなら、別のレイアウト解釈(PSM)で
          読み直して両方満たすものを探す。
          Tesseractは同じ画像でもPSMによって字の切り出し方が変わり、汚れや字間を
@@ -750,13 +755,20 @@ const Recognizer = (() => {
           if (altPsm === usePsm) continue;
           const altRes = await OcrProcessor.recognize(inputCanvas, altPsm, onProg, useLang, useWl);
           const altOut = finishText(altRes, region, rule, active, single);
+          console.log(`[ocr]   "${region.name}" psm=${altPsm}(再読取) raw=${JSON.stringify(altOut.raw)} `
+            + `→ ${JSON.stringify(altOut.text)} valid=${altOut.constraintValid} lengthSuspicious=${altOut.lengthSuspicious}`);
           if (altOut.constraintValid && !altOut.lengthSuspicious) { res = altRes; out = altOut; readPsm = altPsm; break; }
         }
       }
       const { text, raw, constraintValid, lengthSuspicious } = out;
       /* 言語がページ間・領域間で切り替わるとTesseractの言語データ再読み込みが走り
-         大幅に遅くなることがあるため、領域ごとの所要時間と使用言語を記録する。 */
-      console.log(`[perf]   OCR "${region.name}" lang=${useLang} psm=${readPsm}${readPsm !== usePsm ? '(再読取)' : ''} ${(performance.now() - tFieldStart).toFixed(0)}ms`);
+         大幅に遅くなることがあるため、領域ごとの所要時間と使用言語を記録する。
+         採用結果（raw/text/valid）も添えることで、再読取してもどれも制約を
+         満たせず最初の結果へ戻ったケース（[ocr]の最終行だけでは分かりにくい）も
+         このサマリ行単体で追える。 */
+      console.log(`[perf]   OCR "${region.name}" lang=${useLang} psm=${readPsm}${readPsm !== usePsm ? '(再読取)' : ''} `
+        + `${(performance.now() - tFieldStart).toFixed(0)}ms 採用: raw=${JSON.stringify(raw)} → ${JSON.stringify(text)} `
+        + `valid=${constraintValid}`);
       /* 信頼度は「最終的な値の文字」基準（周辺のゴミで下がらないように） */
       const conf = valueConfidence(text, res.symbols, confOf(res));
       fields[i] = {
