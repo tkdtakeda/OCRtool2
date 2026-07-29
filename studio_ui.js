@@ -74,6 +74,33 @@ const StudioUI = (() => {
     });
   }
 
+  /* ── 文字の取り違え表（全帳票共通の補正候補、ユーザー編集可） ───
+     行＝「認識された文字」1つに対して「本来あり得る候補」の一覧をチップで表示。
+     新規追加は専用フォーム（confuseNewChar/confuseNewCand）側で行うため、
+     ここでは既存エントリの一覧描画（候補の削除・行削除）だけを担当する。 */
+  function renderConfuseTable(table, onRemoveCandidate, onRemoveChar) {
+    const list = $('confuseList');
+    if (!list) return;
+    const chars = Object.keys(table).sort((a, b) => a.localeCompare(b, 'ja'));
+    if (!chars.length) { list.innerHTML = '<div class="mini-empty">登録された取り違えペアがありません</div>'; return; }
+    list.innerHTML = '';
+    chars.forEach(ch => {
+      const row = document.createElement('div'); row.className = 'confuse-row';
+      const chips = table[ch].map(cand => `
+        <span class="confuse-chip">${esc(cand)}<button type="button" class="confuse-chip-del" data-cand="${esc(cand)}" title="この候補を削除"><i class="fas fa-xmark"></i></button></span>`).join('');
+      row.innerHTML = `
+        <span class="confuse-char" title="認識された文字">${esc(ch)}</span>
+        <span class="confuse-arrow"><i class="fas fa-arrow-right"></i></span>
+        <div class="confuse-chips">${chips}</div>
+        <button type="button" class="btn-icon-sm confuse-row-del" title="この文字の行を削除"><i class="fas fa-trash"></i></button>`;
+      row.querySelectorAll('.confuse-chip-del').forEach(btn => {
+        btn.addEventListener('click', () => onRemoveCandidate(ch, btn.dataset.cand));
+      });
+      row.querySelector('.confuse-row-del').addEventListener('click', () => onRemoveChar(ch));
+      list.appendChild(row);
+    });
+  }
+
   /* ── 登録ステップのチェックリスト ───────────────────── */
   function refreshRegSteps(flags) {
     document.querySelectorAll('#regSteps .reg-step').forEach(el => {
@@ -554,7 +581,7 @@ const StudioUI = (() => {
 
   return {
     $, esc, toast, REGION_COLORS, ANCHOR_COLOR, OCR_COLOR,
-    renderVersionBadge, renderVersionModal,
+    renderVersionBadge, renderVersionModal, renderConfuseTable,
     refreshRegSteps, renderFormLibrary, renderAnchorList, renderAnchorCollisions, renderAnchorUniqueness, renderRegionList,
     setPipeline, resetPipeline,
     renderDecision, renderRecogPreview, renderFieldResults, symbolChipsHTML, confClass,

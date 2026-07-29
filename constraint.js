@@ -40,8 +40,13 @@ const CharConstraint = (() => {
 
   /* ── よくあるOCR誤認の候補（補正用） ────────────────────
      キー=認識された文字 / 値=本来あり得る候補（優先順）。
-     形が似た取り違え＋日本語OCRで数字が漢字/記号になる例を含む。 */
-  const CONFUSE = {
+     形が似た取り違え＋日本語OCRで数字が漢字/記号になる例を含む。
+     これは「組み込みの既定値」であり、実際に参照される表は下の activeConfuse
+     （ユーザーがツール画面から編集・保存できる）。今は特定の帳票・書体向けの
+     組み合わせで運用しているが、将来別の帳票・書体を扱うようになると、ここに
+     無い取り違え（あるいはここにあるが実際には起きない誤対応）が出てくる
+     ため、コードを直さずユーザー自身が調整できるようにしてある。 */
+  const DEFAULT_CONFUSE = {
     '0': ['O', 'D', 'Q', 'o'], 'O': ['0'], 'o': ['0'], 'Q': ['0'], 'D': ['0'],
     /* 「1」は書体によって下部に横棒（セリフ）が付き、大文字Lとよく取り違えられる。
        実機で "AA1227" の1がLと読まれた例があるため 'L' も候補に含める。 */
@@ -58,6 +63,31 @@ const CharConstraint = (() => {
     /* 日本語OCRの数字誤認（漢数字・記号） */
     '一': ['1'], '〇': ['0'], '○': ['0'], '◯': ['0'], '２': ['2'],
   };
+
+  /* 実際にcorrectCharが参照する表。既定では組み込み値のコピーだが、
+     setConfuseTable() で丸ごと差し替えられる（呼び出し元＝studio_app.jsが
+     起動時にlocalStorageの保存内容を読んで反映する）。「マージ」ではなく
+     「丸ごと差し替え」にしているのは、ユーザーが特定の組み込みペアを
+     「これは自分の帳票では誤爆する」と判断して削除したい場合に、削除が
+     常に効くようにするため（マージ方式だと削除した既定値が復活してしまう）。 */
+  let activeConfuse = { ...DEFAULT_CONFUSE };
+
+  /** 現在参照している取り違え表のコピーを返す（編集UI表示用）。 */
+  function getConfuseTable() { return JSON.parse(JSON.stringify(activeConfuse)); }
+  /** 取り違え表を丸ごと差し替える。null/undefined/空は既定表へフォールバックする
+      （「既定に戻す」はsetConfuseTable(null)を呼ぶだけでよい）。
+      形式が壊れている要素（キーが1文字でない・値が配列でない等）は個別に無視し、
+      壊れた保存データ1件でOCR結果の補正全体が止まらないようにする。 */
+  function setConfuseTable(table) {
+    if (!table || typeof table !== 'object') { activeConfuse = { ...DEFAULT_CONFUSE }; return; }
+    const out = {};
+    for (const [k, v] of Object.entries(table)) {
+      if (typeof k !== 'string' || [...k].length !== 1 || !Array.isArray(v)) continue;
+      const cands = v.filter(c => typeof c === 'string' && [...c].length === 1 && c !== k);
+      if (cands.length) out[k] = cands;
+    }
+    activeConfuse = out;
+  }
 
   /* ── 集合ユーティリティ ─────────────────────────────── */
   function orderSet(chars) {
@@ -189,7 +219,7 @@ const CharConstraint = (() => {
     }
     if (c >= 'a' && c <= 'z' && allow.has(c.toUpperCase())) return c.toUpperCase();
     if (c >= 'A' && c <= 'Z' && allow.has(c.toLowerCase())) return c.toLowerCase();
-    for (const cand of (CONFUSE[c] || [])) {
+    for (const cand of (activeConfuse[c] || [])) {
       if (allow.has(cand)) return cand;
       if (cand >= 'a' && cand <= 'z' && allow.has(cand.toUpperCase())) return cand.toUpperCase();
       if (cand >= 'A' && cand <= 'Z' && allow.has(cand.toLowerCase())) return cand.toLowerCase();
@@ -389,6 +419,7 @@ const CharConstraint = (() => {
     presetSet, orderSet, sameSet,
     normalize, isActive, isLatinOnly, derivedWhitelist, apply, correctChar, extractStr,
     summarizePos, lengthLabel, describe, fromMask,
+    getConfuseTable, setConfuseTable,
   };
 
 })();

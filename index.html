@@ -45,6 +45,9 @@
     <button id="btnCopyDiagnostics" class="btn btn-icon" title="速度・精度の問題を報告するとき用。サーバーとブラウザの直近ログをまとめてコピーします（DevToolsを探す必要はありません）">
       <i class="fas fa-clipboard-list"></i>
     </button>
+    <button id="btnConfuseTable" class="btn btn-icon" title="文字の取り違え表（OCRが読み間違えやすい文字の対応）を確認・編集します。すべての帳票に共通で使われます">
+      <i class="fas fa-font"></i>
+    </button>
     <button id="btnSettings" class="btn btn-icon" title="設定（判定しきい値・マッチング精度）">
       <i class="fas fa-gear"></i>
     </button>
@@ -511,6 +514,31 @@
       <div id="verCurrentBox" class="ver-current"></div>
       <h3 class="ver-hist-title">変更履歴（新しい順）</h3>
       <div id="verHistoryList" class="ver-hist-list"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="confuseModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr"><h2><i class="fas fa-font"></i> 文字の取り違え表</h2>
+      <button class="modal-close" id="closeConfuseModal"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <p class="confuse-desc">
+        OCR結果を文字制約（許可文字・桁数）に合わせて自動補正するとき、「実際に認識された文字」→「本来あり得る候補」の対応を調べる表です。
+        <b>すべての帳票に共通して適用されます</b>（特定の帳票・欄だけに効く読み替えは、各帳票のOCR領域設定にある「読み替え」を使ってください）。
+        ここでの変更はこのブラウザに保存され、次回起動時も引き継がれます。
+      </p>
+      <div class="confuse-toolbar">
+        <button id="confuseResetDefault" class="btn btn-ghost btn-sm"><i class="fas fa-rotate-left"></i> 既定に戻す</button>
+      </div>
+      <div class="confuse-add-row">
+        <input id="confuseNewChar" class="confuse-char-input" maxlength="1" placeholder="認識された文字" spellcheck="false">
+        <span class="confuse-arrow">→</span>
+        <input id="confuseNewCand" class="confuse-char-input" maxlength="1" placeholder="本来の文字" spellcheck="false">
+        <button id="confuseAddPair" class="btn btn-primary btn-sm"><i class="fas fa-plus"></i> 追加</button>
+      </div>
+      <div id="confuseList" class="confuse-list"></div>
     </div>
   </div>
 </div>

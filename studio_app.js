@@ -146,6 +146,70 @@
     $('versionModal').classList.remove('hidden');
   }
 
+  /* ── 文字の取り違え表（全帳票共通、ユーザー編集可） ───────────
+     constraint.jsの組み込み表は「今扱っている帳票・書体」向けの経験則で、
+     別の帳票・書体を扱うようになると合わない/足りないペアが出てくる。
+     コードを直さずここから調整できるようにし、このブラウザ（localStorage）に
+     保存して次回起動時も引き継ぐ。起動直後にCharConstraint.setConfuseTable()
+     まで済ませる必要がある（それ以降のOCR結果の補正すべてに関わるため）。 */
+  const CONFUSE_KEY = 'ocrtool_confuse_overrides';
+  function loadConfuseOverrides() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CONFUSE_KEY) || 'null');
+      if (saved) CharConstraint.setConfuseTable(saved);
+    } catch (_) { /* 壊れていれば組み込み既定のまま（setConfuseTable未呼び出し）でよい */ }
+  }
+  function persistConfuseTable() {
+    try { localStorage.setItem(CONFUSE_KEY, JSON.stringify(CharConstraint.getConfuseTable())); } catch (_) {}
+  }
+  function renderConfuseModal() {
+    UI.renderConfuseTable(CharConstraint.getConfuseTable(), confuseRemoveCandidate, confuseRemoveChar);
+  }
+  function openConfuseModal() {
+    renderConfuseModal();
+    $('confuseModal').classList.remove('hidden');
+  }
+  function confuseRemoveCandidate(ch, cand) {
+    const t = CharConstraint.getConfuseTable();
+    if (!t[ch]) return;
+    t[ch] = t[ch].filter(c => c !== cand);
+    if (!t[ch].length) delete t[ch];
+    CharConstraint.setConfuseTable(t);
+    persistConfuseTable();
+    renderConfuseModal();
+  }
+  function confuseRemoveChar(ch) {
+    const t = CharConstraint.getConfuseTable();
+    delete t[ch];
+    CharConstraint.setConfuseTable(t);
+    persistConfuseTable();
+    renderConfuseModal();
+  }
+  function confuseAddPair() {
+    const chInp = $('confuseNewChar'), candInp = $('confuseNewCand');
+    const ch = chInp.value.trim(), cand = candInp.value.trim();
+    if (!ch || !cand) return UI.toast('「認識された文字」「本来の文字」の両方を入力してください', 'warning');
+    if ([...ch].length !== 1 || [...cand].length !== 1) return UI.toast('1文字ずつ入力してください', 'warning');
+    if (ch === cand) return UI.toast('同じ文字は登録できません', 'warning');
+    const t = CharConstraint.getConfuseTable();
+    const list = t[ch] || [];
+    if (list.includes(cand)) return UI.toast(`「${ch}」→「${cand}」はすでに登録されています`, 'info');
+    t[ch] = [...list, cand];
+    CharConstraint.setConfuseTable(t);
+    persistConfuseTable();
+    chInp.value = ''; candInp.value = '';
+    renderConfuseModal();
+    UI.toast(`「${ch}」→「${cand}」を追加しました`, 'success', 1800);
+    chInp.focus();
+  }
+  function resetConfuseTable() {
+    if (!confirm('文字の取り違え表を組み込みの既定値に戻します。ここまでの追加・削除はすべて失われます。よろしいですか？')) return;
+    CharConstraint.setConfuseTable(null);
+    try { localStorage.removeItem(CONFUSE_KEY); } catch (_) {}
+    renderConfuseModal();
+    UI.toast('既定の取り違え表に戻しました', 'info');
+  }
+
   /* ── モード切替 ─────────────────────────────────────── */
   function setMode(mode) {
     S.mode = mode;
@@ -2032,11 +2096,16 @@
       forms.forEach(f => { const o = document.createElement('option'); o.value = f.id; o.textContent = `${f.name}（${f.count}件）`; sel.appendChild(o); });
       const allOpt = document.createElement('option'); allOpt.value = ''; allOpt.textContent = `すべての帳票（${rows.length}件・共通名(任意)を設定した項目はまとめて照合できます）`;
       sel.appendChild(allOpt);
-      sel.value = forms[0].id;   // 既定は最新の結果が属する帳票（rowsは新しい順）
+      /* 既定は「すべての帳票」。以前は最新の結果が属する帳票だけに絞っていたが、
+         帳票を編集・再保存するとformIdが変わり別集計になることがあり、30件OCRした
+         のに気づかず10件（最新のformId分）しか照合されない事故があった。件数の
+         絞り込みは意図的に選ぶ操作であるべきで、黙って一部だけに絞られる状態を
+         既定にしない。 */
+      sel.value = '';
     } else {
       row.classList.add('hidden');
     }
-    recRebuildOcrSide(forms.length > 1 ? forms[0].id : '');
+    recRebuildOcrSide('');
     recFill('recExtKey', []); recFill('recExtVal', ['(なし)']);
     if (S.recLastSettings) {
       $('recNumeric').checked = !!S.recLastSettings.numeric;
@@ -2516,6 +2585,8 @@
 
   /* ── Init ───────────────────────────────────────────── */
   function init() {
+    /* OCR結果の補正（correctChar）に関わるため、他の何よりも先に済ませておく。 */
+    loadConfuseOverrides();
     initAccordions(); initRegSliders(); initRegCanvasEvents(); initDbgControls(); initRrPan();
     CharRuleEditor.init();
     PdfImport.init();
@@ -2679,6 +2750,14 @@
     $('btnVersion').addEventListener('click', openVersionModal);
     $('closeVersionModal').addEventListener('click', () => $('versionModal').classList.add('hidden'));
     $('versionModal').addEventListener('click', e => { if (e.target === $('versionModal')) $('versionModal').classList.add('hidden'); });
+    $('btnConfuseTable').addEventListener('click', openConfuseModal);
+    $('closeConfuseModal').addEventListener('click', () => $('confuseModal').classList.add('hidden'));
+    $('confuseModal').addEventListener('click', e => { if (e.target === $('confuseModal')) $('confuseModal').classList.add('hidden'); });
+    $('confuseAddPair').addEventListener('click', confuseAddPair);
+    $('confuseResetDefault').addEventListener('click', resetConfuseTable);
+    [$('confuseNewChar'), $('confuseNewCand')].forEach(inp => {
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); confuseAddPair(); } });
+    });
     $('closeHelpModal').addEventListener('click', () => $('helpModal').classList.add('hidden'));
     $('helpModal').addEventListener('click', e => { if (e.target === $('helpModal')) $('helpModal').classList.add('hidden'); });
     document.addEventListener('keydown', e => {
