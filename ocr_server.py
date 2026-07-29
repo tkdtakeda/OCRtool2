@@ -30,17 +30,14 @@ _ENGINE: str | None = None       # 'tesserocr' | 'pytesseract' | None
 _INIT_ERROR: str | None = None
 _TESSDATA_DIR: str | None = None
 
-# pytesseract経路でwhitelistを渡す一時ファイルの置き場所。
-# 当初はOSの既定の一時フォルダ（Windowsでは通常 C:\Users\<ユーザー名>\AppData\
-# Local\Temp）に作っていたが、ユーザー名が日本語だと問題が起きる可能性を疑い、
-# リポジトリ直下（.tmp/）に変更した。しかしリポジトリ自体を日本語名フォルダ
-# （例: "Desktop\OCRツール"）に置いている場合は解決しないことが実機で判明した
-# （whitelist="0123456789,，¥￥$" のはずの欄で "." が出力される＝whitelistが
-# 効いていない状態を実際に確認）。つまり原因は「一時フォルダの場所」ではなく、
-# 非ASCII文字を含むパスそのものを pytesseract が subprocess 経由で tesseract.exe
-# （ネイティブバイナリ）へ渡す際にエンコーディングが環境依存になる、Windows版
-# Tesseractでの既知のトラブルパターン。よって「場所」ではなく「パス文字列を
-# 非ASCIIにしない」ことで対策する（_to_ascii_safe_path 参照）。
+# pytesseract経路でwhitelistを渡す一時ファイルの置き場所の候補（優先順）。
+#   1. リポジトリ直下(.tmp/) … ユーザー名が非ASCIIな環境向け
+#   2. OS既定の一時フォルダ  … リポジトリ自体を非ASCIIフォルダに置いている環境向け
+# 「一箇所に決め打ち」できない。実機で、①ユーザー名はASCII("seiya-takeda")なのに
+# ②リポジトリを日本語フォルダ("Desktop\OCRツール")に置いていた、という組み合わせが
+# 確認された。この場合は候補2（OS一時フォルダ）が安全で、逆にユーザー名が日本語の
+# 環境では候補1が安全になる。どちらが安全かは実行時にしか分からないため、両方を
+# 順に試し、実際にASCII化できたものを採用する（_pick_ascii_whitelist_dir 参照）。
 _TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.tmp')
 
 _tesserocr = None
@@ -216,22 +213,42 @@ def _pytesseract_config(psm: int, whitelist: str) -> tuple[str, str | None]:
     """whitelistは--psmと違い空白・カンマ・通貨記号を含みうる。pytesseractは
     configをshlex.splitするため、値をそのままコマンドライン文字列に混ぜると
     空白で分断されて壊れる。Tesseractのconfigファイル（1行『変数名 値』形式で
-    改行までが値になり再分割されない）に書き出し、そのパスだけを渡すことで回避する。"""
+    改行までが値になり再分割されない）に書き出し、そのパスだけを渡すことで回避する。
+
+    書き出し先は _TMP_DIR モジュールコメントの通り複数候補を順に試す。8.3短縮パス名
+    ですぐASCII化できた候補を採用し、残りは試さない（余計な一時ファイルを作らない）。
+    最後の候補まで非ASCIIのままだった場合はそれをそのまま使う（動く可能性はゼロでは
+    ないため）が、既存の警告ログでその旨を伝える。"""
     config = f'--psm {int(psm)}'
     tmp_path = None
     if whitelist:
-        os.makedirs(_TMP_DIR, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(suffix='.txt', prefix='ocrtool_wl_', dir=_TMP_DIR)
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            f.write(f'tessedit_char_whitelist {whitelist}\n')
-        # ファイル作成後（8.3短縮名は実在するファイルにしか発行されないため）に変換する。
-        safe_path = _to_ascii_safe_path(tmp_path)
-        # 診断用: 短縮名への変換後もなお非ASCII文字が残る場合（短縮名生成が無効化された
-        # ボリューム等）は、whitelistが効かない症状が再発しうることを示す手がかりとして
-        # 一度だけ警告する。
+        content = f'tessedit_char_whitelist {whitelist}\n'
+        candidates = [_TMP_DIR, tempfile.gettempdir()]
+        safe_path = ''
+        for i, cand_dir in enumerate(candidates):
+            is_last = (i == len(candidates) - 1)
+            try:
+                os.makedirs(cand_dir, exist_ok=True)
+                fd, path = tempfile.mkstemp(suffix='.txt', prefix='ocrtool_wl_', dir=cand_dir)
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(content)
+            except OSError:
+                continue   # このディレクトリに書けない（権限等）→ 次の候補へ
+            candidate_safe = _to_ascii_safe_path(path)
+            tmp_path, safe_path = path, candidate_safe
+            if candidate_safe.isascii() or is_last:
+                break
+            # まだ他に候補が残っており、これは非ASCIIのまま → ゴミを残さず次の候補へ
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        # 診断用: 全候補を試しても非ASCII文字が残る場合は、whitelistが効かない症状が
+        # 再発しうることを示す手がかりとして警告する。
         if not safe_path.isascii():
             applog.log(f'[warn] whitelist設定ファイルのパスに非ASCII文字が含まれています: {safe_path}'
-                       f' （8.3短縮パス名への変換にも失敗。環境によってはwhitelist制限が効かない原因になります）')
+                       f' （候補{len(candidates)}箇所とも8.3短縮パス名への変換に失敗。'
+                       f'環境によってはwhitelist制限が効かない原因になります）')
         config += f' "{safe_path}"'
     return config, tmp_path
 
