@@ -1,5 +1,11 @@
 [
   {
+    "version": "2026-07-29.18",
+    "date": "2026-07-29",
+    "summary": "tesserocr導入の下準備。conda-forge配置のtessdataも自動検出できるよう候補パスを追加",
+    "detail": "背景: tesserocr導入（文字単位の確信度を得るため）を検討する中で、Windows向けの配布状況を実際に調べた。PyPIにはWindows用のビルド済みwheelが無く、conda-forgeにはWindows向けビルドがあるがPython 3.11までしか対応していない（利用者の環境はPython 3.12）。そのためconda-forgeで別途Python 3.11の環境を作ってそちらでtesserocrを使う方針になった。\n\nconda-forgeのtesseract依存関係を確認したところ、tesserocrパッケージはTesseract本体（5.0.1または5.2.0）も同時にconda環境の中へインストールする仕様だった。conda-forgeのWindowsパッケージは実行時データ（tessdataを含む）を慣例として <環境フォルダ>\\Library\\share\\ 以下に置くため、事前にtessdata検出ロジックへ候補として追加しておいた（TESSDATA_PREFIX環境変数を自動設定しないconda-forgeビルドが存在するため、環境変数任せにせずsys.prefixから機械的に導ける候補として明示した）。これによりconda環境へ切り替えた際、追加の環境変数設定をしなくてもtessdataが見つかる可能性が高くなる。\n\n検証: 変更後もtessdata検出が既存の候補（/usr/share/tesseract-ocr/5/tessdata等）を壊さず引き続き見つけられることを確認した。"
+  },
+  {
     "version": "2026-07-29.17",
     "date": "2026-07-29",
     "summary": "可変長欄にセカンドオピニオン照合を追加（別PSMと食い違えば「要確認」に）。幅による1/7判別は実測で否定され不採用",

@@ -60,6 +60,13 @@ def _candidate_tessdata_dirs() -> list[str]:
         '/usr/local/share/tessdata',
         '/opt/homebrew/share/tessdata',
         r'C:\Program Files\Tesseract-OCR\tessdata',
+        # conda-forge の tesseract パッケージは、実行中のPython自身(sys.prefix)が
+        # 属する環境の中にtessdataを同梱する（TESSDATA_PREFIXを自動設定しない
+        # ビルドがあるため、環境の場所から機械的に導ける候補として明示的に見る）。
+        # Windows(conda-forge)は Library\share\tessdata、Linux/Macは
+        # share\tessdata が定番の配置。
+        os.path.join(sys.prefix, 'Library', 'share', 'tessdata'),
+        os.path.join(sys.prefix, 'share', 'tessdata'),
     ]
     return dirs
 
