@@ -492,6 +492,21 @@ const Recognizer = (() => {
      まとまりの修復自体を諦める（誤った方を自信満々に確定させるより安全）。 */
   const GLYPH_WIDTH_MARGIN = 0.15;
 
+  /* 可変長欄（金額欄等）の「セカンドオピニオン」に使うPSM。
+     可変長欄は桁数という検算材料が無いため、字形が丸ごと別の文字として
+     誤分類された場合（実機で "704" が "104" と読まれ、7の矩形が1個だけ・
+     幅も他の数字と同等で、矩形からは異常を検出できなかった例がある）、
+     何のフラグも立たないまま確信度86%の緑表示で通ってしまう。
+     そこで別のレイアウト解釈でもう一度読み、最終値が食い違えば「要確認」
+     として利用者に知らせる。
+     PSM7（単一行）を選んだのは、サンドボックスでの実測で、きれいな金額
+     画像（"704"・"591,800"・"1,573,000"）に対しPSM6と完全に同じ最終値を
+     返し、誤検知を出さなかったため（PSM8/13は末尾に余分なカンマを付けた）。
+     比較は生データではなく「正規化・制約適用後の最終値」同士で行う。
+     生データだと "591,800" と "591,800," のような表記ゆれで誤検知するが、
+     最終値ではどちらも "591800" に落ち着くため。 */
+  const SECOND_OPINION_PSM = 7;
+
   /** 数値配列の中央値。 */
   function medianOf(nums) {
     if (!nums.length) return null;
@@ -976,6 +991,24 @@ const Recognizer = (() => {
           }
         }
       }
+      /* 可変長欄のセカンドオピニオン: 別のレイアウト解釈でもう一度読み、最終値が
+         食い違えば「要確認」にする。可変長欄には桁数という検算材料が無く、字形が
+         丸ごと別の文字へ誤分類された場合（実機の "704"→"104"）は矩形の個数にも
+         幅にも異常が出ないため、ここまでの仕組みでは何も検知できず、誤った値が
+         確信度86%の緑表示で通ってしまっていた。値そのものを直せるわけではないが、
+         「この欄は疑わしい」と利用者に伝えられるだけでも、黙って間違うよりは
+         はるかに良い（SECOND_OPINION_PSM のコメント参照）。 */
+      let secondOpinionDiff = null;
+      if (isVariableSingle && usePsm !== SECOND_OPINION_PSM) {
+        const soRes = await OcrProcessor.recognize(inputCanvas, SECOND_OPINION_PSM, onProg, useLang, useWl);
+        const soOut = finishText(soRes, region, rule, active, single);
+        if (soOut.text !== out.text) {
+          secondOpinionDiff = soOut.text;
+          console.log(`[ocr]   "${region.name}" セカンドオピニオン不一致: `
+            + `psm=${readPsm}→${JSON.stringify(out.text)} / psm=${SECOND_OPINION_PSM}→${JSON.stringify(soOut.text)}`
+            + ` （どちらが正しいか判定できないため「要確認」にします）`);
+        }
+      }
       /* 文字制約に不合格、桁数が大きく食い違う、または抽出候補が複数同点で
          決められない(ambiguous)なら、別のレイアウト解釈(PSM)で読み直して
          いずれも満たすものを探す。
@@ -1015,7 +1048,8 @@ const Recognizer = (() => {
          このサマリ行単体で追える。 */
       console.log(`[perf]   OCR "${region.name}" lang=${useLang} psm=${readPsm}${readPsm !== usePsm ? '(再読取)' : ''} `
         + `${(performance.now() - tFieldStart).toFixed(0)}ms 採用: raw=${JSON.stringify(raw)} → ${JSON.stringify(text)} `
-        + `valid=${constraintValid} ambiguous=${ambiguous}`);
+        + `valid=${constraintValid} ambiguous=${ambiguous}`
+        + (secondOpinionDiff !== null ? ` 別解釈=${JSON.stringify(secondOpinionDiff)}(要確認)` : ''));
       /* 信頼度は「最終的な値の文字」基準（周辺のゴミで下がらないように） */
       const conf = valueConfidence(text, res.symbols, confOf(res));
       fields[i] = {
@@ -1026,11 +1060,13 @@ const Recognizer = (() => {
         confidence: conf,
         error: res.error || null,
         constraint: active ? CharConstraint.describe(rule) : '',
-        /* 桁数超過・抽出候補の同点（ambiguous）が読み直しでも解消しなかった場合は、
-           既存の「制約不合格」表示に乗せて利用者へ伝える（constraintValid自体は
+        /* 桁数超過・抽出候補の同点（ambiguous）・別解釈との食い違い
+           （secondOpinionDiff）が読み直しでも解消しなかった場合は、既存の
+           「制約不合格」表示に乗せて利用者へ伝える（constraintValid自体は
            trueでも、値としては信用できないことに変わりないため。
-           LENGTH_MISMATCH_TOL・extractStrのambiguous判定を参照）。 */
-        constraintValid: constraintValid && !lengthSuspicious && !ambiguous,
+           LENGTH_MISMATCH_TOL・extractStrのambiguous判定・
+           SECOND_OPINION_PSM を参照）。 */
+        constraintValid: constraintValid && !lengthSuspicious && !ambiguous && secondOpinionDiff === null,
         symbols: res.symbols || [],
         cropDataURL: cropCanvas.toDataURL('image/png'),
         /* 診断: 実際にOCRへ渡した画像（前処理後）と使用パラメータ。
