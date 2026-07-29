@@ -16,6 +16,7 @@ Responsibility: OCR処理ロジックのみ。Flask には触れない。ocr.js�
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import threading
 from typing import Any
@@ -30,14 +31,16 @@ _INIT_ERROR: str | None = None
 _TESSDATA_DIR: str | None = None
 
 # pytesseract経路でwhitelistを渡す一時ファイルの置き場所。
-# tempfile.mkstemp()を引数無しで呼ぶとOSの既定の一時フォルダ（Windowsでは通常
-# C:\Users\<ユーザー名>\AppData\Local\Temp）が使われる。ユーザー名に日本語等の
-# 非ASCII文字を含む環境では、そのパスをTesseractへ渡す過程（pytesseractが
-# subprocess経由でtesseractコマンドを呼ぶ）でエンコーディングの扱いが環境依存になり、
-# 設定ファイルが正しく読み込まれない＝whitelist制限が効かないことがある
-# （実測で、数字専用whitelistのはずの欄でwhitelist外の文字が出力される事例を確認）。
-# リポジトリ直下は利用者が明示的に配置した場所で、ユーザープロファイルのパスより
-# 非ASCII文字を含む可能性が低いため、ここへ一時ファイルを作る。
+# 当初はOSの既定の一時フォルダ（Windowsでは通常 C:\Users\<ユーザー名>\AppData\
+# Local\Temp）に作っていたが、ユーザー名が日本語だと問題が起きる可能性を疑い、
+# リポジトリ直下（.tmp/）に変更した。しかしリポジトリ自体を日本語名フォルダ
+# （例: "Desktop\OCRツール"）に置いている場合は解決しないことが実機で判明した
+# （whitelist="0123456789,，¥￥$" のはずの欄で "." が出力される＝whitelistが
+# 効いていない状態を実際に確認）。つまり原因は「一時フォルダの場所」ではなく、
+# 非ASCII文字を含むパスそのものを pytesseract が subprocess 経由で tesseract.exe
+# （ネイティブバイナリ）へ渡す際にエンコーディングが環境依存になる、Windows版
+# Tesseractでの既知のトラブルパターン。よって「場所」ではなく「パス文字列を
+# 非ASCIIにしない」ことで対策する（_to_ascii_safe_path 参照）。
 _TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.tmp')
 
 _tesserocr = None
@@ -186,6 +189,29 @@ def _recognize_tesserocr(rgba: np.ndarray, psm: int, lang: str, whitelist: str) 
 
 
 # ── pytesseract 経路 ────────────────────────────────────────
+def _to_ascii_safe_path(path: str) -> str:
+    """Windowsの8.3短縮パス名（レガシー互換のため今も生成される、純ASCIIの
+    別名。例: "OCRツール" → "OCRT~1"）に変換できれば変換する。
+    pytesseractがsubprocess経由でtesseract.exe（ネイティブバイナリ）へパスを渡す際、
+    日本語等の非ASCII文字を含むと環境依存でエンコーディングが壊れ、設定ファイルが
+    見つからないままwhitelist制限なしで実行されてしまうことが実機で確認された
+    （一時ファイルの置き場所をどこに変えても、ユーザー名やフォルダ名に日本語が
+    含まれていれば再発するため、「場所」ではなく「パス文字列」側で対策する）。
+    短縮パス名はボリューム側で無効化されている場合もあるため、取得できなければ
+    元のパスをそのまま返す（Windows以外の環境も同様）。"""
+    if sys.platform != 'win32' or path.isascii():
+        return path
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(260)
+        n = ctypes.windll.kernel32.GetShortPathNameW(path, buf, 260)  # type: ignore[attr-defined]
+        if n and 0 < n <= 260 and buf.value:
+            return buf.value
+    except Exception:  # noqa: BLE001 - 変換できなければ元のパスにフォールバックするだけ
+        pass
+    return path
+
+
 def _pytesseract_config(psm: int, whitelist: str) -> tuple[str, str | None]:
     """whitelistは--psmと違い空白・カンマ・通貨記号を含みうる。pytesseractは
     configをshlex.splitするため、値をそのままコマンドライン文字列に混ぜると
@@ -196,15 +222,17 @@ def _pytesseract_config(psm: int, whitelist: str) -> tuple[str, str | None]:
     if whitelist:
         os.makedirs(_TMP_DIR, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(suffix='.txt', prefix='ocrtool_wl_', dir=_TMP_DIR)
-        # 診断用: それでもパスに非ASCII文字が残る場合（リポジトリ自体を日本語フォルダに
-        # 置いている等）は、whitelistが効かない症状が再発しうることを示す手がかりとして
-        # 一度だけ警告する。
-        if not tmp_path.isascii():
-            applog.log(f'[warn] whitelist設定ファイルのパスに非ASCII文字が含まれています: {tmp_path}'
-                       f' （環境によってはwhitelist制限が効かない原因になります）')
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(f'tessedit_char_whitelist {whitelist}\n')
-        config += f' "{tmp_path}"'
+        # ファイル作成後（8.3短縮名は実在するファイルにしか発行されないため）に変換する。
+        safe_path = _to_ascii_safe_path(tmp_path)
+        # 診断用: 短縮名への変換後もなお非ASCII文字が残る場合（短縮名生成が無効化された
+        # ボリューム等）は、whitelistが効かない症状が再発しうることを示す手がかりとして
+        # 一度だけ警告する。
+        if not safe_path.isascii():
+            applog.log(f'[warn] whitelist設定ファイルのパスに非ASCII文字が含まれています: {safe_path}'
+                       f' （8.3短縮パス名への変換にも失敗。環境によってはwhitelist制限が効かない原因になります）')
+        config += f' "{safe_path}"'
     return config, tmp_path
 
 
