@@ -23,9 +23,22 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+import applog
+
 _ENGINE: str | None = None       # 'tesserocr' | 'pytesseract' | None
 _INIT_ERROR: str | None = None
 _TESSDATA_DIR: str | None = None
+
+# pytesseract経路でwhitelistを渡す一時ファイルの置き場所。
+# tempfile.mkstemp()を引数無しで呼ぶとOSの既定の一時フォルダ（Windowsでは通常
+# C:\Users\<ユーザー名>\AppData\Local\Temp）が使われる。ユーザー名に日本語等の
+# 非ASCII文字を含む環境では、そのパスをTesseractへ渡す過程（pytesseractが
+# subprocess経由でtesseractコマンドを呼ぶ）でエンコーディングの扱いが環境依存になり、
+# 設定ファイルが正しく読み込まれない＝whitelist制限が効かないことがある
+# （実測で、数字専用whitelistのはずの欄でwhitelist外の文字が出力される事例を確認）。
+# リポジトリ直下は利用者が明示的に配置した場所で、ユーザープロファイルのパスより
+# 非ASCII文字を含む可能性が低いため、ここへ一時ファイルを作る。
+_TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.tmp')
 
 _tesserocr = None
 _pytesseract = None
@@ -181,7 +194,14 @@ def _pytesseract_config(psm: int, whitelist: str) -> tuple[str, str | None]:
     config = f'--psm {int(psm)}'
     tmp_path = None
     if whitelist:
-        fd, tmp_path = tempfile.mkstemp(suffix='.txt', prefix='ocrtool_wl_')
+        os.makedirs(_TMP_DIR, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(suffix='.txt', prefix='ocrtool_wl_', dir=_TMP_DIR)
+        # 診断用: それでもパスに非ASCII文字が残る場合（リポジトリ自体を日本語フォルダに
+        # 置いている等）は、whitelistが効かない症状が再発しうることを示す手がかりとして
+        # 一度だけ警告する。
+        if not tmp_path.isascii():
+            applog.log(f'[warn] whitelist設定ファイルのパスに非ASCII文字が含まれています: {tmp_path}'
+                       f' （環境によってはwhitelist制限が効かない原因になります）')
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(f'tessedit_char_whitelist {whitelist}\n')
         config += f' "{tmp_path}"'

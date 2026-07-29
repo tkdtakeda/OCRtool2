@@ -4,6 +4,9 @@ __pycache__/
 .venv/
 venv/
 
+# pytesseract経路がwhitelist設定を渡すための一時ファイル置き場（ocr_server.py参照）
+.tmp/
+
 # OS
 .DS_Store
 Thumbs.db
