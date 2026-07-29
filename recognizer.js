@@ -474,86 +474,102 @@ const Recognizer = (() => {
      2文字以上の乖離だけを「疑わしい」とみなす。 */
   const LENGTH_MISMATCH_TOL = 2;
 
-  /* 「1つの字形を2文字として読んでしまった」と判定する重なり率のしきい値。
-     狭い方の文字幅に対して、隣の文字とこれ以上重なっていれば別々の字形では
-     あり得ない＝一方は同じ字形を二重に拾ったゴーストとみなす。
-     実測（サンドボックスで再現した "AB0750" の誤読 "AB0O750"）では、
-     ゴースト対の重なりが狭い方の幅の約58%だったのに対し、正しく隣り合う
-     文字同士は重ならず十数pxの隙間が空いていた。両者の差は大きいので、
-     取りこぼしと誤検出の双方に余裕を持たせて中間の0.35に置く。 */
-  const GLYPH_OVERLAP_RATIO = 0.35;
+  /* 分割された断片とみなす中心間隔の上限（字形ピッチに対する比）。
+     隣り合う本物の字形は必ずピッチ（字送り幅）ぶん離れているのに対し、
+     1つの字形が複数に分割された断片同士はほぼ同じ位置に重なって出る。
+     実測（実機ログ3件）では本物の間隔が48〜53pxだったのに対し、断片同士は
+     2.5〜14.5pxしかなく、両者の差は極めて大きい。0.5（ピッチの半分）で
+     切れば双方に十分な余裕がある。 */
+  const GLYPH_MERGE_PITCH_RATIO = 0.5;
 
-  /* 重なった文字群からどれを残すかを「字形らしい幅か」で決める際の、決着に
-     必要な差（重なっていない文字の幅の中央値に対する比）。分割された偽の
-     検出は字形の一部しか覆わないため中央値から外れた幅になる。上位2つの
-     外れ方が同程度＝どれが本物か幅からは決められない場合に無理に選ぶと、
-     今度は自信満々に別の誤った値を出してしまうため、その場合は修復を諦めて
-     ambiguousのまま上位へ返す（誤った値を確定させるより「要確認」の方が安全）。 */
-  const GLYPH_WIDTH_MARGIN = 0.15;
+  /* 分割された字形のどの断片を残すかを決める際、予測位置からのズレの許容量
+     （ピッチに対する比）。これを超える場合はピッチの当てはめ自体が怪しい
+     ＝信用できないので修復しない。 */
+  const GLYPH_SLOT_TOLERANCE = 0.4;
 
-  /* 重なりの連なり（クラスタ）を「1つの字形」とみなせる横幅の上限。
-     字形1つ分の幅（中央値）に対する比で見る。実測では、1つの"0"が3つに
-     分割された例でクラスタ幅は字形1つ分の約1.6倍だった。一方、本当に隣り
-     合う2文字がくっついている場合は2倍前後になるため、その手前で線を引く。
-     これを超えるクラスタは複数の字形を含んでいる可能性があるので、1文字へ
-     まとめると本物の桁を消しかねない＝修復せず要確認のまま返す。 */
-  const GLYPH_CLUSTER_MAX_SPAN = 1.8;
+  /** 数値配列の中央値。 */
+  function medianOf(nums) {
+    if (!nums.length) return null;
+    const s = [...nums].sort((a, b) => a - b);
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
 
-  /* 文字単位の外接矩形から「同じ字形を重複して読んだ」ゴースト文字を取り除く。
-     文字種の情報だけでは原理的に解けない誤読（例: 生データ "ABOT750" は
-     "O"を消せば"AB7750"、"T"を消せば"AB0750"となり、どちらも「1文字だけ
+  /* 文字単位の外接矩形から「同じ字形を複数に分割して読んだ」断片を取り除く。
+     文字種の情報だけでは原理的に解けない誤読（例: 生データ "ABOT755" は
+     "O"を消せば"AB7755"、"T"を消せば"AB0755"となり、どちらも「1文字だけ
      CONFUSE表で補正すれば桁が揃う」ため同点になる）を、字形の位置という
      別の情報で決着させるために使う。
-     重なりは2文字とは限らない（実測で1つの"0"が 0[127-143] O[132-156]
-     Q[147-167] の3つに分割された例がある。0とQは直接重なっていないが、間の
-     Oを介して繋がっている）ため、隣接する重なりを連鎖的に辿って1つの
-     クラスタにまとめ、クラスタ全体を1文字へ畳む。
-     残す1つは「重なっていない文字たちの幅の中央値に近い＝字形として自然な
-     幅」で選ぶ。単純に広い方を残す方式も試したが、ゴースト側がたまたま広く
-     出た場合に誤った文字を残して確信ありと誤判定するため採らない。
-     @returns {{ text:string, dropped:Array }|null}
-       修復できない場合（矩形が無い・文字列と対応しない・重なりが無い・
-       クラスタが広すぎる・幅から決められない）は null。 */
-  function repairSplitGlyphs(text, charBoxes) {
+
+     当初は「矩形同士が重なっているか」で判定していたが、実機ログの3例で
+     いずれも失敗した。分割された断片は必ずしも重ならないためで、例えば
+     "AB0684"では 0 が O[143-168] Q[156-160] O[160-184] の3つに分割された
+     ものの、Q と 後ろのO は重なっておらず（160で接するだけ）連鎖が途切れる。
+     "AB0755"に至っては T[164-184] と 7[178-199] の重なりが狭い方の幅の30%
+     しかなく、しきい値にわずかに届かなかった。
+
+     そこで判定を「字送りの規則性」に変えた。固定書式の欄は字形が等間隔に
+     並ぶため、本物の字形同士の中心間隔（ピッチ）は一定になる。一方、1つの
+     字形の断片同士はほぼ同じ位置に出るので間隔が極端に小さい。実測でも
+     本物48〜53pxに対し断片2.5〜14.5pxと明確に分かれていた。
+     手順は、①ピッチを推定し、②間隔がピッチの半分未満の矩形をひとかたまり
+     （＝1つの字形）にまとめ、③まとまりの数が桁数と一致した時だけ、
+     ④各まとまりから「等間隔に並ぶはずの位置に最も近い」1つを代表として残す。
+     まとまりの数が桁数と一致しない場合は、値の前後に付いた本物のゴミなど
+     別の要因が混ざっているので手を出さない（既存の前後除去に任せる）。
+
+     @param {string} text        矩形と対応する生の認識文字列
+     @param {Array}  charBoxes   文字単位の外接矩形
+     @param {number} expectedLen 期待される桁数（固定長ルールのみ）
+     @returns {{ text:string, dropped:Array }|null} 修復できない場合は null。 */
+  function repairSplitGlyphs(text, charBoxes, expectedLen) {
+    const L = expectedLen | 0;
     if (!Array.isArray(charBoxes) || charBoxes.length < 2) return null;
+    if (!L || charBoxes.length <= L) return null;   // 余分が無ければ何もしない
     /* 矩形列と実際に採用したテキストがずれている場合（PSMやTSVとboxで
        セグメンテーションが食い違う等）は、対応が取れないので手を出さない。 */
-    const boxChars = charBoxes.map(b => b.text).join('');
-    if (boxChars !== [...text].filter(c => !/\s/.test(c)).join('')) return null;
+    if (charBoxes.map(b => b.text).join('') !== [...text].filter(c => !/\s/.test(c)).join('')) return null;
 
-    const widthOf = b => b.x1 - b.x0;
-    const sorted = charBoxes.map((b, i) => ({ b, i })).sort((p, q) => p.b.x0 - q.b.x0);
-    /* 隣接する重なりを連鎖的に辿ってクラスタ化する（0—O—Q のように、両端は
-       直接重なっていなくても間を介して繋がっていれば同じ字形とみなす）。 */
-    const clusters = [[sorted[0]]];
-    for (let k = 1; k < sorted.length; k++) {
-      const prev = sorted[k - 1], cur = sorted[k];
-      const overlap = Math.min(prev.b.x1, cur.b.x1) - Math.max(prev.b.x0, cur.b.x0);
-      const narrow = Math.min(widthOf(prev.b), widthOf(cur.b));
-      if (overlap > 0 && narrow > 0 && overlap / narrow >= GLYPH_OVERLAP_RATIO) {
-        clusters[clusters.length - 1].push(cur);
-      } else {
-        clusters.push([cur]);
-      }
+    const items = charBoxes.map((b, i) => ({ b, i, c: (b.x0 + b.x1) / 2 })).sort((p, q) => p.c - q.c);
+    const gaps = [];
+    for (let k = 0; k + 1 < items.length; k++) gaps.push(items[k + 1].c - items[k].c);
+    if (gaps.length < L - 1) return null;
+    /* ピッチは「大きい方から桁数-1個」の間隔の中央値で見る（小さい間隔＝
+       断片同士なので、これを混ぜるとピッチが過小評価される）。 */
+    const pitch = medianOf([...gaps].sort((a, b) => b - a).slice(0, L - 1));
+    if (!pitch || pitch <= 0) return null;
+
+    /* 間隔がピッチの半分未満なら同じ字形の断片としてまとめる。 */
+    const groups = [[items[0]]];
+    for (let k = 1; k < items.length; k++) {
+      if (items[k].c - items[k - 1].c < GLYPH_MERGE_PITCH_RATIO * pitch) groups[groups.length - 1].push(items[k]);
+      else groups.push([items[k]]);
     }
-    if (!clusters.some(c => c.length > 1)) return null;
+    if (groups.length !== L) return null;   // 桁数と合わない＝別の要因。手を出さない
+    if (!groups.some(g => g.length > 1)) return null;
 
-    const cleanW = clusters.filter(c => c.length === 1).map(c => widthOf(c[0].b)).sort((x, y) => x - y);
-    const basis = cleanW.length ? cleanW : sorted.map(p => widthOf(p.b)).sort((x, y) => x - y);
-    const median = basis[Math.floor(basis.length / 2)];
-    if (!median) return null;
+    /* 等間隔の並び（中心 ≒ 切片 + ピッチ×番号）を、断片を含まないまとまり
+       だけから当てはめる。左端のゴミを巻き込んで太った矩形など外れ値が
+       あっても効くよう、全ペアの傾きと切片の中央値で求める。 */
+    const solo = groups.map((g, gi) => ({ gi, c: g[0].c, single: g.length === 1 })).filter(s => s.single);
+    if (solo.length < 2) return null;
+    const slopes = [];
+    for (let a = 0; a < solo.length; a++) {
+      for (let b = a + 1; b < solo.length; b++) slopes.push((solo[b].c - solo[a].c) / (solo[b].gi - solo[a].gi));
+    }
+    const fitPitch = medianOf(slopes);
+    if (!fitPitch || fitPitch <= 0) return null;
+    const base = medianOf(solo.map(s => s.c - fitPitch * s.gi));
+    if (base === null) return null;
 
     const drop = new Set();
-    for (const cluster of clusters) {
-      if (cluster.length < 2) continue;
-      /* 複数の字形を巻き込んでいそうなクラスタは1文字へ畳まない。 */
-      const span = Math.max(...cluster.map(p => p.b.x1)) - Math.min(...cluster.map(p => p.b.x0));
-      if (span > GLYPH_CLUSTER_MAX_SPAN * median) return null;
-      const ranked = cluster
-        .map(p => ({ p, dev: Math.abs(widthOf(p.b) - median) }))
-        .sort((a, b) => a.dev - b.dev);
-      /* 幅の自然さに有意な差が無ければ、どれが本物か決められない。 */
-      if (ranked[1].dev - ranked[0].dev < GLYPH_WIDTH_MARGIN * median) return null;
+    for (let gi = 0; gi < groups.length; gi++) {
+      const g = groups[gi];
+      if (g.length < 2) continue;
+      const want = base + fitPitch * gi;
+      const ranked = g.map(p => ({ p, off: Math.abs(p.c - want) })).sort((a, b) => a.off - b.off);
+      /* 当てはめた位置から遠すぎる＝そもそも規則性の推定が怪しい。 */
+      if (ranked[0].off > GLYPH_SLOT_TOLERANCE * fitPitch) return null;
       for (const r of ranked.slice(1)) drop.add(r.p.i);
     }
     if (!drop.size) return null;
@@ -825,23 +841,25 @@ const Recognizer = (() => {
          （抽出窓の誤選択・途中への1文字混入等の切り分けに使う）。 */
       console.log(`[ocr]   "${region.name}" psm=${usePsm} raw=${JSON.stringify(out.raw)} `
         + `→ ${JSON.stringify(out.text)} valid=${out.constraintValid} lengthSuspicious=${out.lengthSuspicious} ambiguous=${out.ambiguous}`);
-      /* 疑わしい欄に限り、文字単位の外接矩形を取り直して「1つの字形を2文字として
-         読んでしまった」ゴーストを字形の位置から特定する。文字種だけでは同点で
-         決められない誤読（ambiguous）を解くための追加情報で、pytesseract経路では
-         tesseractの再起動を伴うため疑わしい欄だけで実行する。ここで解決できれば
-         この後のPSM読み直し（最大3回のOCR）自体が不要になる。 */
+      /* 疑わしい欄に限り、文字単位の外接矩形を取り直して「1つの字形を複数に
+         分割して読んでしまった」断片を字送りの規則性から特定する。文字種だけでは
+         同点で決められない誤読（ambiguous）を解くための追加情報で、pytesseract
+         経路ではtesseractの再起動を伴うため疑わしい欄だけで実行する。ここで
+         解決できればこの後のPSM読み直し（最大3回のOCR）自体が不要になる。 */
       if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous)) {
         const boxRes = await OcrProcessor.recognize(inputCanvas, usePsm, onProg, useLang, useWl, true);
         const boxes = boxRes.charBoxes;
         if (Array.isArray(boxes) && boxes.length) {
-          const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes);
+          const norm = active ? CharConstraint.normalize(rule) : null;
+          const expectedLen = (norm && !norm.variable) ? norm.len : 0;
+          const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes, expectedLen);
           const dropped = new Set((rep ? rep.dropped : []));
           console.log(`[ocr]   "${region.name}" 文字矩形: `
             + boxes.map(b => `${b.text}[${b.x0}-${b.x1}]${dropped.has(b) ? '←除外' : ''}`).join(' '));
           if (rep) {
             const repRes = { ...boxRes, fullText: rep.text, lines: [{ text: rep.text, confidence: boxRes.confidence || 0 }] };
             const repOut = finishText(repRes, region, rule, active, single);
-            console.log(`[ocr]   "${region.name}" 字形重なりを除去 raw=${JSON.stringify(rep.text)} `
+            console.log(`[ocr]   "${region.name}" 分割字形を統合 raw=${JSON.stringify(rep.text)} `
               + `→ ${JSON.stringify(repOut.text)} valid=${repOut.constraintValid} `
               + `lengthSuspicious=${repOut.lengthSuspicious} ambiguous=${repOut.ambiguous}`);
             if (repOut.constraintValid && !repOut.lengthSuspicious && !repOut.ambiguous) { res = repRes; out = repOut; }
