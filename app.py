@@ -18,6 +18,7 @@ fetchラッパーはエンドポイントごとに使い分ける（例: /api/ro
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import cv2
@@ -33,6 +34,31 @@ from imaging import data_url_to_rgba, rgba_to_data_url
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 MAX_CONTENT_LENGTH = 64 * 1024 * 1024  # 64MB（高DPI・複数アンカーのmatchでも十分な余裕）
 _STATIC_EXTS = ('.js', '.css', '.png', '.jpg', '.jpeg', '.svg', '.ico', '.json', '.webmanifest')
+
+# ローカルのJS/CSS（相対ファイル名のみ。CDNのhttp(s)://を含む物は対象外）だけを
+# 拾う。src="recognizer.js" のような単純な相対参照のみを前提としており、
+# サブフォルダは今のところ無い（index.htmlのscript/link一覧を確認済み）。
+_VERSIONED_ASSET_RE = re.compile(r'(src|href)="([A-Za-z0-9_.\-]+\.(?:js|css))"')
+
+
+def _inject_asset_version(html: str) -> str:
+    """index.html内のローカルJS/CSSへ ?v=<バージョン> を付与し、コード修正後も
+    ブラウザがディスクキャッシュの古いスクリプトを使い続ける事故を防ぐ。
+
+    経緯: OCRの誤読修正（recognizer.js側）を配布しても、ブラウザ側が
+    キャッシュ済みの古いJSを読み込み続け、サーバーは直しても症状が
+    直っていないように見える（診断ログにも新しいログ行が出ない）事例が
+    実機で確認された。index.htmlの<script>タグにバージョン等のクエリ文字列が
+    無かったため、ブラウザが「変更されたかどうか」をURL単位でしか判断できず、
+    同じURLのまま中身だけ変わったファイルを見分けられなかったことが原因。
+    バージョン文字列をクエリに含めることで、実際にコードが変わった時だけ
+    新しいURLとして扱われ、確実に再取得されるようにする。
+    バージョン情報が取得できない場合（version_history.json未整備等）は
+    何も付けず元のHTMLをそのまま返す（動作を壊さないためのフォールバック）。"""
+    version = version_info.current_version().get('version')
+    if not version:
+        return html
+    return _VERSIONED_ASSET_RE.sub(lambda m: f'{m.group(1)}="{m.group(2)}?v={version}"', html)
 
 
 def _load_hint() -> str:
@@ -60,7 +86,9 @@ def create_app() -> Flask:
     # ブラウザで開く」に一本化するため。
     @app.get('/')
     def index():
-        return send_from_directory(REPO_ROOT, 'index.html')
+        with open(os.path.join(REPO_ROOT, 'index.html'), encoding='utf-8') as f:
+            html = f.read()
+        return _inject_asset_version(html)
 
     @app.get('/<path:filename>')
     def static_files(filename: str):
