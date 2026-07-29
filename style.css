@@ -84,8 +84,6 @@ input[type=range] { cursor: pointer; }
   border: 1px solid var(--c-border); cursor: pointer;
 }
 .ver-badge:hover { background: var(--c-border); color: var(--c-text-2); }
-/* dirty=true（未コミットの変更がある＝リポジトリと実ファイルがずれている可能性）を警告色に */
-.ver-badge.is-dirty { color: #92400E; background: #FEF3C7; border-color: #F5CB8B; }
 .ver-badge.is-unknown { color: var(--c-text-3); }
 
 .ver-current {
@@ -93,7 +91,6 @@ input[type=range] { cursor: pointer; }
   border: 1px solid var(--c-border); font-size: 13px; line-height: 1.8; margin-bottom: 14px;
 }
 .ver-current b { font-family: 'IBM Plex Mono', monospace; }
-.ver-current .ver-warn { color: #92400E; font-weight: 600; }
 .ver-hist-title { font-size: 13px; font-weight: 700; margin: 0 0 8px; color: var(--c-text-2); }
 .ver-hist-list { display: flex; flex-direction: column; gap: 6px; max-height: 55vh; overflow-y: auto; }
 .ver-hist-item { border: 1px solid var(--c-border); border-radius: var(--r-sm); background: #fff; }

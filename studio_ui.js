@@ -30,30 +30,19 @@ const StudioUI = (() => {
 
   /* ── バージョンバッジ・変更履歴 ─────────────────────────
      「今動いているコードは最新の修正を含んでいるか」を確認できるようにする。
-     git のコミットハッシュ・日時・件名（バッジ＋概要）と、直近の変更履歴
-     （コミット本文＝これまでの修正の背景・実測結果）をそのまま見せる。 */
+     version_history.json（gitではなくファイルで管理。配布形態によらず読める）の
+     先頭エントリ＝現在のバージョンをバッジに、全件を変更履歴として見せる。 */
   function renderVersionBadge(info) {
     const badge = $('btnVersion'); const text = $('verBadgeText');
     if (!badge || !text) return;
     if (!info || !info.available) {
       text.textContent = 'v.不明';
       badge.classList.add('is-unknown');
-      badge.title = 'バージョン情報を取得できませんでした（gitが使えない環境の可能性があります）';
+      badge.title = 'バージョン情報を取得できませんでした（version_history.jsonが見つからないか壊れています）';
       return;
     }
-    text.textContent = `v.${info.hash}`;
-    badge.classList.toggle('is-dirty', !!info.dirty);
-    badge.title = info.dirty
-      ? `未コミットの変更があります（${info.hash}から変更済み）。クリックで変更履歴を表示`
-      : `最新コミット: ${info.subject || ''}。クリックで変更履歴を表示`;
-  }
-
-  function formatVerDate(iso) {
-    if (!iso) return '';
-    try {
-      const d = new Date(iso);
-      return d.toLocaleString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-    } catch (_) { return iso; }
+    text.textContent = `v.${info.version}`;
+    badge.title = `最新: ${info.summary || ''}（${info.date || ''}）。クリックで変更履歴を表示`;
   }
 
   function renderVersionModal(data) {
@@ -61,11 +50,9 @@ const StudioUI = (() => {
     const curBox = $('verCurrentBox');
     if (curBox) {
       if (!cur || !cur.available) {
-        curBox.innerHTML = 'バージョン情報を取得できませんでした（gitが使えない環境の可能性があります）。';
+        curBox.innerHTML = 'バージョン情報を取得できませんでした（version_history.jsonが見つからないか壊れています）。';
       } else {
-        const warn = cur.dirty ? '<div class="ver-warn"><i class="fas fa-triangle-exclamation"></i> 未コミットの変更があります。表示中の内容と実際の動作がずれている可能性があります。</div>' : '';
-        curBox.innerHTML = `現在のバージョン: <b>${esc(cur.hash || '?')}</b>（${esc(formatVerDate(cur.date))}）<br>`
-          + `${esc(cur.subject || '')}${warn}`;
+        curBox.innerHTML = `現在のバージョン: <b>${esc(cur.version || '?')}</b>（${esc(cur.date || '')}）<br>${esc(cur.summary || '')}`;
       }
     }
     const list = $('verHistoryList'); if (!list) return;
@@ -76,12 +63,12 @@ const StudioUI = (() => {
       const item = document.createElement('div'); item.className = 'ver-hist-item';
       item.innerHTML = `
         <div class="ver-hist-head">
-          <span class="ver-hist-hash">${esc(h.hash)}</span>
-          <span class="ver-hist-date">${esc(formatVerDate(h.date))}</span>
-          <span class="ver-hist-subject">${esc(h.subject)}</span>
+          <span class="ver-hist-hash">${esc(h.version)}</span>
+          <span class="ver-hist-date">${esc(h.date)}</span>
+          <span class="ver-hist-subject">${esc(h.summary)}</span>
           <i class="fas fa-chevron-right ver-hist-chevron"></i>
         </div>
-        <div class="ver-hist-body">${esc(h.body || '（詳細説明なし）')}</div>`;
+        <div class="ver-hist-body">${esc(h.detail || '（詳細説明なし）')}</div>`;
       item.querySelector('.ver-hist-head').addEventListener('click', () => item.classList.toggle('is-open'));
       list.appendChild(item);
     });

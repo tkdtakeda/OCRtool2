@@ -1,72 +1,51 @@
-"""動作中コードのバージョン・変更履歴を git から取得する。
+"""動作中コードのバージョン・変更履歴を version_history.json から読み取る。
 
-Responsibility: git log の実行と整形のみ。Flaskには触れない。
+Responsibility: ファイルの読み取りと整形のみ。Flaskには触れない。
 
-このアプリは細かい修正が頻繁に入るため、「今動いているコードは最新の修正を
-含んでいるか」が利用者には分かりにくい（実際に、修正を適用したはずなのに
-git pull を忘れていて古いコードのまま動いていた事例が何度もあった）。
-サーバー起動時、画面のバージョン表示・変更履歴モーダルへ渡す情報をここで作る。
-git が使えない環境（zip配布等）でも落ちないよう、取得失敗時は None／空を返す。
+以前は git log/status を実行して取得していたが、このアプリは zip 展開など
+git リポジトリの体裁を保たずに配布・利用されることもあり、その場合 git コマンドが
+使えず常に「不明」表示になってしまう。ファイルベースにすれば配布形態に関わらず
+確実に読める。
+
+運用: 機能追加・不具合修正のたびに、このモジュールが読む version_history.json の
+先頭に新しいエントリを1件追記する（コミットメッセージの要約をそのまま使えばよい）。
+バージョン番号は「日付.その日の通し番号」形式（例: "2026-07-29.2"）。
 """
 from __future__ import annotations
 
-import subprocess
+import json
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent
-
-# git log --format 用の区切り文字（コミットメッセージに現れない制御文字を使う）。
-# US(0x1f)=フィールド区切り、RS(0x1e)=コミット区切り。
-_FIELD = '\x1f'
-_RECORD = '\x1e'
+HISTORY_FILE = REPO_ROOT / 'version_history.json'
 
 
-def _run_git(args: list[str]) -> str | None:
+def _load_history() -> list[dict[str, Any]]:
+    """新しい順のエントリ一覧。ファイルが無い／壊れている場合は空リスト
+    （呼び出し側が「不明」表示にフォールバックできるよう、例外は投げない）。"""
     try:
-        result = subprocess.run(
-            ['git', *args], cwd=REPO_ROOT, capture_output=True, text=True,
-            timeout=5, check=True,
-        )
-        return result.stdout
-    except Exception:  # noqa: BLE001 - gitが無い/失敗しても本体は動かし続ける
-        return None
+        with open(HISTORY_FILE, encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:  # noqa: BLE001 - バージョン表示は補助情報。読めなくても本体は動かす
+        return []
 
 
-def current_commit() -> dict[str, Any]:
-    """今動いているコードのコミット情報。available=False なら git が使えない環境。"""
-    short_hash = _run_git(['rev-parse', '--short', 'HEAD'])
-    date = _run_git(['log', '-1', '--format=%cI'])
-    subject = _run_git(['log', '-1', '--format=%s'])
-    branch = _run_git(['rev-parse', '--abbrev-ref', 'HEAD'])
-    status = _run_git(['status', '--porcelain'])
+def current_version() -> dict[str, Any]:
+    """今のバージョン（履歴の先頭＝最新エントリ）。available=False なら
+    version_history.json が読めなかったことを示す。"""
+    history = _load_history()
+    if not history:
+        return {'available': False, 'version': None, 'date': None, 'summary': None}
+    top = history[0]
     return {
-        'available': short_hash is not None,
-        'hash': (short_hash or '').strip() or None,
-        'date': (date or '').strip() or None,
-        'subject': (subject or '').strip() or None,
-        'branch': (branch or '').strip() or None,
-        # 未コミットの変更があるか（=リポジトリの内容と実際のファイルがずれている可能性）
-        'dirty': bool((status or '').strip()) if status is not None else None,
+        'available': True,
+        'version': top.get('version'),
+        'date': top.get('date'),
+        'summary': top.get('summary'),
     }
 
 
 def recent_history(limit: int = 30) -> list[dict[str, Any]]:
-    """直近のコミット履歴（新しい順）。本文（body）にはこれまでの修正の背景・
-    実測結果を書いてきているため、変更履歴としてそのまま利用者に見せられる。"""
-    fmt = f'%h{_FIELD}%cI{_FIELD}%s{_FIELD}%b{_RECORD}'
-    raw = _run_git(['log', f'-{limit}', f'--format={fmt}'])
-    if raw is None:
-        return []
-    out: list[dict[str, Any]] = []
-    for rec in raw.split(_RECORD):
-        rec = rec.strip('\n')
-        if not rec:
-            continue
-        parts = rec.split(_FIELD)
-        if len(parts) < 3:
-            continue
-        h, date, subject = parts[0], parts[1], parts[2]
-        body = parts[3].strip() if len(parts) > 3 else ''
-        out.append({'hash': h, 'date': date, 'subject': subject, 'body': body})
-    return out
+    return _load_history()[:limit]

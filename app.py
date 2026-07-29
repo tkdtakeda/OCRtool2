@@ -87,7 +87,7 @@ def create_app() -> Flask:
     @app.get('/api/version')
     def api_version():
         return jsonify({
-            'current': version_info.current_commit(),
+            'current': version_info.current_version(),
             'history': version_info.recent_history(30),
         })
 
