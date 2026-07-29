@@ -699,16 +699,16 @@ const Recognizer = (() => {
       const raw = text;
       if (region.pattern) text = applyPattern(text, region.pattern);   // 期待書式で抽出
       /* 文字制約による桁別チェック＋誤認補正（O↔0 等）＋前後の余分文字除去 */
-      let constraintValid = true, lengthSuspicious = false;
+      let constraintValid = true, lengthSuspicious = false, ambiguous = false;
       if (active) {
         const cc = CharConstraint.apply(text, rule);
-        text = cc.text; constraintValid = cc.valid;
+        text = cc.text; constraintValid = cc.valid; ambiguous = !!cc.ambiguous;
         const norm = CharConstraint.normalize(rule);
         if (norm && !norm.variable) {
           lengthSuspicious = Math.abs([...raw.trim()].length - norm.len) >= LENGTH_MISMATCH_TOL;
         }
       }
-      return { text, raw, constraintValid, lengthSuspicious };
+      return { text, raw, constraintValid, lengthSuspicious, ambiguous };
     };
 
     /* 言語切替（worker再初期化）を最小化するため同一言語をまとめて処理する */
@@ -735,9 +735,10 @@ const Recognizer = (() => {
          なしでも「どのPSMで何が読めたか」を診断コピーだけで追跡できるようにする
          （抽出窓の誤選択・途中への1文字混入等の切り分けに使う）。 */
       console.log(`[ocr]   "${region.name}" psm=${usePsm} raw=${JSON.stringify(out.raw)} `
-        + `→ ${JSON.stringify(out.text)} valid=${out.constraintValid} lengthSuspicious=${out.lengthSuspicious}`);
-      /* 文字制約に不合格、または桁数が大きく食い違うなら、別のレイアウト解釈(PSM)で
-         読み直して両方満たすものを探す。
+        + `→ ${JSON.stringify(out.text)} valid=${out.constraintValid} lengthSuspicious=${out.lengthSuspicious} ambiguous=${out.ambiguous}`);
+      /* 文字制約に不合格、桁数が大きく食い違う、または抽出候補が複数同点で
+         決められない(ambiguous)なら、別のレイアウト解釈(PSM)で読み直して
+         いずれも満たすものを探す。
          Tesseractは同じ画像でもPSMによって字の切り出し方が変わり、汚れや字間を
          余分な1文字として拾ってしまう失敗（AL2451→AL24521、JL3331→JIL3331 等）が
          PSMを変えるだけで解けることがある。桁数と桁ごとの字種を宣言済みの欄だけが
@@ -748,19 +749,25 @@ const Recognizer = (() => {
          誤認補正（0↔Q等）が偶然辻褄を合わせてしまうと、本来信頼できない読み取りが
          constraintValid=trueになり得る（実例: "-AB0Q0684"→"AB0006"とvalid判定
          されたが、正しい値は"AB0684"だった）。
-         1回目が両方満たせばそのまま採用するので、これまで正しく読めていた欄の結果は
+         ambiguousも見るのは、紛れ込み文字（例:Q）に加えて別の桁でも0↔O等の
+         字種またぎの誤認が重なると、どの1文字を削除するかで結果が変わる
+         候補同士が同点になり得るため（実例: "ABOQ750"は"Q"を消せば正しく
+         "AB0750"になるが"B"を消しても同点で"AO0750"になる）。文字種だけでは
+         どちらが正しいか決められないので、確信を持てないまま片方を採用せず
+         読み直しに回す。
+         1回目が全て満たせばそのまま採用するので、これまで正しく読めていた欄の結果は
          変わらない。追加のOCRは疑わしい欄にだけ発生する。 */
-      if (single && (!out.constraintValid || out.lengthSuspicious)) {
+      if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous)) {
         for (const altPsm of RETRY_PSMS) {
           if (altPsm === usePsm) continue;
           const altRes = await OcrProcessor.recognize(inputCanvas, altPsm, onProg, useLang, useWl);
           const altOut = finishText(altRes, region, rule, active, single);
           console.log(`[ocr]   "${region.name}" psm=${altPsm}(再読取) raw=${JSON.stringify(altOut.raw)} `
-            + `→ ${JSON.stringify(altOut.text)} valid=${altOut.constraintValid} lengthSuspicious=${altOut.lengthSuspicious}`);
-          if (altOut.constraintValid && !altOut.lengthSuspicious) { res = altRes; out = altOut; readPsm = altPsm; break; }
+            + `→ ${JSON.stringify(altOut.text)} valid=${altOut.constraintValid} lengthSuspicious=${altOut.lengthSuspicious} ambiguous=${altOut.ambiguous}`);
+          if (altOut.constraintValid && !altOut.lengthSuspicious && !altOut.ambiguous) { res = altRes; out = altOut; readPsm = altPsm; break; }
         }
       }
-      const { text, raw, constraintValid, lengthSuspicious } = out;
+      const { text, raw, constraintValid, lengthSuspicious, ambiguous } = out;
       /* 言語がページ間・領域間で切り替わるとTesseractの言語データ再読み込みが走り
          大幅に遅くなることがあるため、領域ごとの所要時間と使用言語を記録する。
          採用結果（raw/text/valid）も添えることで、再読取してもどれも制約を
@@ -768,7 +775,7 @@ const Recognizer = (() => {
          このサマリ行単体で追える。 */
       console.log(`[perf]   OCR "${region.name}" lang=${useLang} psm=${readPsm}${readPsm !== usePsm ? '(再読取)' : ''} `
         + `${(performance.now() - tFieldStart).toFixed(0)}ms 採用: raw=${JSON.stringify(raw)} → ${JSON.stringify(text)} `
-        + `valid=${constraintValid}`);
+        + `valid=${constraintValid} ambiguous=${ambiguous}`);
       /* 信頼度は「最終的な値の文字」基準（周辺のゴミで下がらないように） */
       const conf = valueConfidence(text, res.symbols, confOf(res));
       fields[i] = {
@@ -779,10 +786,11 @@ const Recognizer = (() => {
         confidence: conf,
         error: res.error || null,
         constraint: active ? CharConstraint.describe(rule) : '',
-        /* 桁数超過が読み直しでも解消しなかった場合は、既存の「制約不合格」表示に
-           乗せて利用者へ伝える（constraintValid自体はtrueでも、値としては信用できない
-           ことに変わりないため。LENGTH_MISMATCH_TOL参照）。 */
-        constraintValid: constraintValid && !lengthSuspicious,
+        /* 桁数超過・抽出候補の同点（ambiguous）が読み直しでも解消しなかった場合は、
+           既存の「制約不合格」表示に乗せて利用者へ伝える（constraintValid自体は
+           trueでも、値としては信用できないことに変わりないため。
+           LENGTH_MISMATCH_TOL・extractStrのambiguous判定を参照）。 */
+        constraintValid: constraintValid && !lengthSuspicious && !ambiguous,
         symbols: res.symbols || [],
         cropDataURL: cropCanvas.toDataURL('image/png'),
         /* 診断: 実際にOCRへ渡した画像（前処理後）と使用パラメータ。

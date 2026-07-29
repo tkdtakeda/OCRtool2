@@ -211,13 +211,18 @@ const CharConstraint = (() => {
     return [...out].join('');
   }
 
-  /* 値の前後にある余分な文字を自動除去（抽出） */
+  /* 値の前後にある余分な文字を自動除去（抽出）。
+     @returns {{ text:string, ambiguous:boolean }}
+     ambiguous: 最高得点の候補が複数あり、しかもそれぞれが補正後に異なる
+     文字列になる（＝どちらが正しいか文字種だけでは決められない）場合に
+     true。呼び出し側（apply）はこれを「信頼できない抽出」として上位へ
+     伝え、桁数超過時の読み直し判定と同様に扱えるようにする。 */
   function extractStr(text, r) {
     const arr = [...String(text == null ? '' : text)];
     if (r.variable) {
       /* 使える文字（補正で寄せられる文字）だけ残し、区切り・空白などは捨てる */
       const setS = new Set(r.set);
-      return arr.filter(c => correctChar(c, setS, r.sub) != null).join('');
+      return { text: arr.filter(c => correctChar(c, setS, r.sub) != null).join(''), ambiguous: false };
     }
     /* 固定長: 制約に最も合う len 文字の候補を探す。
        候補は「連続する窓」（値の前後にある余分な文字を想定）に加え、
@@ -233,50 +238,66 @@ const CharConstraint = (() => {
        本来削除すべき紛れ込み文字を残したまま真の桁を捨てる窓と、
        正しく紛れ込み文字だけを削除した候補とが同点になり、常に先に
        見つかる（＝連続窓が先に走査される）誤った側が選ばれてしまう
-       ため。 */
+       ため。
+       それでも、紛れ込み文字（例: T・Q）に加えて別の桁でも0↔O等の
+       字種またぎの誤認（本来は数字の桁なのに大文字として直接一致して
+       しまう等）が重なると、削除する文字の選び方によって複数の異なる
+       結果が同点になり得る（実例: "ABOQ750"で"Q"を消せば正しく"AB0750"
+       になるが、"B"を消しても同点で"AO0750"になってしまう）。この場合は
+       文字種の情報だけではどちらが正しいか決められないため、無理に
+       1つを選ばず ambiguous=true として呼び出し側（読み直し判定）へ
+       委ねる。 */
     const L = r.len;
-    if (arr.length <= L) return arr.join('');
+    if (arr.length <= L) return { text: arr.join(''), ambiguous: false };
 
-    const scoreIdxs = idxs => {
+    const evalIdxs = idxs => {
       let direct = 0, resolved = 0;
+      const out = [];
       for (let k = 0; k < L; k++) {
         const s = r.pos[k];
         const c = arr[idxs[k]];
-        if (!s) { direct++; resolved++; continue; }
+        if (!s) { direct++; resolved++; out.push(c); continue; }
         const set = new Set(s);
-        if (set.has(c)) { direct++; resolved++; }
-        else if (correctChar(c, set, r.subs[k]) != null) { resolved++; }
+        if (set.has(c)) { direct++; resolved++; out.push(c); continue; }
+        const fixed = correctChar(c, set, r.subs[k]);
+        if (fixed != null) { resolved++; out.push(fixed); } else { out.push(c); }
       }
-      return { direct, resolved };
+      return { direct, resolved, text: out.join('') };
     };
     const better = (a, b) => (a.direct !== b.direct ? a.direct > b.direct : a.resolved > b.resolved);
+    const sameScore = (a, b) => a.direct === b.direct && a.resolved === b.resolved;
 
-    let best = null, bestScore = null;
+    const candidates = [];
     for (let i = 0; i + L <= arr.length; i++) {
-      const idxs = Array.from({ length: L }, (_, k) => i + k);
-      const sc = scoreIdxs(idxs);
-      if (!bestScore || better(sc, bestScore)) { bestScore = sc; best = idxs; }
+      candidates.push(evalIdxs(Array.from({ length: L }, (_, k) => i + k)));
     }
     if (arr.length === L + 1) {
       for (let drop = 0; drop < arr.length; drop++) {
         const idxs = [];
         for (let k = 0; k < arr.length; k++) if (k !== drop) idxs.push(k);
-        const sc = scoreIdxs(idxs);
-        if (better(sc, bestScore)) { bestScore = sc; best = idxs; }
+        candidates.push(evalIdxs(idxs));
       }
     }
-    return best.map(i => arr[i]).join('');
+    let best = candidates[0];
+    for (const c of candidates) if (better(c, best)) best = c;
+    const topTexts = new Set(candidates.filter(c => sameScore(c, best)).map(c => c.text));
+    return { text: best.text, ambiguous: topTexts.size > 1 };
   }
 
   /**
    * OCR結果へ制約を適用（抽出 → 桁別チェック＋誤認補正）。
-   * @returns {{ text:string, valid:boolean, applied:boolean }}
+   * @returns {{ text:string, valid:boolean, applied:boolean, ambiguous:boolean }}
    */
   function apply(text, rule) {
     const r = normalize(rule);
-    if (!r) return { text, valid: true, applied: false };
+    if (!r) return { text, valid: true, applied: false, ambiguous: false };
     let chars = [...String(text == null ? '' : text)];
-    if (r.extract) chars = [...extractStr(chars.join(''), r)];
+    let ambiguous = false;
+    if (r.extract) {
+      const ex = extractStr(chars.join(''), r);
+      chars = [...ex.text];
+      ambiguous = ex.ambiguous;
+    }
 
     if (r.variable) {
       const setS = new Set(r.set);
@@ -297,7 +318,7 @@ const CharConstraint = (() => {
         if (f != null) out.push(f); else { out.push(r.strict ? UNRESOLVED : c); valid = false; }
       }
       if (!out.length) valid = false;
-      return { text: out.join(''), valid, applied: true };
+      return { text: out.join(''), valid, applied: true, ambiguous };
     }
 
     let valid = true;
@@ -311,7 +332,7 @@ const CharConstraint = (() => {
       else { out.push(r.strict[i] ? UNRESOLVED : chars[i]); valid = false; }
     }
     if (chars.length < r.len) valid = false;
-    return { text: out.join(''), valid, applied: true };
+    return { text: out.join(''), valid, applied: true, ambiguous };
   }
 
   /* ── 表示用の要約 ───────────────────────────────────── */
