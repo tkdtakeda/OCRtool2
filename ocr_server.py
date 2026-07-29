@@ -187,16 +187,13 @@ def _recognize_tesserocr(rgba: np.ndarray, psm: int, lang: str, whitelist: str) 
 
 # ── pytesseract 経路 ────────────────────────────────────────
 def _to_ascii_safe_path(path: str) -> str:
-    """Windowsの8.3短縮パス名（レガシー互換のため今も生成される、純ASCIIの
-    別名。例: "OCRツール" → "OCRT~1"）に変換できれば変換する。
-    pytesseractがsubprocess経由でtesseract.exe（ネイティブバイナリ）へパスを渡す際、
-    日本語等の非ASCII文字を含むと環境依存でエンコーディングが壊れ、設定ファイルが
-    見つからないままwhitelist制限なしで実行されてしまうことが実機で確認された
-    （一時ファイルの置き場所をどこに変えても、ユーザー名やフォルダ名に日本語が
-    含まれていれば再発するため、「場所」ではなく「パス文字列」側で対策する）。
+    """Windowsの8.3短縮パス名（レガシー互換のため今も生成される、純ASCIIかつ
+    空白なしの別名。例: "OCR ツール" → "OCRT~1"）に変換できれば変換する。
+    ASCIIのみの判定ではなく、空白の有無も合わせて見る（_pytesseract_configの
+    引用符問題を参照）ため、すでにASCIIでも空白を含むパスは変換を試みる。
     短縮パス名はボリューム側で無効化されている場合もあるため、取得できなければ
     元のパスをそのまま返す（Windows以外の環境も同様）。"""
-    if sys.platform != 'win32' or path.isascii():
+    if sys.platform != 'win32' or _is_tesseract_argv_safe(path):
         return path
     try:
         import ctypes
@@ -209,16 +206,36 @@ def _to_ascii_safe_path(path: str) -> str:
     return path
 
 
+def _is_tesseract_argv_safe(path: str) -> bool:
+    """pytesseractはWindows上でconfig文字列を shlex.split(config, posix=False) に
+    通した後、その結果のリストをそのまま subprocess.Popen(引数リスト) へ渡す
+    （シェルを経由しない）。posix=False モードは非ASCII文字を保持できても、
+    空白を含む値は引用符で囲んでも空白の分断こそ防げるものの引用符の文字自体は
+    トークンから取り除かれず残ってしまう（実機・sandbox双方のshlex.splitで確認
+    済み）。つまりWindows経路で安全に渡せるパスの条件は「ASCIIのみ」かつ
+    「空白を含まない」の両方であり、引用符での回避はできない。"""
+    return path.isascii() and not any(c.isspace() for c in path)
+
+
 def _pytesseract_config(psm: int, whitelist: str) -> tuple[str, str | None]:
     """whitelistは--psmと違い空白・カンマ・通貨記号を含みうる。pytesseractは
     configをshlex.splitするため、値をそのままコマンドライン文字列に混ぜると
     空白で分断されて壊れる。Tesseractのconfigファイル（1行『変数名 値』形式で
     改行までが値になり再分割されない）に書き出し、そのパスだけを渡すことで回避する。
 
-    書き出し先は _TMP_DIR モジュールコメントの通り複数候補を順に試す。8.3短縮パス名
-    ですぐASCII化できた候補を採用し、残りは試さない（余計な一時ファイルを作らない）。
-    最後の候補まで非ASCIIのままだった場合はそれをそのまま使う（動く可能性はゼロでは
-    ないため）が、既存の警告ログでその旨を伝える。"""
+    書き出し先は _TMP_DIR モジュールコメントの通り複数候補を順に試す。1回で
+    「ASCIIかつ空白なし」の候補を採用し、残りは試さない（余計な一時ファイルを
+    作らない）。最後の候補まで満たせなかった場合はそれをそのまま使う（動く
+    可能性はゼロではないため）が、既存の警告ログでその旨を伝える。
+
+    重要: このパスをTesseractへ渡す際、Windows経路（pytesseractの
+    shlex.split(config, posix=False)）では引用符" "で囲んでも引用符の文字自体が
+    トークンに残ってしまい、その名前のファイルは存在しないため設定が読めず
+    whitelistが無視される（_is_tesseract_argv_safeのdocstring参照）。これまでの
+    修正が「パスをASCII化する」ことに集中していた間もこの引用符バグは常に
+    有効で、パスの中身に関わらずWindows上のwhitelist指定を毎回無効化していた
+    可能性が高い。そのため引用符で囲むのは非Windows（posix=Trueで引用符が
+    正しく解釈・除去される）に限定し、Windowsでは囲まない。"""
     config = f'--psm {int(psm)}'
     tmp_path = None
     if whitelist:
@@ -236,20 +253,23 @@ def _pytesseract_config(psm: int, whitelist: str) -> tuple[str, str | None]:
                 continue   # このディレクトリに書けない（権限等）→ 次の候補へ
             candidate_safe = _to_ascii_safe_path(path)
             tmp_path, safe_path = path, candidate_safe
-            if candidate_safe.isascii() or is_last:
+            if _is_tesseract_argv_safe(candidate_safe) or is_last:
                 break
-            # まだ他に候補が残っており、これは非ASCIIのまま → ゴミを残さず次の候補へ
+            # まだ他に候補が残っており、まだ安全でない → ゴミを残さず次の候補へ
             try:
                 os.remove(path)
             except OSError:
                 pass
-        # 診断用: 全候補を試しても非ASCII文字が残る場合は、whitelistが効かない症状が
-        # 再発しうることを示す手がかりとして警告する。
-        if not safe_path.isascii():
-            applog.log(f'[warn] whitelist設定ファイルのパスに非ASCII文字が含まれています: {safe_path}'
-                       f' （候補{len(candidates)}箇所とも8.3短縮パス名への変換に失敗。'
+        # 診断用: 全候補を試しても非ASCII文字や空白が残る場合は、whitelistが
+        # 効かない症状が再発しうることを示す手がかりとして警告する。
+        if not _is_tesseract_argv_safe(safe_path):
+            applog.log(f'[warn] whitelist設定ファイルのパスに非ASCII文字または空白が含まれています: {safe_path}'
+                       f' （候補{len(candidates)}箇所とも短縮パス名への変換に失敗。'
                        f'環境によってはwhitelist制限が効かない原因になります）')
-        config += f' "{safe_path}"'
+        if sys.platform == 'win32':
+            config += f' {safe_path}'   # 引用符で囲むと逆に壊れる（上記docstring参照）
+        else:
+            config += f' "{safe_path}"'   # posix=Trueでは引用符が正しく解釈される
     return config, tmp_path
 
 
