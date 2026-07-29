@@ -27,6 +27,7 @@ import applog
 import matcher
 import ocr_server as ocr
 import processor_server as processor
+import version_info
 from imaging import data_url_to_rgba, rgba_to_data_url
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -79,6 +80,15 @@ def create_app() -> Flask:
             'languages': info['languages'],
             'cpuCount': os.cpu_count(),
             'error': None if ocr.is_ready() else ocr.init_error(),
+        })
+
+    # ── バージョン情報（「今動いているコードは最新の修正を含んでいるか」を
+    #    画面のバージョン表示・変更履歴モーダルから確認できるようにする） ──
+    @app.get('/api/version')
+    def api_version():
+        return jsonify({
+            'current': version_info.current_commit(),
+            'history': version_info.recent_history(30),
         })
 
     # ── 診断ログ（速度・精度の問題を報告する際、ブラウザ側の「診断情報をコピー」

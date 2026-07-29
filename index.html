@@ -39,6 +39,9 @@
   </div>
 
   <nav class="header-nav">
+    <button id="btnVersion" class="ver-badge" title="今動いているコードのバージョンを確認・変更履歴を見る">
+      <i class="fas fa-code-branch"></i> <span id="verBadgeText">v.----</span>
+    </button>
     <button id="btnCopyDiagnostics" class="btn btn-icon" title="速度・精度の問題を報告するとき用。サーバーとブラウザの直近ログをまとめてコピーします（DevToolsを探す必要はありません）">
       <i class="fas fa-clipboard-list"></i>
     </button>
@@ -498,6 +501,20 @@
 </div>
 
 <!-- ヘルプ / 設計思想モーダル -->
+<!-- バージョン・変更履歴（今動いているコードが最新の修正を含んでいるかを確認する用） -->
+<div class="modal-overlay hidden" id="versionModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr"><h2><i class="fas fa-code-branch"></i> バージョン・変更履歴</h2>
+      <button class="modal-close" id="closeVersionModal"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <div id="verCurrentBox" class="ver-current"></div>
+      <h3 class="ver-hist-title">変更履歴（新しい順）</h3>
+      <div id="verHistoryList" class="ver-hist-list"></div>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay hidden" id="helpModal">
   <div class="modal modal--lg">
     <div class="modal-hdr"><h2><i class="fas fa-circle-question"></i> 使い方と設計思想</h2>

@@ -33,6 +33,7 @@
     recogPageNum: 1, pageNav: null, navReviewMode: false,
     /* 位置ズレ警告: 帳票id→そのセッションで既に目立つ警告を出したか／件数 */
     posWarnShown: new Set(), posWarnCounts: {},
+    versionData: null,   // /api/version の結果（バージョンバッジ・変更履歴モーダル用）
   };
 
   /* PSM 比較用パターン */
@@ -122,10 +123,27 @@
       S.serverReady = true;
       $('loadingOverlay').classList.add('hidden');
       UI.toast(`サーバーに接続しました（OCRエンジン: ${json.ocrEngine || '不明'}）`, 'success');
+      loadVersionInfo();
     } catch (e) {
       $('loadingMsg').innerHTML = `サーバーに接続できませんでした。ターミナルで <code>python run_server.py</code> を実行しているか確認してください。<br><small>${(e && e.message) ? e.message : e}</small>`;
       UI.toast('サーバーへの接続に失敗しました', 'error', 6000);
     }
+  }
+
+  /* 今動いているコードのバージョン・変更履歴を取得してヘッダーへ反映する。
+     「修正を伝えたが本当に反映されているか分からない」を無くすのが目的なので、
+     取得に失敗してもトーストは出さずヘッダーのバッジ表示だけで静かに知らせる。 */
+  async function loadVersionInfo() {
+    try {
+      const res = await fetch('/api/version');
+      const json = await res.json();
+      S.versionData = json;
+      UI.renderVersionBadge(json.current);
+    } catch (_) { UI.renderVersionBadge(null); }
+  }
+  function openVersionModal() {
+    UI.renderVersionModal(S.versionData || { current: null, history: [] });
+    $('versionModal').classList.remove('hidden');
   }
 
   /* ── モード切替 ─────────────────────────────────────── */
@@ -2658,6 +2676,9 @@
     $('sampleFormModal').addEventListener('click', e => { if (e.target === $('sampleFormModal')) $('sampleFormModal').classList.add('hidden'); });
     $('btnHelp').addEventListener('click', () => $('helpModal').classList.remove('hidden'));
     $('btnCopyDiagnostics').addEventListener('click', copyDiagnostics);
+    $('btnVersion').addEventListener('click', openVersionModal);
+    $('closeVersionModal').addEventListener('click', () => $('versionModal').classList.add('hidden'));
+    $('versionModal').addEventListener('click', e => { if (e.target === $('versionModal')) $('versionModal').classList.add('hidden'); });
     $('closeHelpModal').addEventListener('click', () => $('helpModal').classList.add('hidden'));
     $('helpModal').addEventListener('click', e => { if (e.target === $('helpModal')) $('helpModal').classList.add('hidden'); });
     document.addEventListener('keydown', e => {

@@ -28,6 +28,65 @@ const StudioUI = (() => {
     setTimeout(() => { t.classList.remove('is-visible'); setTimeout(() => { try { c.removeChild(t); } catch (_) {} }, 280); }, duration);
   }
 
+  /* ── バージョンバッジ・変更履歴 ─────────────────────────
+     「今動いているコードは最新の修正を含んでいるか」を確認できるようにする。
+     git のコミットハッシュ・日時・件名（バッジ＋概要）と、直近の変更履歴
+     （コミット本文＝これまでの修正の背景・実測結果）をそのまま見せる。 */
+  function renderVersionBadge(info) {
+    const badge = $('btnVersion'); const text = $('verBadgeText');
+    if (!badge || !text) return;
+    if (!info || !info.available) {
+      text.textContent = 'v.不明';
+      badge.classList.add('is-unknown');
+      badge.title = 'バージョン情報を取得できませんでした（gitが使えない環境の可能性があります）';
+      return;
+    }
+    text.textContent = `v.${info.hash}`;
+    badge.classList.toggle('is-dirty', !!info.dirty);
+    badge.title = info.dirty
+      ? `未コミットの変更があります（${info.hash}から変更済み）。クリックで変更履歴を表示`
+      : `最新コミット: ${info.subject || ''}。クリックで変更履歴を表示`;
+  }
+
+  function formatVerDate(iso) {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      return d.toLocaleString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    } catch (_) { return iso; }
+  }
+
+  function renderVersionModal(data) {
+    const cur = data && data.current;
+    const curBox = $('verCurrentBox');
+    if (curBox) {
+      if (!cur || !cur.available) {
+        curBox.innerHTML = 'バージョン情報を取得できませんでした（gitが使えない環境の可能性があります）。';
+      } else {
+        const warn = cur.dirty ? '<div class="ver-warn"><i class="fas fa-triangle-exclamation"></i> 未コミットの変更があります。表示中の内容と実際の動作がずれている可能性があります。</div>' : '';
+        curBox.innerHTML = `現在のバージョン: <b>${esc(cur.hash || '?')}</b>（${esc(formatVerDate(cur.date))}）<br>`
+          + `${esc(cur.subject || '')}${warn}`;
+      }
+    }
+    const list = $('verHistoryList'); if (!list) return;
+    const history = (data && data.history) || [];
+    if (!history.length) { list.innerHTML = '<div class="mini-empty">変更履歴を取得できませんでした</div>'; return; }
+    list.innerHTML = '';
+    history.forEach(h => {
+      const item = document.createElement('div'); item.className = 'ver-hist-item';
+      item.innerHTML = `
+        <div class="ver-hist-head">
+          <span class="ver-hist-hash">${esc(h.hash)}</span>
+          <span class="ver-hist-date">${esc(formatVerDate(h.date))}</span>
+          <span class="ver-hist-subject">${esc(h.subject)}</span>
+          <i class="fas fa-chevron-right ver-hist-chevron"></i>
+        </div>
+        <div class="ver-hist-body">${esc(h.body || '（詳細説明なし）')}</div>`;
+      item.querySelector('.ver-hist-head').addEventListener('click', () => item.classList.toggle('is-open'));
+      list.appendChild(item);
+    });
+  }
+
   /* ── 登録ステップのチェックリスト ───────────────────── */
   function refreshRegSteps(flags) {
     document.querySelectorAll('#regSteps .reg-step').forEach(el => {
@@ -508,6 +567,7 @@ const StudioUI = (() => {
 
   return {
     $, esc, toast, REGION_COLORS, ANCHOR_COLOR, OCR_COLOR,
+    renderVersionBadge, renderVersionModal,
     refreshRegSteps, renderFormLibrary, renderAnchorList, renderAnchorCollisions, renderAnchorUniqueness, renderRegionList,
     setPipeline, resetPipeline,
     renderDecision, renderRecogPreview, renderFieldResults, symbolChipsHTML, confClass,
