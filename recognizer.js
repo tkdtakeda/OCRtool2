@@ -392,14 +392,21 @@ const Recognizer = (() => {
    *
    * なお中央値フィルタによるノイズ除去も試したが、細い字画（1・L）を消して落字を
    * 招くため採用しない（実測で正答率が下がった）。
+   *
+   * erodePx=1 を渡すと、二値化の直後にインクを1px痩せさせてからガウスを掛ける。
+   * これは本線の入力ではなく、セカンドオピニオン用の「別の見え方の画像」を作る
+   * ためのオプション（SECOND_OPINION の解説を参照）。痩せは細い字画を消す危険が
+   * あるため本線には使わないが、意見が割れたときの検算材料としては、本線と
+   * 誤りが相関しない画像として価値がある。
    */
-  function binarizeSoft(canvas) {
+  function binarizeSoft(canvas, erodePx = 0) {
     const w = canvas.width, h = canvas.height;
     if (w < 3 || h < 3) return canvas;
     const gray = toGrayOverWhite(canvas);
     const thr = otsuThreshold(gray);
     const bin = new Float32Array(w * h);
     for (let i = 0; i < bin.length; i++) bin[i] = gray[i] < thr ? 0 : 255;
+    if (erodePx > 0) erodeInk(bin, w, h);
 
     /* 横方向 → 縦方向の順に1次元で畳み込む（端は最近傍で補う） */
     const tmp = new Float32Array(w * h);
@@ -428,14 +435,61 @@ const Recognizer = (() => {
     return out;
   }
 
+  /** 二値配列(0=インク/255=白)のインクを1px痩せさせる（8近傍に白が1つでもあれば白へ）。
+      画像端の外は白とみなす。binarizeSoftのerodePx用の内部ヘルパー。 */
+  function erodeInk(bin, w, h) {
+    const src = Float32Array.from(bin);
+    const at = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 255 : src[y * w + x];
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (src[y * w + x] !== 0) continue;
+        let touchesWhite = false;
+        for (let dy = -1; dy <= 1 && !touchesWhite; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (at(x + dx, y + dy) !== 0) { touchesWhite = true; break; }
+          }
+        }
+        if (touchesWhite) bin[y * w + x] = 255;
+      }
+    }
+  }
+
+  /* OCR入力の四辺に足す白余白(px)。
+     Tesseract(LSTM)は行の周囲に十分な余白が無いと行の正規化が乱れ、字形を丸ごと
+     別の文字として誤分類することがある（公式FAQも境界余白の追加を推奨している）。
+     行トリム（preprocessSingleLine）は上下に2pxしか余白を残さないため、このツールの
+     単一値欄はまさにその「余白不足」の状態でTesseractへ渡っていた。
+     実測: 縦棒がほぼ垂直な等幅書体（Courier系）の太字「704」が、余白不足だと
+     "104"（7が丸ごと1に誤分類）や "7104"（7が7+ゴースト1に二重検出）になる現象を
+     サンドボックスで再現できた（実機の矩形ログと同一シグネチャ）。四辺に12pxの
+     白枠を足すだけで、再現した誤読10ケース全てが "704" に戻り、フォント6種×
+     サイズ×劣化条件の回帰ベンチでも悪化しないことを確認して採用した。 */
+  const OCR_MARGIN_PX = 12;
+
+  /** キャンバスの四辺に白余白を付けたコピーを返す（OCR入力専用） */
+  function padCanvas(canvas, m) {
+    const c = document.createElement('canvas');
+    c.width = canvas.width + m * 2;
+    c.height = canvas.height + m * 2;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(canvas, m, m);
+    return c;
+  }
+
   /** 構造化された「英数字・記号のみの単一値」欄か。
       true の欄にだけ 行トリム＋拡大（①④）と PSM=ブロック（③）を適用する。 */
   function isSingleValueField(rule) {
     return CharConstraint.isActive(rule) && CharConstraint.isLatinOnly(rule);
   }
 
-  /** OCR入力キャンバスを構築する。
-      単一値欄は 行トリム → 拡大 → 二値化＋角戻し。それ以外の欄は従来通り拡大のみ。
+  /** 単一値欄のOCR入力一式を構築する。
+      main  = 本線の入力（行トリム → 拡大 → 二値化＋角戻し → 白枠）。
+      erode / gray = セカンドオピニオン用の変種（必要になるまで作らない遅延生成）。
+        erode: 二値化時にインクを1px痩せさせた版。太字で字画同士が近づいた見え方を戻す。
+        gray : 二値化せずグレーのまま渡す版。二値化そのものが招いた誤読の検算用。
+      いずれも同じトリム・拡大結果を共有し、白枠（OCR_MARGIN_PX）も同様に付ける。
 
       ★順序が重要: 必ず行トリムを先に行う。
       拡大するかどうかは「文字の高さ」で決めたいが、切り出しには上下の余白やゴースト行が
@@ -444,11 +498,20 @@ const Recognizer = (() => {
       拡大せず、その後のトリムで文字が小さいまま Tesseract へ渡っていた
       （実測: 51pxの切り出しが拡大されないままトリムされ、文字はわずか15pxで渡っていた）。
       トリムを先にすれば、目標高さが本当に文字の高さに対して効くようになる。 */
-  function ocrInputCanvas(cropCanvas, single) {
-    if (!single) return upscaleForOcr(cropCanvas);
+  function buildSingleInputs(cropCanvas) {
     const trimmed = preprocessSingleLine(cropCanvas);
     const scaled = upscaleForOcr(trimmed, SINGLE_TARGET_H, SINGLE_MAX_SCALE);
-    return binarizeSoft(scaled);
+    return {
+      main:  padCanvas(binarizeSoft(scaled), OCR_MARGIN_PX),
+      erode: () => padCanvas(binarizeSoft(scaled, 1), OCR_MARGIN_PX),
+      gray:  () => padCanvas(scaled, OCR_MARGIN_PX),
+    };
+  }
+
+  /** OCR入力キャンバス（本線のみ）。単一値欄以外は従来通り拡大のみ。 */
+  function ocrInputCanvas(cropCanvas, single) {
+    if (!single) return upscaleForOcr(cropCanvas);
+    return buildSingleInputs(cropCanvas).main;
   }
 
   /* PSM: 単一値欄は「単一の均一ブロック」(6) で読む。単一行(7)は最上行だけを読むため、
@@ -492,20 +555,26 @@ const Recognizer = (() => {
      まとまりの修復自体を諦める（誤った方を自信満々に確定させるより安全）。 */
   const GLYPH_WIDTH_MARGIN = 0.15;
 
-  /* 可変長欄（金額欄等）の「セカンドオピニオン」に使うPSM。
+  /* ── 可変長欄（金額欄等）のセカンドオピニオン ─────────────
      可変長欄は桁数という検算材料が無いため、字形が丸ごと別の文字として
      誤分類された場合（実機で "704" が "104" と読まれ、7の矩形が1個だけ・
      幅も他の数字と同等で、矩形からは異常を検出できなかった例がある）、
      何のフラグも立たないまま確信度86%の緑表示で通ってしまう。
-     そこで別のレイアウト解釈でもう一度読み、最終値が食い違えば「要確認」
-     として利用者に知らせる。
-     PSM7（単一行）を選んだのは、サンドボックスでの実測で、きれいな金額
-     画像（"704"・"591,800"・"1,573,000"）に対しPSM6と完全に同じ最終値を
-     返し、誤検知を出さなかったため（PSM8/13は末尾に余分なカンマを付けた）。
+
+     以前は「同じ画像を別のレイアウト解釈（PSM7）で読み直す」方式だったが、
+     この誤読をサンドボックスで再現して測ったところ、PSM6で"104"になる画像は
+     PSM7でも全ケース"104"になった（実機でも同様で、要確認フラグは立たなかった）。
+     同じ画像を見る限り、レイアウト解釈を変えても誤りは相関する。
+
+     そこで検算は「同じ画像の別解釈」ではなく「別の見え方に加工した画像」で行う。
+     本線（二値化＋角戻し）に対し、①インクを1px痩せさせた版（erode）で読み直し、
+     一致すればそのまま採用。食い違えば ②グレー版（gray・二値化なし）でもう一度
+     読み、2対1の多数決で決める。本線が少数派なら多数派の値を採用し（実測で、
+     再現した"104"誤読はerode版・gray版とも"704"と正しく読めた）、三者三様なら
+     どれも信用できないので本線の値のまま「要確認」として利用者に知らせる。
      比較は生データではなく「正規化・制約適用後の最終値」同士で行う。
      生データだと "591,800" と "591,800," のような表記ゆれで誤検知するが、
      最終値ではどちらも "591800" に落ち着くため。 */
-  const SECOND_OPINION_PSM = 7;
 
   /** 数値配列の中央値。 */
   function medianOf(nums) {
@@ -948,8 +1017,10 @@ const Recognizer = (() => {
         continue;
       }
       const tFieldStart = performance.now();
-      /* 実際にTesseractへ渡す画像。診断表示（切り出し画像との比較）用に保持する */
-      const inputCanvas = ocrInputCanvas(cropCanvas, single);
+      /* 実際にTesseractへ渡す画像。診断表示（切り出し画像との比較）用に保持する。
+         単一値欄は変種（erode/gray）も同じトリム・拡大結果から遅延生成できるようにする */
+      const inputSet = single ? buildSingleInputs(cropCanvas) : null;
+      const inputCanvas = inputSet ? inputSet.main : ocrInputCanvas(cropCanvas, false);
       const onProg = prog => cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
       let res = await OcrProcessor.recognize(inputCanvas, usePsm, onProg, useLang, useWl);
       let out = finishText(res, region, rule, active, single);
@@ -972,41 +1043,76 @@ const Recognizer = (() => {
          回す（固定長欄のような「合否で絞ってから」はできない）。 */
       const norm = active ? CharConstraint.normalize(rule) : null;
       const isVariableSingle = single && !!(norm && norm.variable);
-      if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous || isVariableSingle)) {
-        const boxRes = await OcrProcessor.recognize(inputCanvas, usePsm, onProg, useLang, useWl, true);
+      /* 文字矩形を取り直し、分割字形（1つの字形の二重検出）を修復した読み取りを返す。
+         修復不要・修復不能・修復結果が制約を満たさない場合は null。
+         本線だけでなくセカンドオピニオンの変種画像にも同じ修復を掛けるため関数化
+         （変種側にも "7104" のような二重検出は同様に起こり得る）。 */
+      const repairViaBoxes = async (canvas, label) => {
+        const boxRes = await OcrProcessor.recognize(canvas, usePsm, onProg, useLang, useWl, true);
         const boxes = boxRes.charBoxes;
-        if (Array.isArray(boxes) && boxes.length) {
-          const expectedLen = (norm && !norm.variable) ? norm.len : 0;
-          const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes, expectedLen);
-          const dropped = new Set((rep ? rep.dropped : []));
-          console.log(`[ocr]   "${region.name}" 文字矩形: `
-            + boxes.map(b => `${b.text}[${b.x0}-${b.x1}]${dropped.has(b) ? '←除外' : ''}`).join(' '));
-          if (rep) {
-            const repRes = { ...boxRes, fullText: rep.text, lines: [{ text: rep.text, confidence: boxRes.confidence || 0 }] };
-            const repOut = finishText(repRes, region, rule, active, single);
-            console.log(`[ocr]   "${region.name}" 分割字形を統合 raw=${JSON.stringify(rep.text)} `
-              + `→ ${JSON.stringify(repOut.text)} valid=${repOut.constraintValid} `
-              + `lengthSuspicious=${repOut.lengthSuspicious} ambiguous=${repOut.ambiguous}`);
-            if (repOut.constraintValid && !repOut.lengthSuspicious && !repOut.ambiguous) { res = repRes; out = repOut; }
-          }
-        }
+        if (!Array.isArray(boxes) || !boxes.length) return null;
+        const expectedLen = (norm && !norm.variable) ? norm.len : 0;
+        const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes, expectedLen);
+        const dropped = new Set((rep ? rep.dropped : []));
+        console.log(`[ocr]   "${region.name}"${label} 文字矩形: `
+          + boxes.map(b => `${b.text}[${b.x0}-${b.x1}]${dropped.has(b) ? '←除外' : ''}`).join(' '));
+        if (!rep) return null;
+        const repRes = { ...boxRes, fullText: rep.text, lines: [{ text: rep.text, confidence: boxRes.confidence || 0 }] };
+        const repOut = finishText(repRes, region, rule, active, single);
+        console.log(`[ocr]   "${region.name}"${label} 分割字形を統合 raw=${JSON.stringify(rep.text)} `
+          + `→ ${JSON.stringify(repOut.text)} valid=${repOut.constraintValid} `
+          + `lengthSuspicious=${repOut.lengthSuspicious} ambiguous=${repOut.ambiguous}`);
+        return (repOut.constraintValid && !repOut.lengthSuspicious && !repOut.ambiguous)
+          ? { res: repRes, out: repOut } : null;
+      };
+      if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous || isVariableSingle)) {
+        const fixed = await repairViaBoxes(inputCanvas, '');
+        if (fixed) { res = fixed.res; out = fixed.out; }
       }
-      /* 可変長欄のセカンドオピニオン: 別のレイアウト解釈でもう一度読み、最終値が
-         食い違えば「要確認」にする。可変長欄には桁数という検算材料が無く、字形が
-         丸ごと別の文字へ誤分類された場合（実機の "704"→"104"）は矩形の個数にも
-         幅にも異常が出ないため、ここまでの仕組みでは何も検知できず、誤った値が
-         確信度86%の緑表示で通ってしまっていた。値そのものを直せるわけではないが、
-         「この欄は疑わしい」と利用者に伝えられるだけでも、黙って間違うよりは
-         はるかに良い（SECOND_OPINION_PSM のコメント参照）。 */
+      /* 可変長欄のセカンドオピニオン: 別の見え方に加工した画像（変種）で読み直し、
+         2対1の多数決で確定する（方式の背景と実測はファイル先頭側の
+         「可変長欄のセカンドオピニオン」コメント参照）。
+         ・本線と痩せ版(erode)が一致 → そのまま採用（追加コストは1回の読みだけ）
+         ・食い違えばグレー版(gray)で三者目を読み、多数派の値を採用
+         ・三者三様なら本線の値のまま「要確認」フラグ
+         変種の読みが本線と食い違った場合、その食い違いが分割字形（二重検出）の
+         せいである可能性があるので、比較の前に変種側も矩形修復を試みる。 */
       let secondOpinionDiff = null;
-      if (isVariableSingle && usePsm !== SECOND_OPINION_PSM) {
-        const soRes = await OcrProcessor.recognize(inputCanvas, SECOND_OPINION_PSM, onProg, useLang, useWl);
-        const soOut = finishText(soRes, region, rule, active, single);
-        if (soOut.text !== out.text) {
-          secondOpinionDiff = soOut.text;
+      let secondOpinionNote = '';
+      if (isVariableSingle && inputSet) {
+        const eroCanvas = inputSet.erode();
+        const eroRes = await OcrProcessor.recognize(eroCanvas, usePsm, onProg, useLang, useWl);
+        let ero = { res: eroRes, out: finishText(eroRes, region, rule, active, single) };
+        if (ero.out.text !== out.text) {
           console.log(`[ocr]   "${region.name}" セカンドオピニオン不一致: `
-            + `psm=${readPsm}→${JSON.stringify(out.text)} / psm=${SECOND_OPINION_PSM}→${JSON.stringify(soOut.text)}`
-            + ` （どちらが正しいか判定できないため「要確認」にします）`);
+            + `本線=${JSON.stringify(out.text)} / 痩せ版=${JSON.stringify(ero.out.text)} → 修復と三者目で裁定`);
+          ero = (await repairViaBoxes(eroCanvas, ' 痩せ版')) || ero;
+        }
+        if (ero.out.text !== out.text) {
+          const grayCanvas = inputSet.gray();
+          const grayRes = await OcrProcessor.recognize(grayCanvas, usePsm, onProg, useLang, useWl);
+          let gray = { res: grayRes, out: finishText(grayRes, region, rule, active, single) };
+          if (gray.out.text !== out.text && gray.out.text !== ero.out.text) {
+            gray = (await repairViaBoxes(grayCanvas, ' グレー版')) || gray;
+          }
+          if (gray.out.text === ero.out.text && ero.out.text) {
+            /* 本線だけが少数派 → 多数派（痩せ版・グレー版が一致した値）を採用 */
+            console.log(`[ocr]   "${region.name}" 多数決で修正: 本線=${JSON.stringify(out.text)}`
+              + ` → 採用=${JSON.stringify(ero.out.text)}（痩せ版・グレー版が一致）`);
+            secondOpinionNote = `多数決で修正(本線=${JSON.stringify(out.text)})`;
+            res = ero.res; out = ero.out;
+          } else if (gray.out.text === out.text) {
+            /* 本線が多数派 → 痩せ版の少数意見は棄却（フラグも立てない） */
+            console.log(`[ocr]   "${region.name}" 本線を維持: グレー版が本線と一致`
+              + `（痩せ版=${JSON.stringify(ero.out.text)}は少数派として棄却）`);
+          } else {
+            /* 三者三様 → どれも信用できない。本線の値のまま要確認 */
+            secondOpinionDiff = ero.out.text;
+            console.log(`[ocr]   "${region.name}" セカンドオピニオン三者三様: `
+              + `本線=${JSON.stringify(out.text)} / 痩せ版=${JSON.stringify(ero.out.text)}`
+              + ` / グレー版=${JSON.stringify(gray.out.text)}`
+              + ` （どれが正しいか判定できないため「要確認」にします）`);
+          }
         }
       }
       /* 文字制約に不合格、桁数が大きく食い違う、または抽出候補が複数同点で
@@ -1049,7 +1155,8 @@ const Recognizer = (() => {
       console.log(`[perf]   OCR "${region.name}" lang=${useLang} psm=${readPsm}${readPsm !== usePsm ? '(再読取)' : ''} `
         + `${(performance.now() - tFieldStart).toFixed(0)}ms 採用: raw=${JSON.stringify(raw)} → ${JSON.stringify(text)} `
         + `valid=${constraintValid} ambiguous=${ambiguous}`
-        + (secondOpinionDiff !== null ? ` 別解釈=${JSON.stringify(secondOpinionDiff)}(要確認)` : ''));
+        + (secondOpinionDiff !== null ? ` 別解釈=${JSON.stringify(secondOpinionDiff)}(要確認)` : '')
+        + (secondOpinionNote ? ` ${secondOpinionNote}` : ''));
       /* 信頼度は「最終的な値の文字」基準（周辺のゴミで下がらないように） */
       const conf = valueConfidence(text, res.symbols, confOf(res));
       fields[i] = {
@@ -1060,12 +1167,12 @@ const Recognizer = (() => {
         confidence: conf,
         error: res.error || null,
         constraint: active ? CharConstraint.describe(rule) : '',
-        /* 桁数超過・抽出候補の同点（ambiguous）・別解釈との食い違い
+        /* 桁数超過・抽出候補の同点（ambiguous）・セカンドオピニオンの三者三様
            （secondOpinionDiff）が読み直しでも解消しなかった場合は、既存の
            「制約不合格」表示に乗せて利用者へ伝える（constraintValid自体は
            trueでも、値としては信用できないことに変わりないため。
            LENGTH_MISMATCH_TOL・extractStrのambiguous判定・
-           SECOND_OPINION_PSM を参照）。 */
+           「可変長欄のセカンドオピニオン」コメントを参照）。 */
         constraintValid: constraintValid && !lengthSuspicious && !ambiguous && secondOpinionDiff === null,
         symbols: res.symbols || [],
         cropDataURL: cropCanvas.toDataURL('image/png'),
@@ -1073,7 +1180,9 @@ const Recognizer = (() => {
            前処理が効いたか／ゴーストが除けたかを目視で確認できるようにする。
            前処理を通す単一値欄のみPNG化する（他欄は元切り出しとほぼ同一で無駄なため）。 */
         ocrInputDataURL: single ? inputCanvas.toDataURL('image/png') : null,
-        ocrInfo: { preprocessed: single, psm: readPsm, retried: readPsm !== usePsm, lang: useLang, whitelist: useWl },
+        ocrInfo: { preprocessed: single, psm: readPsm, retried: readPsm !== usePsm, lang: useLang, whitelist: useWl,
+                   /* セカンドオピニオンの裁定結果（'' = 一致または対象外）。UIの診断行に出す */
+                   opinion: secondOpinionNote || (secondOpinionDiff !== null ? '不一致(要確認)' : '') },
       };
     }
 

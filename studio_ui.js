@@ -403,12 +403,15 @@ const StudioUI = (() => {
   /** OCR入力に使ったパラメータの一行表示（前処理が効いたか等を確認できる診断） */
   function ocrInfoHTML(info) {
     if (!info) return '';
-    const pre = info.preprocessed ? '行トリム→拡大→二値化+角戻し' : 'なし';
+    const pre = info.preprocessed ? '行トリム→拡大→二値化+角戻し→白枠' : 'なし';
     const wl  = info.whitelist ? ` ・ 許可「${esc(info.whitelist)}」` : '';
     /* 文字制約に不合格で別PSMへ切り替えた欄はその旨を出す（なぜPSMが既定値と違うのかが
        分かるようにするため）。 */
     const psm = `PSM ${esc(String(info.psm))}${info.retried ? '（制約不合格のため読み直し）' : ''}`;
-    return `<span class="field-detail-meta" style="font-size:11px;color:#64748b;line-height:1.4;">前処理: ${pre} ・ ${psm} ・ ${esc(info.lang || '')}${wl}</span>`;
+    /* セカンドオピニオン（別前処理画像との照合）の裁定。多数決で値を修正した場合は
+       「なぜこの値になったか」を利用者が追えるよう、本線の読みも含めて表示する */
+    const op = info.opinion ? ` ・ 検算: ${esc(info.opinion)}` : '';
+    return `<span class="field-detail-meta" style="font-size:11px;color:#64748b;line-height:1.4;">前処理: ${pre} ・ ${psm} ・ ${esc(info.lang || '')}${wl}${op}</span>`;
   }
   function renderFieldResults(fields) {
     const c = $('fieldResults'); c.innerHTML = '';
