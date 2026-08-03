@@ -1321,14 +1321,16 @@
     navigator.clipboard.writeText(lines.join('\n')).then(() => UI.toast('全フィールドをコピーしました', 'success')).catch(() => UI.toast('コピーに失敗しました', 'error'));
   }
 
-  /* ── 診断情報をコピー ────────────────────────────────
+  /* ── 診断情報の収集 ──────────────────────────────────
      速度・精度の問題を報告する際、これまではDevToolsのConsoleとサーバーのターミナルを
      別々に開いて該当ログを自分で探す必要があった。この app.js の console.log 呼び出しは
      [perf]/[align] 診断ログのみ（他の用途に使っていない）なので、diag_log.js が
      溜めているブラウザ側の直近ログと、サーバー側の直近ログ（/api/diagnostics、
-     matcher.py/app.py の [perf] 出力を applog.py が保持）をまとめて1回のコピーで
-     渡せるようにする。DevToolsを開く必要自体を無くすのが狙い。 */
-  async function copyDiagnostics() {
+     matcher.py/app.py の [perf] 出力を applog.py が保持）をまとめて1回で取り出せる
+     ようにする。DevToolsを開く必要自体を無くすのが狙い。
+     「コピー」（そのまま会話に貼り付ける用）と「表示」（自分でHTML上で内容を確認する用、
+     DiagViewer参照）の両方が同じログを使うため、収集部分をここに切り出す。 */
+  async function gatherDiagnostics() {
     const parts = [
       '=== OCRtool2 診断情報 ===',
       `生成日時: ${new Date().toLocaleString('ja-JP')}`,
@@ -1353,12 +1355,31 @@
     parts.push('', '--- ブラウザ ---');
     const clientLog = DiagLog.recent();
     parts.push(...(clientLog.length ? clientLog : ['(ログなし。問題が起きた操作をもう一度行ってから押してください)']));
+    return parts.join('\n');
+  }
 
+  async function copyDiagnostics() {
     try {
-      await navigator.clipboard.writeText(parts.join('\n'));
+      await navigator.clipboard.writeText(await gatherDiagnostics());
       UI.toast('診断情報をコピーしました。会話にそのまま貼り付けてください', 'success', 4000);
     } catch (_) {
       UI.toast('コピーに失敗しました', 'error');
+    }
+  }
+
+  /* ── 診断情報を表示（HTML整形ビュー） ───────────────────
+     コピーしたテキストをそのまま読むのは、特に[align]（位置合わせ）行が
+     「基準座標→一致座標・ずれ・スコア・検出倍率」と情報密度が高く、生ログのままでは
+     どの目印が怪しいのか読み取りにくい。DiagViewer（diag_viewer.js）でテーブル化・
+     色分けし、ズレの大きい目印がひと目で分かるようにする。 */
+  async function showDiagnosticsViewer() {
+    $('diagViewerModal').classList.remove('hidden');
+    $('diagViewerBody').innerHTML = '<p class="diag-loading"><i class="fas fa-spinner fa-spin"></i> 取得中…</p>';
+    try {
+      const text = await gatherDiagnostics();
+      $('diagViewerBody').innerHTML = DiagViewer.render(text);
+    } catch (e) {
+      $('diagViewerBody').innerHTML = `<p class="diag-loading">取得に失敗しました: ${e.message || e}</p>`;
     }
   }
 
@@ -2764,6 +2785,9 @@
     $('sampleFormModal').addEventListener('click', e => { if (e.target === $('sampleFormModal')) $('sampleFormModal').classList.add('hidden'); });
     $('btnHelp').addEventListener('click', () => $('helpModal').classList.remove('hidden'));
     $('btnCopyDiagnostics').addEventListener('click', copyDiagnostics);
+    $('btnShowDiagnostics').addEventListener('click', showDiagnosticsViewer);
+    $('closeDiagViewerModal').addEventListener('click', () => $('diagViewerModal').classList.add('hidden'));
+    $('diagViewerModal').addEventListener('click', e => { if (e.target === $('diagViewerModal')) $('diagViewerModal').classList.add('hidden'); });
     $('btnVersion').addEventListener('click', openVersionModal);
     $('closeVersionModal').addEventListener('click', () => $('versionModal').classList.add('hidden'));
     $('versionModal').addEventListener('click', e => { if (e.target === $('versionModal')) $('versionModal').classList.add('hidden'); });

@@ -281,6 +281,7 @@ input[type=range] { cursor: pointer; }
 @keyframes slideUp { from { opacity: 0; transform: translateY(12px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 .modal { background: var(--c-surface); border-radius: var(--r); box-shadow: var(--sh-lg); width: 520px; max-width: 92vw; max-height: 86vh; display: flex; flex-direction: column; overflow: hidden; animation: slideUp .2s ease; }
 .modal--lg { width: 680px; }
+.modal--xl { width: 920px; }
 .modal-hdr { display: flex; align-items: center; justify-content: space-between; padding: 13px 16px; border-bottom: 1px solid var(--c-border); flex-shrink: 0; }
 .modal-hdr h2 { font-size: .95rem; font-weight: 700; display: flex; align-items: center; gap: 8px; color: var(--c-text); }
 .modal-close { width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--c-text-3); font-size: .85rem; transition: background var(--ease), color var(--ease); }
