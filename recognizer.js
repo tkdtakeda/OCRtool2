@@ -139,9 +139,13 @@ const Recognizer = (() => {
     };
 
     const constrained = evaluate(true);
-    /* medScale汚染チェックはペア総当たりの多数決（3点以上）が前提のため、
-       2点以下では制約ありの結果をそのまま使う。 */
-    const fallback = pairs.length >= 3 ? evaluate(false) : null;
+    /* 2点（ペア1組だけ）でも意味がある: constrained/fallbackは同じ唯一のペアを
+       評価するが、そのペアの変換がmedScaleと一致すれば両者は同じ結果になり
+       （残差も同一なので下の0.5倍判定でfallbackが不要に選ばれることはない）、
+       食い違えばconstrainedが候補なし(null)になり、fallback（値域チェックのみ）
+       だけがそのペアを拾える。1点は比較対象が無いためそもそも呼ばれない
+       （estimateTransform側の分岐）。 */
+    const fallback = pairs.length >= 2 ? evaluate(false) : null;
     if (fallback && fallback.inliers.length >= 2
         && (!constrained
             || (fallback.inliers.length >= constrained.inliers.length
@@ -181,11 +185,18 @@ const Recognizer = (() => {
     }
     /* 照合倍率の中央値（探索は 0.6〜2.0 と広く、密集アンカーでも安定して得られる） */
     const medScaleAll = median(all.map(p => p.scale || 1));
-    /* 別の場所へ誤マッチした点を先に捨てる。倍率だけでなく平行移動も、誤マッチ点が
-       加重平均に混じるとその分だけ引きずられるため、推定前に取り除く必要がある。
-       ペア総当たりは3点未満では機能しない（2点は常に一致するペアが1組しか無く、
-       多数決にならない）ため、2点以下はそのまま使う。 */
-    const ransac = all.length >= 3 ? ransacInliers(all, medScaleAll) : { points: all, scaleOverride: null };
+    /* 除外（外れ値を捨てる）ための多数決は3点未満では機能しない（2点は常に一致する
+       ペアが1組しか無く、多数決にならない）。しかし ransacInliers が持つもう一つの
+       役割——「唯一のペア自身が示す変換が medScale と食い違う場合に、そちらを
+       信頼できる scaleOverride として返す」——は、多数決ではなく2点1組の関係だけで
+       完結するため2点でも意味がある。実機で、位置合わせ用アンカーが2点しか無い
+       帳票（他のアンカーを判定のみに変更した後等）でも、その2点が両方とも独立に
+       同じ間違った倍率を検出してしまい、medScaleがその2点だけで汚染されるケースが
+       確認された。3点以上なら複数ペアの多数決で真の変換を見つけられるが、2点では
+       唯一のペア自身の変換をmedScale制約なしで信頼するしかなく、それでも「値域
+       チェック(0.4〜2.5)」は残るため、非現実的な変換まで無条件に信頼するわけでは
+       ない。1点はそもそも比較対象が無く呼び出し不要。 */
+    const ransac = all.length >= 2 ? ransacInliers(all, medScaleAll) : { points: all, scaleOverride: null };
     const pairs = ransac.points;
     const dropped = all.length - pairs.length;
     const n = pairs.length;
@@ -211,7 +222,8 @@ const Recognizer = (() => {
       pairs.forEach((p, i) => { const r = gr(p); mr += weights[i] * r; mi += weights[i] * gi(p); if (r < lo) lo = r; if (r > hi) hi = r; });
       mr /= wSum; mi /= wSum;
       let s = medScale;
-      if ((hi - lo) >= MIN_SPAN_FOR_SCALE) {
+      const wide = (hi - lo) >= MIN_SPAN_FOR_SCALE;
+      if (wide) {
         let num = 0, den = 0;
         pairs.forEach((p, i) => { const dr = gr(p) - mr, di = gi(p) - mi; num += weights[i] * dr * di; den += weights[i] * dr * dr; });
         const sReg = den > 1e-6 ? num / den : NaN;
@@ -221,10 +233,27 @@ const Recognizer = (() => {
         if (isFinite(sReg) && sReg >= 0.4 && sReg <= 2.5
             && Math.abs(sReg - medScale) <= SCALE_AGREE_TOL * medScale) s = sReg;
       }
-      return { s, t: mi - s * mr };
+      /* wide: この軸に倍率を独自に決める情報があったか（広がり不足なら medScale を
+         素通ししただけ＝この軸単独では倍率を検証できていない）。mr/mi は後段の
+         「片方の軸を他方の倍率で補う」補正で、加重平均を保ったまま倍率だけ
+         差し替えるために必要。 */
+      return { s, t: mi - s * mr, wide, mr, mi };
     };
-    const X = axis(p => p.refX, p => p.inX, medScaleX);
-    const Y = axis(p => p.refY, p => p.inY, medScaleY);
+    let X = axis(p => p.refX, p => p.inX, medScaleX);
+    let Y = axis(p => p.refY, p => p.inY, medScaleY);
+    /* 片方の軸だけアンカーの広がりが足りず（MIN_SPAN_FOR_SCALE未満）、medScaleを
+       素通ししただけの倍率が残るケースを補う。紙のスキャン・撮影は通常縦横で同じ
+       倍率になるため、もう片方の軸（広がりが十分で、回帰またはscaleOverrideにより
+       確定した信頼できる倍率）と大きく食い違うなら、そちらの倍率で置き換える
+       （平行移動は各軸の加重平均位置を保ったまま倍率だけ差し替える）。
+       実機で、2点しかアンカーが無く、その2点のX座標がたまたま近い（間隔59px）
+       帳票では、Y軸は正しく100%近くに修正できたのに、X軸だけ情報不足で汚染された
+       77%のまま残るケースを確認した。 */
+    if (!X.wide && Y.wide && Math.abs(X.s - Y.s) > SCALE_AGREE_TOL * Y.s) {
+      X = { s: Y.s, t: X.mi - Y.s * X.mr };
+    } else if (!Y.wide && X.wide && Math.abs(Y.s - X.s) > SCALE_AGREE_TOL * X.s) {
+      Y = { s: X.s, t: Y.mi - X.s * Y.mr };
+    }
     return { sx: X.s, sy: Y.s, tx: X.t, ty: Y.t, n, dropped, kept: pairs };
   }
 
