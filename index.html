@@ -820,32 +820,38 @@
         <button id="btnRecDeletePreset" class="btn btn-ghost btn-sm" title="選択中のプリセットを削除"><i class="fas fa-trash-can"></i></button>
         <span class="hint-text">前回使ったキー設定は次回も自動で復元されます</span>
       </div>
-      <div class="rec-settings">
-        <div class="rec-card rec-card--key">
-          <div class="rec-card-ttl"><i class="fas fa-key"></i> 行を対応させるキー <span class="rec-badge rec-badge--req">必須</span></div>
-          <p class="rec-card-hint">両方のデータで同じ値（伝票番号など）を持つ行どうしを1件ずつ対応させます。</p>
-          <div class="rec-pair">
-            <label>OCR側 <select id="recOcrKey" class="pselect"></select></label>
-            <span class="rec-eq">=</span>
-            <label>外部側 <select id="recExtKey" class="pselect"></select></label>
-          </div>
-          <div class="rec-ocr-sample" id="recOcrKeySample"></div>
-        </div>
-        <div class="rec-card rec-card--val">
-          <div class="rec-card-ttl"><i class="fas fa-equals"></i> 値を比較する <span class="rec-badge rec-badge--opt">任意</span></div>
-          <p class="rec-card-hint">指定すると対応した行どうしの値が一致するか判定します。未指定なら「キーが見つかったか」だけを判定します。</p>
-          <div class="rec-pair">
-            <label>OCR側 <select id="recOcrVal" class="pselect"></select></label>
-            <span class="rec-eq">=</span>
-            <label>外部側 <select id="recExtVal" class="pselect"></select></label>
-          </div>
-          <div class="rec-ocr-sample" id="recOcrValSample"></div>
-          <label class="rec-check"><input type="checkbox" id="recNumeric" checked> 数値として比較（カンマ・空白・単位を無視）</label>
-        </div>
-      </div>
-      <div class="rec-run-row">
+      <!-- プリセットが前回のキー設定を自動復元するため、毎回②を開いて確認しなくても
+           すぐ実行できるよう、実行ボタンをキー/値カードより先（スクロール不要な位置）に
+           出す。カード自体は<details>で折りたたみ、必要な時だけ開いて確認・変更する。 -->
+      <div class="rec-run-row rec-run-row--top">
         <button id="recRun" class="btn btn-success"><i class="fas fa-play"></i> 照合を実行</button>
       </div>
+      <details class="diag-details rec-settings-details">
+        <summary><i class="fas fa-sliders"></i> キー・値の設定を確認・変更</summary>
+        <div class="rec-settings">
+          <div class="rec-card rec-card--key">
+            <div class="rec-card-ttl"><i class="fas fa-key"></i> 行を対応させるキー <span class="rec-badge rec-badge--req">必須</span></div>
+            <p class="rec-card-hint">両方のデータで同じ値（伝票番号など）を持つ行どうしを1件ずつ対応させます。</p>
+            <div class="rec-pair">
+              <label>OCR側 <select id="recOcrKey" class="pselect"></select></label>
+              <span class="rec-eq">=</span>
+              <label>外部側 <select id="recExtKey" class="pselect"></select></label>
+            </div>
+            <div class="rec-ocr-sample" id="recOcrKeySample"></div>
+          </div>
+          <div class="rec-card rec-card--val">
+            <div class="rec-card-ttl"><i class="fas fa-equals"></i> 値を比較する <span class="rec-badge rec-badge--opt">任意</span></div>
+            <p class="rec-card-hint">指定すると対応した行どうしの値が一致するか判定します。未指定なら「キーが見つかったか」だけを判定します。</p>
+            <div class="rec-pair">
+              <label>OCR側 <select id="recOcrVal" class="pselect"></select></label>
+              <span class="rec-eq">=</span>
+              <label>外部側 <select id="recExtVal" class="pselect"></select></label>
+            </div>
+            <div class="rec-ocr-sample" id="recOcrValSample"></div>
+            <label class="rec-check"><input type="checkbox" id="recNumeric" checked> 数値として比較（カンマ・空白・単位を無視）</label>
+          </div>
+        </div>
+      </details>
     </div>
     <div class="cr-ftr">
       <button id="recHistBtn" class="btn btn-outline"><i class="fas fa-clock-rotate-left"></i> 過去の照合結果</button>

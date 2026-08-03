@@ -160,6 +160,17 @@ const PdfImport = (() => {
     pages.sort((x, y) => x - y);
     return { pages, formFor };
   }
+  /* 範囲行の増減を伴わない変更（ページ数の反映）だけを行う軽量版。
+     pa-from/pa-toの変更時にrenderAssigns()（行DOMの全作り直し）を呼ぶと、
+     Tabキーでの次要素への移動中にブラウザがフォーカス先として狙っていた
+     要素そのものが消え、移動先を見失って先頭要素に戻ってしまう
+     （値を直してTabで次の項目へ、という一番よくある操作が壊れていた）。
+     行を増減しない限りDOM構造は変わらないため、ボタン表示の更新だけで足りる。 */
+  function updateBatchButton() {
+    const { pages } = resolveBatch();
+    $('pdfBatchBtn').innerHTML = `<i class="fas fa-layer-group"></i> 一括OCR（${pages.length}ページ）`;
+    $('pdfBatchBtn').disabled = pages.length === 0;
+  }
   function renderAssigns() {
     const show = batchAvailable();
     $('pdfBatchAssign').style.display = show ? '' : 'none';
@@ -172,15 +183,13 @@ const PdfImport = (() => {
         + ` – <input type="number" class="pdf-range-input pa-to" min="1" max="${numPages}" value="${a.to}">`
         + ` → <select class="pselect pa-form">${formOptionsHTML(a.formId)}</select>`
         + ` <button type="button" class="pa-del" title="この範囲を削除"${assigns.length <= 1 ? ' disabled' : ''}><i class="fas fa-xmark"></i></button>`;
-      row.querySelector('.pa-from').addEventListener('change', e => { a.from = parseInt(e.target.value, 10) || 1; renderAssigns(); });
-      row.querySelector('.pa-to').addEventListener('change', e => { a.to = parseInt(e.target.value, 10) || numPages; renderAssigns(); });
+      row.querySelector('.pa-from').addEventListener('change', e => { a.from = parseInt(e.target.value, 10) || 1; updateBatchButton(); });
+      row.querySelector('.pa-to').addEventListener('change', e => { a.to = parseInt(e.target.value, 10) || numPages; updateBatchButton(); });
       row.querySelector('.pa-form').addEventListener('change', e => { a.formId = e.target.value; });
       row.querySelector('.pa-del').addEventListener('click', () => { assigns.splice(i, 1); renderAssigns(); });
       wrap.appendChild(row);
     });
-    const { pages } = resolveBatch();
-    $('pdfBatchBtn').innerHTML = `<i class="fas fa-layer-group"></i> 一括OCR（${pages.length}ページ）`;
-    $('pdfBatchBtn').disabled = pages.length === 0;
+    updateBatchButton();
   }
   function addAssign() {
     const last = assigns[assigns.length - 1];

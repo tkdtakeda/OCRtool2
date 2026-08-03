@@ -627,6 +627,13 @@
 .rec-ocr-sample-img { max-width: 100%; max-height: 46px; object-fit: contain; }
 .rec-ocr-sample-empty { font-size: .7rem; color: var(--c-text-3); }
 .rec-run-row { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+/* ②の直後（プリセット行の真下）に置く実行ボタン。キー/値カードは<details>で
+   折りたたみ、プリセットで前回設定が自動復元される通常時はスクロールせずに
+   すぐ実行できるようにする。 */
+.rec-run-row--top { margin: 2px 0 12px; }
+.rec-settings-details { margin-bottom: 12px; }
+.rec-settings-details summary { display: flex; align-items: center; gap: 7px; }
+.rec-settings-details .rec-settings { padding: 10px 12px 2px; margin-bottom: 0; }
 .rec-summary { font-size: .82rem; color: var(--c-text-2); padding: 8px 11px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); margin-bottom: 10px; }
 .rec-result-tbl td:last-child { text-align: center; font-weight: 700; font-size: .9rem; }
 .rv-ok { color: var(--c-suc); } .rv-no { color: var(--c-err); } .rv-miss { color: var(--c-text-3); }
