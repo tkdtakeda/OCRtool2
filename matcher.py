@@ -34,6 +34,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+import applog
 from imaging import js_round
 
 # 並列化は下の ThreadPoolExecutor で (角度×スケール×アンカー) 単位に行う。その一方で
@@ -54,7 +55,18 @@ STD_PENALTY_FLOOR = 0.25
 MAX_WORKING_DIM = 1800
 # プールの並列度上限。各 matchTemplate を1コアに固定した上で、コア数ぶんまで
 # 同時実行する（min(cpu_count, ...) で実機のコア数に自動でクランプされる）。
+# 環境変数 OCRTOOL_MATCH_WORKERS で上書きできる。用途は実機での当たり付け:
+# スレッドを増やすほど速いとは限らず、各スレッドが確保する結果バッファ（画像サイズ×
+# テンプレサイズごとに異なる）がメモリ帯域やヒープを奪い合うと、増やすほど遅くなる。
+# 単一サイズを繰り返すベンチでは12並列が最速でも、サイズがばらつく本番では最適値が
+# 下がることがあるため、サーバー再起動だけでA/Bできるようにしてある。
 MAX_MATCH_WORKERS = 16
+try:
+    _env_workers = int(os.environ.get('OCRTOOL_MATCH_WORKERS', '') or 0)
+    if _env_workers > 0:
+        MAX_MATCH_WORKERS = _env_workers
+except ValueError:
+    pass
 
 
 # ── 校正プローブ（診断用・既定OFF） ────────────────────────
@@ -73,11 +85,10 @@ _CALIB_IMG: np.ndarray | None = None
 _CALIB_TPL: np.ndarray | None = None
 
 
-def calibration_ms() -> float | None:
+def _measure_calibration() -> float:
     """既知コストの matchTemplate を1回実行し、所要ミリ秒を返す（健全なら概ね50〜150ms）。
-    OCRTOOL_CALIBRATION が未設定なら計測せず None を返す。"""
-    if not CALIBRATION_ENABLED:
-        return None
+    OCRTOOL_CALIBRATION の設定に関わらず常に測る内部版。calibration_ms()（既存の
+    オンデマンドAPI）と health_monitor.py（バックグラウンド定点観測）の両方から使う。"""
     global _CALIB_IMG, _CALIB_TPL
     if _CALIB_IMG is None:
         rng = np.random.default_rng(12345)
@@ -87,6 +98,13 @@ def calibration_ms() -> float | None:
     res = cv2.matchTemplate(_CALIB_IMG, _CALIB_TPL, cv2.TM_CCOEFF_NORMED)
     cv2.minMaxLoc(res)
     return (time.perf_counter() - t0) * 1000
+
+
+def calibration_ms() -> float | None:
+    """既知コストの校正を1回実行し、所要ミリ秒を返す。OCRTOOL_CALIBRATION が
+    未設定なら計測せず None を返す（/api/match 等、頻繁に呼ばれる経路からの
+    オンデマンド呼び出し用。常時測りたい場合は health_monitor.py を使う）。"""
+    return _measure_calibration() if CALIBRATION_ENABLED else None
 
 
 def _clamp01(v: float) -> float:
@@ -127,19 +145,87 @@ def _std_dev_of(gray: np.ndarray) -> float:
 
 
 def _run_match(full_gray: np.ndarray, tpl_gray: np.ndarray, tpl_std: float):
-    """戻り値の3つ目は、この1回の照合に掛かった実時間(ms)。並列区間の実測時間と
-    比べて『実効の並列度（＝直列合計÷実測）』を出すための診断用。"""
+    """戻り値の3つ目は、この1回の照合の内訳時間(ms) (match, minmax, std, total)。
+    並列区間の実測と比べた『実効の並列度』に加え、1回が重いときにどのOpenCV呼び出しが
+    効いているのかを切り分けるための診断用（ベンチでは matchTemplate しか測っておらず、
+    minMaxLoc と meanStdDev は本番にしか無い処理なので、ここを分けて見る必要がある）。"""
     t0 = time.perf_counter()
     if tpl_gray.shape[0] > full_gray.shape[0] or tpl_gray.shape[1] > full_gray.shape[1]:
-        return 0.0, (0, 0), (time.perf_counter() - t0) * 1000
+        return 0.0, (0, 0), (0.0, 0.0, 0.0, (time.perf_counter() - t0) * 1000)
     res = cv2.matchTemplate(full_gray, tpl_gray, cv2.TM_CCOEFF_NORMED)
+    t1 = time.perf_counter()
     _, max_val, _, max_loc = cv2.minMaxLoc(res)
+    t2 = time.perf_counter()
     x, y = max_loc
     roi = full_gray[y:y + tpl_gray.shape[0], x:x + tpl_gray.shape[1]]
     window_std = _std_dev_of(roi)
+    t3 = time.perf_counter()
     reliability = min(_std_ramp(tpl_std), _std_ramp(window_std))
     score = float(max_val) * (STD_PENALTY_FLOOR + (1 - STD_PENALTY_FLOOR) * reliability)
-    return score, (int(x), int(y)), (time.perf_counter() - t0) * 1000
+    return score, (int(x), int(y)), (
+        (t1 - t0) * 1000,   # matchTemplate
+        (t2 - t1) * 1000,   # minMaxLoc
+        (t3 - t2) * 1000,   # meanStdDev（非連続ビューのROIに対して実行）
+        (time.perf_counter() - t0) * 1000,
+    )
+
+
+def self_uniqueness(full_rgba: np.ndarray, templates: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """各テンプレートが「自分の基準画像の中で一意か」を測る。
+
+    位置合わせ用の目印に必要なのは、他の帳票と違うことではなく、**同じページ内で
+    紛らわしい相手がいない**こと。帳票は同じ形の枠・罫線交点が並ぶため、罫線と余白
+    だけを切り取った目印は他の枠と数学的に区別が付かず、実運用で別の場所へ一致して
+    位置合わせを壊す（倍率が片方の軸だけ潰れる等）。
+
+    そこで基準画像に対してテンプレートを照合し、最良ピークと、その周辺を潰した上での
+    次点ピークを求める。目印は基準画像から切り出したものなので最良ピークは自分の登録
+    位置でほぼ満点になる。次点がそれに迫るほど「ページ内に双子がいる」＝危険。
+
+    抑制半径はテンプレートの半分。同一ピークの裾を次点と数え違えない程度に狭く、かつ
+    隣接するセル（表の隣の枠は現実によくある紛らわしい相手）は潰さない大きさにする。
+
+    戻り値: { id: {"best", "bestLoc", "second", "secondLoc", "margin"} }
+            スコアは match_all と同じ（コントラストによる信頼性減衰込み）で、実運用で
+            どちらが勝つかをそのまま反映する。
+    """
+    full_gray = _to_gray(full_rgba)
+    out: dict[str, dict[str, Any]] = {}
+    for t in templates:
+        tpl = _to_gray(t['rgba'])
+        th, tw = tpl.shape[:2]
+        if th > full_gray.shape[0] or tw > full_gray.shape[1]:
+            out[t['id']] = {'best': 0.0, 'bestLoc': {'x': 0, 'y': 0},
+                            'second': 0.0, 'secondLoc': {'x': 0, 'y': 0}, 'margin': 0.0}
+            continue
+        tpl_std = _std_dev_of(tpl)
+        res = cv2.matchTemplate(full_gray, tpl, cv2.TM_CCOEFF_NORMED)
+
+        def scored(loc: tuple[int, int], corr: float) -> float:
+            x, y = loc
+            window_std = _std_dev_of(full_gray[y:y + th, x:x + tw])
+            reliability = min(_std_ramp(tpl_std), _std_ramp(window_std))
+            return float(corr) * (STD_PENALTY_FLOOR + (1 - STD_PENALTY_FLOOR) * reliability)
+
+        _, best_corr, _, best_loc = cv2.minMaxLoc(res)
+        best = scored(best_loc, best_corr)
+
+        # 最良ピークの周辺を潰してから次点を探す（同じピークの裾を拾わないため）
+        rx, ry = max(1, tw // 2), max(1, th // 2)
+        x0, y0 = max(0, best_loc[0] - rx), max(0, best_loc[1] - ry)
+        x1, y1 = min(res.shape[1], best_loc[0] + rx + 1), min(res.shape[0], best_loc[1] + ry + 1)
+        res[y0:y1, x0:x1] = -1.0
+        _, second_corr, _, second_loc = cv2.minMaxLoc(res)
+        second = scored(second_loc, second_corr)
+
+        out[t['id']] = {
+            'best': best,
+            'bestLoc': {'x': int(best_loc[0]), 'y': int(best_loc[1])},
+            'second': second,
+            'secondLoc': {'x': int(second_loc[0]), 'y': int(second_loc[1])},
+            'margin': best - second,
+        }
+    return out
 
 
 def _build_angles(angle_range: float, angle_step: float) -> list[float]:
@@ -199,6 +285,7 @@ def match_all(
     n_workers = max(1, min(MAX_MATCH_WORKERS, len(prepared) * len(tpl_mats), os.cpu_count() or 4))
     par_t0 = time.perf_counter()
     serial_ms = 0.0
+    sum_match = sum_minmax = sum_std = 0.0
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         jobs = [
             (tm, angle, f, pool.submit(_run_match, scaled, tm['mat'], tm['std']))
@@ -206,8 +293,11 @@ def match_all(
             for tm in tpl_mats
         ]
         for tm, angle, f, fut in jobs:
-            score, (lx, ly), call_ms = fut.result()
+            score, (lx, ly), (ms_match, ms_minmax, ms_std, call_ms) = fut.result()
             serial_ms += call_ms
+            sum_match += ms_match
+            sum_minmax += ms_minmax
+            sum_std += ms_std
             cur = results[tm['id']]
             if score > cur['score']:
                 results[tm['id']] = {
@@ -223,9 +313,12 @@ def match_all(
     # ≈workers なら並列が効いている（1回が重いだけ→テンプレ/画像を小さくする方針）。
     # ≈1 なら並列が効いていない（GIL等で直列化→プロセス並列やcvThreads見直しが必要）。
     par_wall = (time.perf_counter() - par_t0) * 1000
-    print(f'[perf]   match_all parallel: wall={par_wall:.0f}ms serialSum={serial_ms:.0f}ms '
+    n_calls = max(1, len(prepared) * len(tpl_mats))
+    applog.log(f'[perf]   match_all parallel: wall={par_wall:.0f}ms serialSum={serial_ms:.0f}ms '
           f'speedup={serial_ms / par_wall:.1f}x workers={n_workers} calls={len(prepared) * len(tpl_mats)} '
-          f'avgCall={serial_ms / max(1, len(prepared) * len(tpl_mats)):.0f}ms')
+          f'avgCall={serial_ms / n_calls:.0f}ms '
+          f'[match={sum_match / n_calls:.0f}ms minMaxLoc={sum_minmax / n_calls:.0f}ms '
+          f'meanStdDev={sum_std / n_calls:.0f}ms]')
 
     # -inf は「テンプレートが1件も無い」場合以外は起きないが、念のため 0 に丸める
     for r in results.values():

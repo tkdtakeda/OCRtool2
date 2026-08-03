@@ -51,6 +51,12 @@ def main() -> int:
     print(f'検出したCPUコア数: {os.cpu_count()}（マッチング処理の並列度の上限。'
           f'少ない場合は並列化の効果が限定的です）')
 
+    # 長時間の一括OCR中に機械の状態が変化していないか、後から追えるようにする
+    # （詳細は health_monitor.py 冒頭コメント参照）。15秒間隔で診断ログへ記録され、
+    # 「診断情報をコピー」ボタンからそのまま取得できる。
+    import health_monitor
+    health_monitor.start()
+
     app = create_app()
     url = f'http://127.0.0.1:{args.port}/'
     print(f'サーバーを起動しました: {url}')

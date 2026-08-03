@@ -40,10 +40,17 @@ const CharConstraint = (() => {
 
   /* ── よくあるOCR誤認の候補（補正用） ────────────────────
      キー=認識された文字 / 値=本来あり得る候補（優先順）。
-     形が似た取り違え＋日本語OCRで数字が漢字/記号になる例を含む。 */
-  const CONFUSE = {
+     形が似た取り違え＋日本語OCRで数字が漢字/記号になる例を含む。
+     これは「組み込みの既定値」であり、実際に参照される表は下の activeConfuse
+     （ユーザーがツール画面から編集・保存できる）。今は特定の帳票・書体向けの
+     組み合わせで運用しているが、将来別の帳票・書体を扱うようになると、ここに
+     無い取り違え（あるいはここにあるが実際には起きない誤対応）が出てくる
+     ため、コードを直さずユーザー自身が調整できるようにしてある。 */
+  const DEFAULT_CONFUSE = {
     '0': ['O', 'D', 'Q', 'o'], 'O': ['0'], 'o': ['0'], 'Q': ['0'], 'D': ['0'],
-    '1': ['I', 'l', '|'], 'I': ['1'], 'l': ['1'], '|': ['1'], 'i': ['1'], '!': ['1'],
+    /* 「1」は書体によって下部に横棒（セリフ）が付き、大文字Lとよく取り違えられる。
+       実機で "AA1227" の1がLと読まれた例があるため 'L' も候補に含める。 */
+    '1': ['I', 'l', '|', 'L'], 'I': ['1'], 'l': ['1'], '|': ['1'], 'i': ['1'], '!': ['1'], 'L': ['1'],
     '2': ['Z'], 'Z': ['2'],
     '3': ['8'],
     '4': ['A'], 'A': ['4'],
@@ -56,6 +63,31 @@ const CharConstraint = (() => {
     /* 日本語OCRの数字誤認（漢数字・記号） */
     '一': ['1'], '〇': ['0'], '○': ['0'], '◯': ['0'], '２': ['2'],
   };
+
+  /* 実際にcorrectCharが参照する表。既定では組み込み値のコピーだが、
+     setConfuseTable() で丸ごと差し替えられる（呼び出し元＝studio_app.jsが
+     起動時にlocalStorageの保存内容を読んで反映する）。「マージ」ではなく
+     「丸ごと差し替え」にしているのは、ユーザーが特定の組み込みペアを
+     「これは自分の帳票では誤爆する」と判断して削除したい場合に、削除が
+     常に効くようにするため（マージ方式だと削除した既定値が復活してしまう）。 */
+  let activeConfuse = { ...DEFAULT_CONFUSE };
+
+  /** 現在参照している取り違え表のコピーを返す（編集UI表示用）。 */
+  function getConfuseTable() { return JSON.parse(JSON.stringify(activeConfuse)); }
+  /** 取り違え表を丸ごと差し替える。null/undefined/空は既定表へフォールバックする
+      （「既定に戻す」はsetConfuseTable(null)を呼ぶだけでよい）。
+      形式が壊れている要素（キーが1文字でない・値が配列でない等）は個別に無視し、
+      壊れた保存データ1件でOCR結果の補正全体が止まらないようにする。 */
+  function setConfuseTable(table) {
+    if (!table || typeof table !== 'object') { activeConfuse = { ...DEFAULT_CONFUSE }; return; }
+    const out = {};
+    for (const [k, v] of Object.entries(table)) {
+      if (typeof k !== 'string' || [...k].length !== 1 || !Array.isArray(v)) continue;
+      const cands = v.filter(c => typeof c === 'string' && [...c].length === 1 && c !== k);
+      if (cands.length) out[k] = cands;
+    }
+    activeConfuse = out;
+  }
 
   /* ── 集合ユーティリティ ─────────────────────────────── */
   function orderSet(chars) {
@@ -187,7 +219,7 @@ const CharConstraint = (() => {
     }
     if (c >= 'a' && c <= 'z' && allow.has(c.toUpperCase())) return c.toUpperCase();
     if (c >= 'A' && c <= 'Z' && allow.has(c.toLowerCase())) return c.toLowerCase();
-    for (const cand of (CONFUSE[c] || [])) {
+    for (const cand of (activeConfuse[c] || [])) {
       if (allow.has(cand)) return cand;
       if (cand >= 'a' && cand <= 'z' && allow.has(cand.toUpperCase())) return cand.toUpperCase();
       if (cand >= 'A' && cand <= 'Z' && allow.has(cand.toLowerCase())) return cand.toLowerCase();
@@ -211,44 +243,105 @@ const CharConstraint = (() => {
     return [...out].join('');
   }
 
-  /* 値の前後にある余分な文字を自動除去（抽出） */
+  /* 値の前後にある余分な文字を自動除去（抽出）。
+     @returns {{ text:string, ambiguous:boolean }}
+     ambiguous: 最高得点の候補が複数あり、しかもそれぞれが補正後に異なる
+     文字列になる（＝どちらが正しいか文字種だけでは決められない）場合に
+     true。呼び出し側（apply）はこれを「信頼できない抽出」として上位へ
+     伝え、桁数超過時の読み直し判定と同様に扱えるようにする。 */
   function extractStr(text, r) {
     const arr = [...String(text == null ? '' : text)];
     if (r.variable) {
       /* 使える文字（補正で寄せられる文字）だけ残し、区切り・空白などは捨てる */
       const setS = new Set(r.set);
-      return arr.filter(c => correctChar(c, setS, r.sub) != null).join('');
+      return { text: arr.filter(c => correctChar(c, setS, r.sub) != null).join(''), ambiguous: false };
     }
-    /* 固定長: 制約に最も合う len 文字の窓を探す */
+    /* 固定長: 制約に最も合う len 文字の候補を探す。
+       候補は「連続する窓」（値の前後にある余分な文字を想定）に加え、
+       過剰1文字（例: "AB0T746"→正しくは"AB0746"）のときだけ「途中の
+       どこか1文字を削除」も候補に加える（窓＝連続範囲の切り出ししか
+       できないため、値の途中に紛れ込んだ1文字は本来どの窓を選んでも
+       除去できず、代わりに前後どちらかの本物の桁を切り捨ててしまって
+       いた）。
+       評価は「桁ごとの許可集合にそのまま入っている（補正不要）」個数を
+       最優先し、CONFUSE表による1文字補正（0↔O・7↔T等）で辻褄が合った
+       個数は同点時のタイブレークにのみ使う。補正一致は「たまたま辻褄が
+       合っただけ」の可能性があり、これを窓の完全一致と同列に扱うと、
+       本来削除すべき紛れ込み文字を残したまま真の桁を捨てる窓と、
+       正しく紛れ込み文字だけを削除した候補とが同点になり、常に先に
+       見つかる（＝連続窓が先に走査される）誤った側が選ばれてしまう
+       ため。
+       それでも、紛れ込み文字（例: T・Q）に加えて別の桁でも0↔O等の
+       字種またぎの誤認（本来は数字の桁なのに大文字として直接一致して
+       しまう等）が重なると、削除する文字の選び方によって複数の異なる
+       結果が同点になり得る（実例: "ABOQ750"で"Q"を消せば正しく"AB0750"
+       になるが、"B"を消しても同点で"AO0750"になってしまう）。この場合は
+       文字種の情報だけではどちらが正しいか決められないため、無理に
+       1つを選ばず ambiguous=true として呼び出し側（読み直し判定）へ
+       委ねる。 */
     const L = r.len;
-    if (arr.length <= L) return arr.join('');
-    let best = 0, bestScore = -1;
-    for (let i = 0; i + L <= arr.length; i++) {
-      let sc = 0;
+    if (arr.length <= L) return { text: arr.join(''), ambiguous: false };
+
+    const evalIdxs = idxs => {
+      let direct = 0, resolved = 0;
+      const out = [];
       for (let k = 0; k < L; k++) {
         const s = r.pos[k];
-        if (!s || correctChar(arr[i + k], new Set(s), r.subs[k]) != null) sc++;
+        const c = arr[idxs[k]];
+        if (!s) { direct++; resolved++; out.push(c); continue; }
+        const set = new Set(s);
+        if (set.has(c)) { direct++; resolved++; out.push(c); continue; }
+        const fixed = correctChar(c, set, r.subs[k]);
+        if (fixed != null) { resolved++; out.push(fixed); } else { out.push(c); }
       }
-      if (sc > bestScore) { bestScore = sc; best = i; }
+      return { direct, resolved, text: out.join('') };
+    };
+    const better = (a, b) => (a.direct !== b.direct ? a.direct > b.direct : a.resolved > b.resolved);
+    const sameScore = (a, b) => a.direct === b.direct && a.resolved === b.resolved;
+
+    const candidates = [];
+    for (let i = 0; i + L <= arr.length; i++) {
+      candidates.push(evalIdxs(Array.from({ length: L }, (_, k) => i + k)));
     }
-    return arr.slice(best, best + L).join('');
+    if (arr.length === L + 1) {
+      for (let drop = 0; drop < arr.length; drop++) {
+        const idxs = [];
+        for (let k = 0; k < arr.length; k++) if (k !== drop) idxs.push(k);
+        candidates.push(evalIdxs(idxs));
+      }
+    }
+    let best = candidates[0];
+    for (const c of candidates) if (better(c, best)) best = c;
+    const topTexts = new Set(candidates.filter(c => sameScore(c, best)).map(c => c.text));
+    return { text: best.text, ambiguous: topTexts.size > 1 };
   }
 
   /**
    * OCR結果へ制約を適用（抽出 → 桁別チェック＋誤認補正）。
-   * @returns {{ text:string, valid:boolean, applied:boolean }}
+   * @returns {{ text:string, valid:boolean, applied:boolean, ambiguous:boolean }}
    */
   function apply(text, rule) {
     const r = normalize(rule);
-    if (!r) return { text, valid: true, applied: false };
+    if (!r) return { text, valid: true, applied: false, ambiguous: false };
     let chars = [...String(text == null ? '' : text)];
-    if (r.extract) chars = [...extractStr(chars.join(''), r)];
+    let ambiguous = false;
+    if (r.extract) {
+      const ex = extractStr(chars.join(''), r);
+      chars = [...ex.text];
+      ambiguous = ex.ambiguous;
+    }
 
     if (r.variable) {
       const setS = new Set(r.set);
-      /* 数字のみの欄では、桁区切り(,)・空白・通貨記号は常にノイズとして除去
-         （「201,300」→「201300」。元の値に含めたい場合は記号を許可文字に追加） */
-      const numeric = r.set.length > 0 && [...r.set].every(c => c >= '0' && c <= '9');
+      /* 数字（小数点を含めてもよい）のみの欄では、桁区切り(,)・空白・通貨記号は
+         常にノイズとして除去する（「201,300」→「201300」）。
+         小数点「.」を許可文字に追加した欄（例: 1,234.56）もこの数字系の除去対象に
+         含める。以前は「全桁が数字」だけを見ていたため、小数点を1文字加えただけで
+         この判定がfalseになり、桁区切りカンマの自動除去が丸ごと働かなくなって
+         いた（"1,234.56"→"1?234,56"のように壊れる）。小数点はNUM_NOISEに含めて
+         いない＝許可集合(setS)にあればそのまま通るため、除去対象に含めても
+         小数点自体が消えることはない。 */
+      const numeric = r.set.length > 0 && [...r.set].every(c => (c >= '0' && c <= '9') || c === '.');
       let valid = true;
       const out = [];
       for (const c of chars) {
@@ -257,7 +350,7 @@ const CharConstraint = (() => {
         if (f != null) out.push(f); else { out.push(r.strict ? UNRESOLVED : c); valid = false; }
       }
       if (!out.length) valid = false;
-      return { text: out.join(''), valid, applied: true };
+      return { text: out.join(''), valid, applied: true, ambiguous };
     }
 
     let valid = true;
@@ -271,7 +364,7 @@ const CharConstraint = (() => {
       else { out.push(r.strict[i] ? UNRESOLVED : chars[i]); valid = false; }
     }
     if (chars.length < r.len) valid = false;
-    return { text: out.join(''), valid, applied: true };
+    return { text: out.join(''), valid, applied: true, ambiguous };
   }
 
   /* ── 表示用の要約 ───────────────────────────────────── */
@@ -326,6 +419,7 @@ const CharConstraint = (() => {
     presetSet, orderSet, sameSet,
     normalize, isActive, isLatinOnly, derivedWhitelist, apply, correctChar, extractStr,
     summarizePos, lengthLabel, describe, fromMask,
+    getConfuseTable, setConfuseTable,
   };
 
 })();

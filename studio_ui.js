@@ -28,6 +28,79 @@ const StudioUI = (() => {
     setTimeout(() => { t.classList.remove('is-visible'); setTimeout(() => { try { c.removeChild(t); } catch (_) {} }, 280); }, duration);
   }
 
+  /* ── バージョンバッジ・変更履歴 ─────────────────────────
+     「今動いているコードは最新の修正を含んでいるか」を確認できるようにする。
+     version_history.json（gitではなくファイルで管理。配布形態によらず読める）の
+     先頭エントリ＝現在のバージョンをバッジに、全件を変更履歴として見せる。 */
+  function renderVersionBadge(info) {
+    const badge = $('btnVersion'); const text = $('verBadgeText');
+    if (!badge || !text) return;
+    if (!info || !info.available) {
+      text.textContent = 'v.不明';
+      badge.classList.add('is-unknown');
+      badge.title = 'バージョン情報を取得できませんでした（version_history.jsonが見つからないか壊れています）';
+      return;
+    }
+    text.textContent = `v.${info.version}`;
+    badge.title = `最新: ${info.summary || ''}（${info.date || ''}）。クリックで変更履歴を表示`;
+  }
+
+  function renderVersionModal(data) {
+    const cur = data && data.current;
+    const curBox = $('verCurrentBox');
+    if (curBox) {
+      if (!cur || !cur.available) {
+        curBox.innerHTML = 'バージョン情報を取得できませんでした（version_history.jsonが見つからないか壊れています）。';
+      } else {
+        curBox.innerHTML = `現在のバージョン: <b>${esc(cur.version || '?')}</b>（${esc(cur.date || '')}）<br>${esc(cur.summary || '')}`;
+      }
+    }
+    const list = $('verHistoryList'); if (!list) return;
+    const history = (data && data.history) || [];
+    if (!history.length) { list.innerHTML = '<div class="mini-empty">変更履歴を取得できませんでした</div>'; return; }
+    list.innerHTML = '';
+    history.forEach(h => {
+      const item = document.createElement('div'); item.className = 'ver-hist-item';
+      item.innerHTML = `
+        <div class="ver-hist-head">
+          <span class="ver-hist-hash">${esc(h.version)}</span>
+          <span class="ver-hist-date">${esc(h.date)}</span>
+          <span class="ver-hist-subject">${esc(h.summary)}</span>
+          <i class="fas fa-chevron-right ver-hist-chevron"></i>
+        </div>
+        <div class="ver-hist-body">${esc(h.detail || '（詳細説明なし）')}</div>`;
+      item.querySelector('.ver-hist-head').addEventListener('click', () => item.classList.toggle('is-open'));
+      list.appendChild(item);
+    });
+  }
+
+  /* ── 文字の取り違え表（全帳票共通の補正候補、ユーザー編集可） ───
+     行＝「認識された文字」1つに対して「本来あり得る候補」の一覧をチップで表示。
+     新規追加は専用フォーム（confuseNewChar/confuseNewCand）側で行うため、
+     ここでは既存エントリの一覧描画（候補の削除・行削除）だけを担当する。 */
+  function renderConfuseTable(table, onRemoveCandidate, onRemoveChar) {
+    const list = $('confuseList');
+    if (!list) return;
+    const chars = Object.keys(table).sort((a, b) => a.localeCompare(b, 'ja'));
+    if (!chars.length) { list.innerHTML = '<div class="mini-empty">登録された取り違えペアがありません</div>'; return; }
+    list.innerHTML = '';
+    chars.forEach(ch => {
+      const row = document.createElement('div'); row.className = 'confuse-row';
+      const chips = table[ch].map(cand => `
+        <span class="confuse-chip">${esc(cand)}<button type="button" class="confuse-chip-del" data-cand="${esc(cand)}" title="この候補を削除"><i class="fas fa-xmark"></i></button></span>`).join('');
+      row.innerHTML = `
+        <span class="confuse-char" title="認識された文字">${esc(ch)}</span>
+        <span class="confuse-arrow"><i class="fas fa-arrow-right"></i></span>
+        <div class="confuse-chips">${chips}</div>
+        <button type="button" class="btn-icon-sm confuse-row-del" title="この文字の行を削除"><i class="fas fa-trash"></i></button>`;
+      row.querySelectorAll('.confuse-chip-del').forEach(btn => {
+        btn.addEventListener('click', () => onRemoveCandidate(ch, btn.dataset.cand));
+      });
+      row.querySelector('.confuse-row-del').addEventListener('click', () => onRemoveChar(ch));
+      list.appendChild(row);
+    });
+  }
+
   /* ── 登録ステップのチェックリスト ───────────────────── */
   function refreshRegSteps(flags) {
     document.querySelectorAll('#regSteps .reg-step').forEach(el => {
@@ -63,21 +136,40 @@ const StudioUI = (() => {
   /* ── 識別アンカー / OCR領域 ミニリスト ──────────────── */
   /* onRename: 名前をその場で書き換え。空欄への変更は元の名前に戻す（拒否）。
      onReposition: 「範囲を描き直す」ボタン。押すとキャンバス側が再ドラッグ待ちになる。 */
-  function renderAnchorList(anchors, onRemove, onRename, onReposition, onToggleAlign) {
-    const c = $('anchorList'); $('anchorCount').textContent = anchors.length;
+  /* 帳票判定に参加する本数を併記する。ここが1ページあたりの照合回数（＝処理時間）に
+     直結する一方、判定の主証拠は最良1本のスコア(peak)で裏付けは小さな加点に留まる
+     ため、「判定は少数の識別的な目印だけ・残りは位置合わせ専用」が速度と精度の
+     両立になる。作業中にその配分が見えるようにしておく。 */
+  function updateAnchorCount() {
+    const items = [...$('anchorList').querySelectorAll('.mini-item')];
+    if (!items.length) { $('anchorCount').textContent = '0'; return; }
+    const roleOf = el => el.dataset.role || AnchorRoles.BOTH;
+    const nCls = items.filter(el => roleOf(el) !== AnchorRoles.ALIGN).length;
+    const nAln = items.filter(el => roleOf(el) !== AnchorRoles.CLASSIFY).length;
+    /* 判定と位置合わせは別工程で、それぞれ何本使われるかが精度と速度を決める
+       （判定の照合回数は本数に正比例、位置合わせは対応点の質と数で決まる）。 */
+    $('anchorCount').textContent = (nCls === items.length && nAln === items.length)
+      ? String(items.length)
+      : `${items.length}（判定${nCls} / 位置合わせ${nAln}）`;
+  }
+
+  function renderAnchorList(anchors, onRemove, onRename, onReposition, onSetRole) {
+    const c = $('anchorList');
+    $('anchorCount').textContent = anchors.length;
     if (!anchors.length) { c.innerHTML = '<div class="mini-empty">未登録（左の画像上にドラッグ）</div>'; return; }
     c.innerHTML = '';
     anchors.forEach((a, i) => {
+      const role = AnchorRoles.roleOf(a);
       const item = document.createElement('div'); item.className = 'mini-item'; item.dataset.anchorId = a.id;
-      if (a.alignOnly) item.classList.add('is-alignonly');
+      item.dataset.role = role;
+      const opts = [AnchorRoles.BOTH, AnchorRoles.CLASSIFY, AnchorRoles.ALIGN].map(v =>
+        `<option value="${v}"${v === role ? ' selected' : ''}>${esc(AnchorRoles.LABEL[v])}</option>`).join('');
       item.innerHTML = `
         <span class="midx" style="background:${ANCHOR_COLOR}">${i + 1}</span>
         <img class="mthumb" src="${a.dataURL}" alt="">
         <input class="mname-edit" value="${esc(a.name)}" title="名前を変更" spellcheck="false">
         <span class="mpos">${a.refX},${a.refY}</span>
-        <label class="malign" title="ONにすると、この目印は帳票の自動判定には使わず、位置合わせ（傾き・拡大率の補正）専用になります。狭い精密アンカーが他の帳票へ誤って一致して判定を狂わせるのを防ぎ、判定処理も少し速くなります。">
-          <input type="checkbox" ${a.alignOnly ? 'checked' : ''}><span>位置合わせ専用</span>
-        </label>
+        <select class="mrole" title="${esc(AnchorRoles.HINT[role])}">${opts}</select>
         <button class="btn-icon-sm mini-reposition" title="範囲を描き直す"><i class="fas fa-vector-square"></i></button>
         <button class="btn-icon-sm mini-del" title="削除"><i class="fas fa-xmark"></i></button>`;
       const nameInp = item.querySelector('.mname-edit');
@@ -86,15 +178,18 @@ const StudioUI = (() => {
         if (!v) { nameInp.value = a.name; return; }   // 空欄は許可しない
         onRename && onRename(a.id, v);
       });
-      const alignChk = item.querySelector('.malign input');
-      alignChk.addEventListener('change', () => {
-        item.classList.toggle('is-alignonly', alignChk.checked);
-        onToggleAlign && onToggleAlign(a.id, alignChk.checked);
+      const roleSel = item.querySelector('.mrole');
+      roleSel.addEventListener('change', () => {
+        item.dataset.role = roleSel.value;
+        roleSel.title = AnchorRoles.HINT[roleSel.value] || '';
+        updateAnchorCount();
+        onSetRole && onSetRole(a.id, roleSel.value);
       });
       item.querySelector('.mini-reposition').addEventListener('click', () => onReposition && onReposition(a.id));
       item.querySelector('.mini-del').addEventListener('click', () => onRemove(a.id));
       c.appendChild(item);
     });
+    updateAnchorCount();   // 行を並べ終えてから（DOMから判定/位置合わせ専用の内訳を数える）
   }
   /* 目印の識別性チェック結果（他の帳票との高い類似度）を、既存のアンカー一覧の各行に
      警告バッジとして重ねる。renderAnchorListは呼び直さない（チェック結果が消えるため）。
@@ -110,6 +205,28 @@ const StudioUI = (() => {
       const top = hits[0];
       badge.title = `一致した帳票: ${hits.map(h => `${h.formName} ${Math.round(h.score * 100)}%`).join(' / ')}`;
       badge.innerHTML = `<i class="fas fa-triangle-exclamation"></i> ${esc(top.formName)} ${Math.round(top.score * 100)}%`;
+      item.appendChild(badge);
+    });
+  }
+
+  /* 目印のページ内一意性チェック結果を各行にバッジ表示する。位置合わせは「同じページ内に
+     紛らわしい相手がいないこと」が要件なので、次点ピークとの差(margin)が小さい目印を
+     危険として示す。renderAnchorListは呼び直さない（結果が消えるため）。
+     @param {Map<string, {best,second,margin,bestLoc,secondLoc}>} results
+     @param {(r:object)=>{level:'danger'|'warn'|null, text:string}} classify  判定は呼び出し側 */
+  function renderAnchorUniqueness(results, classify) {
+    const list = $('anchorList');
+    list.querySelectorAll('.mini-item').forEach(item => {
+      const old = item.querySelector('.anchor-unique-warn'); if (old) old.remove();
+      const r = results.get(item.dataset.anchorId);
+      if (!r) return;
+      const verdict = classify(r);
+      if (!verdict.level) return;
+      const badge = document.createElement('span');
+      badge.className = `anchor-unique-warn is-${verdict.level}`;
+      badge.title = `最良 ${Math.round(r.best * 100)}% / 次点 ${Math.round(r.second * 100)}%`
+        + `（次点の位置 ${r.secondLoc.x},${r.secondLoc.y}）`;
+      badge.innerHTML = `<i class="fas fa-clone"></i> ${esc(verdict.text)}`;
       item.appendChild(badge);
     });
   }
@@ -286,9 +403,12 @@ const StudioUI = (() => {
   /** OCR入力に使ったパラメータの一行表示（前処理が効いたか等を確認できる診断） */
   function ocrInfoHTML(info) {
     if (!info) return '';
-    const pre = info.preprocessed ? '行トリム+拡大(グレー)' : 'なし';
+    const pre = info.preprocessed ? '行トリム→拡大→二値化+角戻し' : 'なし';
     const wl  = info.whitelist ? ` ・ 許可「${esc(info.whitelist)}」` : '';
-    return `<span class="field-detail-meta" style="font-size:11px;color:#64748b;line-height:1.4;">前処理: ${pre} ・ PSM ${esc(String(info.psm))} ・ ${esc(info.lang || '')}${wl}</span>`;
+    /* 文字制約に不合格で別PSMへ切り替えた欄はその旨を出す（なぜPSMが既定値と違うのかが
+       分かるようにするため）。 */
+    const psm = `PSM ${esc(String(info.psm))}${info.retried ? '（制約不合格のため読み直し）' : ''}`;
+    return `<span class="field-detail-meta" style="font-size:11px;color:#64748b;line-height:1.4;">前処理: ${pre} ・ ${psm} ・ ${esc(info.lang || '')}${wl}</span>`;
   }
   function renderFieldResults(fields) {
     const c = $('fieldResults'); c.innerHTML = '';
@@ -405,6 +525,14 @@ const StudioUI = (() => {
     $('batchProgressFill').style.width = `${Math.round((pct || 0) * 100)}%`;
     $('batchProgressMsg').textContent = msg || '処理中…';
   }
+  /* 一括OCR中、タブが非表示（バックグラウンド）の間だけ出す注意書き。実測で、
+     hidden中はPDFのラスタライズ(canvas描画)だけがブラウザの省電力機能により大幅に
+     遅延することを確認済み（サーバー側のOCR/判定は影響を受けない）。review=trueなら
+     レビュー用カルーセル側、falseなら一括結果モーダル側のバナーを切り替える。 */
+  function setBatchBgWarn(review, visible) {
+    const el = $(review ? 'reviewBgWarn' : 'batchBgWarn');
+    if (el) el.classList.toggle('hidden', !visible);
+  }
   const BATCH_RENDER_CAP = 200;   // 大量ページでもDOMが重くならないよう表示は上限まで
   function renderBatchResults(results, opts) {
     $('batchProgress').classList.add('hidden');
@@ -453,11 +581,12 @@ const StudioUI = (() => {
 
   return {
     $, esc, toast, REGION_COLORS, ANCHOR_COLOR, OCR_COLOR,
-    refreshRegSteps, renderFormLibrary, renderAnchorList, renderAnchorCollisions, renderRegionList,
+    renderVersionBadge, renderVersionModal, renderConfuseTable,
+    refreshRegSteps, renderFormLibrary, renderAnchorList, renderAnchorCollisions, renderAnchorUniqueness, renderRegionList,
     setPipeline, resetPipeline,
     renderDecision, renderRecogPreview, renderFieldResults, symbolChipsHTML, confClass,
     showRecogProgress, updateRecogProgress, renderHistory,
-    openBatchModal, closeBatchModal, updateBatchProgress, renderBatchResults,
+    openBatchModal, closeBatchModal, updateBatchProgress, setBatchBgWarn, renderBatchResults,
   };
 
 })();

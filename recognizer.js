@@ -23,12 +23,11 @@ const Recognizer = (() => {
   }
 
   /** 帳票配列から「帳票判定に使うアンカー」を matcher 用テンプレート配列へ展開（並列読み込み）。
-     alignOnly（位置合わせ専用）フラグの付いたアンカーは、他帳票への誤マッチで判定を
-     狂わせる／狭いアンカーが判定に混じるのを避けるため、ここ（=classify）では除外する。
-     除外したぶん照合するテンプレート数が減るので、一番重い classify の速度にもプラス。
-     位置合わせ（prepare の再ローカライズ）は精度のため引き続き全アンカーを使う。 */
+     「位置合わせのみ」の役割のアンカーは、他帳票への誤マッチで判定を狂わせるのを避ける
+     ため除外する。除外したぶん照合するテンプレート数が減るので、一番重い classify の
+     速度にもプラス（照合回数はテンプレート数に正比例する）。 */
   async function buildAnchorTemplates(forms) {
-    const anchors = forms.flatMap(form => (form.anchors || []).filter(a => !a.alignOnly));
+    const anchors = forms.flatMap(form => (form.anchors || []).filter(AnchorRoles.usedForClassify));
     return Promise.all(anchors.map(async a => ({ id: a.id, imageElement: await dataURLtoImg(a.dataURL) })));
   }
 
@@ -46,6 +45,74 @@ const Recognizer = (() => {
      しただけ」の帳票が追随しない主因がこれ。広がりが足りない軸では位置回帰の倍率を
      使わず、各アンカーの照合倍率の中央値を採用し、平行移動だけを頑健に推定する。 */
   const MIN_SPAN_FOR_SCALE = 200;
+
+  /* 位置回帰で得た倍率を採用するために、各アンカーが自力で検出した倍率の中央値と
+     どこまで一致していればよいか（相対値）。
+     位置回帰はアンカー間の「位置の差」から倍率を出すため、1点でも別の場所（帳票は
+     似た四角が多く、罫線の交点や枠は互いに見分けが付きにくい）へ誤マッチすると倍率が
+     大きく振れる。実測で 54%×96% という、紙では起こり得ない異方性が出た。
+     一方、各アンカーはテンプレート探索で自分の倍率を独立に検出しており、その中央値は
+     3点中1点の誤りには汚染されない。両者が食い違うときは回帰ではなく中央値を採る。
+     許容を15%と広めに取っているのは、探索格子（細探索で±9%を3%刻み）より細かく倍率を
+     詰めるという回帰本来の役割を残すため。真に縦横比が違う入力では回帰が棄却されて
+     等方の倍率に落ちるが、テンプレート照合自体が等方の倍率でしか探索していない以上、
+     そこまで歪んだ入力は元々一致しないため、誤った異方性を通すより安全側に倒す。 */
+  const SCALE_AGREE_TOL = 0.15;
+
+  /* 誤マッチと判定する残差の許容(px)。正しく一致した点は候補変換にほぼ乗り、
+     誤マッチ点だけが大きく外れる。実測（下記の実データ検証）で、正しい点同士の
+     残差は最大でも数十px程度だったため、印刷ズレ等の正常なばらつきは飲み込みつつ
+     誤マッチ（実測で数百px級）とは明確に切り分けられる値として40pxとした。 */
+  const OUTLIER_TOL_PX = 40;
+
+  /* 2点(ref→in)から軸独立の相似変換を決める。
+     基準座標の差(dxr/dyr)がMIN_SPAN_FOR_SCALE未満の軸は、2点だけからの倍率計算が
+     数pxの誤差で暴れる（estimateTransform本体のaxis関数と同じ理由）ため、その軸は
+     実測せず medScale（各アンカーが独立に検出した倍率の中央値）をそのまま使う。
+     これが無いと、たとえば基準座標でX方向に41pxしか離れていない2点の正しい組が、
+     わずかな検出誤差だけでsxが0.66等に暴れて候補から弾かれ、有効なペアが1つも
+     残らずに外れ値除去そのものが機能しなくなる（実データで発生を確認済み）。 */
+  function pairTransform(a, b, medScale) {
+    const dxr = b.refX - a.refX, dyr = b.refY - a.refY;
+    const sx = Math.abs(dxr) >= MIN_SPAN_FOR_SCALE ? (b.inX - a.inX) / dxr : medScale;
+    const sy = Math.abs(dyr) >= MIN_SPAN_FOR_SCALE ? (b.inY - a.inY) / dyr : medScale;
+    if (!isFinite(sx) || !isFinite(sy)) return null;
+    return { sx, sy, tx: a.inX - sx * a.refX, ty: a.inY - sy * a.refY };
+  }
+  function residual(p, tf) {
+    return Math.max(Math.abs(p.inX - (tf.sx * p.refX + tf.tx)), Math.abs(p.inY - (tf.sy * p.refY + tf.ty)));
+  }
+
+  /* ── 誤マッチした対応点を捨てる（ペア総当たりによる多数決＝RANSACの簡易版）───
+     以前は「倍率の中央値を仮定し、そこから外れた点を捨てる」中央値ベースの1回判定
+     だったが、これは誤マッチが半数近く（実測: 4点中2点）になると中央値自体が両陣営の
+     間に落ちてしまい、1件も検出できない実例が出た。
+     代わりに、2点の組み合わせを総当たりして各ペアが示す変換を求め、他の点が何個その
+     変換に乗るか（＝支持するか）を数える。最も支持を集めたペアの変換を「多数派」として
+     採用する。誤マッチ同士がたまたま似た変換を示す確率は低いため、正しい点が過半数を
+     割っていても多数派を正しく見つけられる（実際、上の実例では2/4が誤マッチという
+     多数決が効かないはずのケースで正しく2点を除外できることを確認済み）。
+     支持点を数える際、各アンカーがテンプレート探索で独立に検出した倍率の中央値
+     （medScale）と大きく食い違うペアの変換は候補から外す。これが無いと、絶対値としては
+     一致点を稼げても sx が0.3倍等の非現実的な変換が「たまたま」複数点を説明してしまい、
+     誤って多数派に選ばれることがあった（実データで実際に発生を確認）。 */
+  function ransacInliers(pairs, medScale) {
+    let best = null, bestSupport = -1;
+    for (let i = 0; i < pairs.length; i++) {
+      for (let j = i + 1; j < pairs.length; j++) {
+        const tf = pairTransform(pairs[i], pairs[j], medScale);
+        if (!tf || tf.sx < 0.4 || tf.sx > 2.5 || tf.sy < 0.4 || tf.sy > 2.5) continue;
+        if (Math.abs(tf.sx - medScale) > SCALE_AGREE_TOL * medScale) continue;
+        if (Math.abs(tf.sy - medScale) > SCALE_AGREE_TOL * medScale) continue;
+        const inliers = pairs.filter(p => residual(p, tf) <= OUTLIER_TOL_PX);
+        const support = inliers.reduce((s, p) => s + (p.score || 0.5), 0);
+        if (inliers.length > (best ? best.length : 0) || (best && inliers.length === best.length && support > bestSupport)) {
+          best = inliers; bestSupport = support;
+        }
+      }
+    }
+    return (best && best.length >= 2) ? best : pairs;   // 有効なペアが無ければ従来通り全点使う
+  }
 
   /* ── 幾何: 複数アンカーから軸ごとの拡大率＋平行移動を推定 ── */
   /**
@@ -66,15 +133,25 @@ const Recognizer = (() => {
    * @param {Array<{refX,refY,inX,inY,scale,score}>} pairs
    * @returns {{ sx:number, sy:number, tx:number, ty:number, n:number }}
    */
-  function estimateTransform(pairs) {
-    const n = pairs.length;
-    if (n === 0) return { sx: 1, sy: 1, tx: 0, ty: 0, n: 0 };
-    if (n === 1) {
-      const f = pairs[0].scale || 1;
-      return { sx: f, sy: f, tx: pairs[0].inX - f * pairs[0].refX, ty: pairs[0].inY - f * pairs[0].refY, n: 1 };
+  function estimateTransform(all) {
+    if (all.length === 0) return { sx: 1, sy: 1, tx: 0, ty: 0, n: 0, dropped: 0, kept: [] };
+    if (all.length === 1) {
+      const f = all[0].scale || 1;
+      return {
+        sx: f, sy: f, tx: all[0].inX - f * all[0].refX, ty: all[0].inY - f * all[0].refY,
+        n: 1, dropped: 0, kept: all,
+      };
     }
     /* 照合倍率の中央値（探索は 0.6〜2.0 と広く、密集アンカーでも安定して得られる） */
-    const medScale = median(pairs.map(p => p.scale || 1));
+    const medScaleAll = median(all.map(p => p.scale || 1));
+    /* 別の場所へ誤マッチした点を先に捨てる。倍率だけでなく平行移動も、誤マッチ点が
+       加重平均に混じるとその分だけ引きずられるため、推定前に取り除く必要がある。
+       ペア総当たりは3点未満では機能しない（2点は常に一致するペアが1組しか無く、
+       多数決にならない）ため、2点以下はそのまま使う。 */
+    const pairs = all.length >= 3 ? ransacInliers(all, medScaleAll) : all;
+    const dropped = all.length - pairs.length;
+    const n = pairs.length;
+    const medScale = dropped ? median(pairs.map(p => p.scale || 1)) : medScaleAll;
     /* 加重は score をそのまま使う（呼び出し側は score>=0.4 のみを渡すため、常に正）。
        スコア差を過度に増幅しないよう線形のまま用いる。 */
     const weights = pairs.map(p => Math.max(1e-3, p.score || 0));
@@ -91,13 +168,17 @@ const Recognizer = (() => {
         let num = 0, den = 0;
         pairs.forEach((p, i) => { const dr = gr(p) - mr, di = gi(p) - mi; num += weights[i] * dr * di; den += weights[i] * dr * dr; });
         const sReg = den > 1e-6 ? num / den : NaN;
-        if (isFinite(sReg) && sReg >= 0.4 && sReg <= 2.5) s = sReg;   // 十分広い＝位置回帰を信頼
+        /* 十分広い＝位置回帰を信頼。ただし各アンカーが独立に検出した倍率の中央値と
+           大きく食い違う場合は、残った誤マッチや位置ノイズで回帰が壊れた可能性が高い
+           ため採らない（SCALE_AGREE_TOL 参照）。 */
+        if (isFinite(sReg) && sReg >= 0.4 && sReg <= 2.5
+            && Math.abs(sReg - medScale) <= SCALE_AGREE_TOL * medScale) s = sReg;
       }
       return { s, t: mi - s * mr };
     };
     const X = axis(p => p.refX, p => p.inX);
     const Y = axis(p => p.refY, p => p.inY);
-    return { sx: X.s, sy: Y.s, tx: X.t, ty: Y.t, n };
+    return { sx: X.s, sy: Y.s, tx: X.t, ty: Y.t, n, dropped, kept: pairs };
   }
 
   /** 基準画像座標の矩形を軸独立スケール変換で入力画像座標へ写像 */
@@ -147,13 +228,18 @@ const Recognizer = (() => {
     if (active && CharConstraint.isLatinOnly(rule)) {
       /* ⑤ engモデルでは字種whitelistがよく効く（数字1→漢字誤認で守れないjpnと異なる）。
          数字欄で "9,218"→"HWNgy~EN" のような英字誤読を根本から封じるため、
-         導出したwhitelistをそのまま渡す。純数字の欄では桁区切り記号
-         （, ， 空白 ¥ ￥ $）も許可し、Tesseractに記号として分類させたうえで
-         後段のNUM_NOISE除去で落とす（記号を無理に数字化させないため）。 */
+         導出したwhitelistをそのまま渡す。数字（小数点を含めてもよい）の欄では
+         桁区切り記号（, ， 空白 ¥ ￥ $）も許可し、Tesseractに記号として分類させた
+         うえで後段のNUM_NOISE除去で落とす（記号を無理に数字化させないため）。
+         小数点「.」を許可文字に加えた欄（例: 1,234.56）もここに含める。以前は
+         「全桁が数字」だけを見ていたため、小数点を加えただけで桁区切り記号の
+         whitelistが付かなくなり、Tesseractがカンマを出力できず最も近い許可文字
+         （小数点自身等）に丸めてしまっていた（"1,234.56"→"1,234,56"のように
+         カンマと小数点が区別できなくなる）。 */
       const wl = CharConstraint.derivedWhitelist(rule);
       if (!wl) return { lang: 'eng', whitelist: '' };
-      const pureDigit = [...wl].every(c => c >= '0' && c <= '9');
-      return { lang: 'eng', whitelist: pureDigit ? wl + ',， ¥￥$' : wl };
+      const isDigitOrDot = [...wl].every(c => (c >= '0' && c <= '9') || c === '.');
+      return { lang: 'eng', whitelist: isDigitOrDot ? wl + ',， ¥￥$' : wl };
     }
     return { lang: fallbackLang, whitelist: active ? (CharConstraint.derivedWhitelist(rule) || fallbackWhitelist) : fallbackWhitelist };
   }
@@ -200,10 +286,10 @@ const Recognizer = (() => {
     return c;
   }
 
-  /* ── OCR前処理: 二値化＋主要行の抽出（①②） ──────────────
+  /* ── OCR前処理: 行トリム → 拡大 → 二値化＋角戻し ──────────
      英数字・記号のみの「単一値」欄（金額・コード等）専用。切り出しに写り込んだ
-     薄いゴースト行（罫線除去の残像・隣接行）を落とし、太字の値の行だけを
-     Tesseractへ渡す。日本語欄・自由記述欄・複数行欄には適用しない
+     薄いゴースト行（罫線除去の残像・隣接行）を落とし、値の行だけを十分な大きさ・
+     背景ムラの無い状態でTesseractへ渡す。日本語欄・自由記述欄・複数行欄には適用しない
      （呼び出し側でゲート）。誤検出で精度を落とさないよう、退化ケース
      （ほぼ空白／ほぼ真っ黒／細い単一バンドのみ）では元キャンバスをそのまま返す。 */
 
@@ -241,12 +327,10 @@ const Recognizer = (() => {
 
   /**
    * 単一値欄の切り出しから、ゴースト行・上下の空白マージンを削って値の行だけを返す。
-   * 【ハード二値化はしない】。小さい切り出しを拡大してから0/1に叩き切ると、元の
-   * なめらかな階調（アンチエイリアス）が失われてブロック状になり、かえってTesseractの
-   * 精度が落ちる（＝「元画像の方がきれい」な状態）。二値化はTesseract内部（大津）に
-   * 任せ、ここでは行トリムのみ行い、拡大済みグレースケールをそのまま渡す。
-   * トリム判定にだけ大津しきい値を使う。悪化しそうな退化ケースは元キャンバスを返す。
-   * @param {HTMLCanvasElement} canvas  （呼び出し側で拡大済み）
+   * ここでは二値化せず（binarizeSoft が後段で行う）、トリム判定にだけ大津しきい値を使う。
+   * 悪化しそうな退化ケースは元キャンバスを返す。
+   * 拡大より先に呼ぶこと（ocrInputCanvas の順序に関する注記を参照）。
+   * @param {HTMLCanvasElement} canvas
    * @returns {HTMLCanvasElement}
    */
   function preprocessSingleLine(canvas) {
@@ -292,6 +376,58 @@ const Recognizer = (() => {
     return out;
   }
 
+  /* σ=0.8 の3タップ・ガウシアン（cv2.GaussianBlur(ksize=3) 相当）を分離適用する。 */
+  const GAUSS3 = [0.2261, 0.5478, 0.2261];
+
+  /**
+   * 大津で二値化し、直後に軽いガウシアンで輪郭の角を戻す。
+   *
+   * ノイズの多い切り出し（罫線除去の残像・背景ムラ・斑点）をグレーのまま渡すと、
+   * Tesseractが背景の濃淡を文字の一部と見なして余計な文字を挿入する
+   * （例: AA1237→AA1L237 / AL2451→AGE2451。実測でゴミありの正答率19%）。
+   * 二値化すると背景は消えるが、今度は輪郭が階段状になり、きれいな切り出しの精度が
+   * 落ちる（92%→83%）。二値化の直後に軽く平滑化して角を戻すと、背景を消したまま
+   * 輪郭のなめらかさも保てる。実測（未知データ224件）で、きれい・ゴミあり・低DPI・
+   * 高DPIの全条件で現行を上回ることを確認している（合計 49%→71%）。
+   *
+   * なお中央値フィルタによるノイズ除去も試したが、細い字画（1・L）を消して落字を
+   * 招くため採用しない（実測で正答率が下がった）。
+   */
+  function binarizeSoft(canvas) {
+    const w = canvas.width, h = canvas.height;
+    if (w < 3 || h < 3) return canvas;
+    const gray = toGrayOverWhite(canvas);
+    const thr = otsuThreshold(gray);
+    const bin = new Float32Array(w * h);
+    for (let i = 0; i < bin.length; i++) bin[i] = gray[i] < thr ? 0 : 255;
+
+    /* 横方向 → 縦方向の順に1次元で畳み込む（端は最近傍で補う） */
+    const tmp = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const base = y * w;
+      for (let x = 0; x < w; x++) {
+        tmp[base + x] = GAUSS3[0] * bin[base + (x > 0 ? x - 1 : 0)]
+                      + GAUSS3[1] * bin[base + x]
+                      + GAUSS3[2] * bin[base + (x < w - 1 ? x + 1 : w - 1)];
+      }
+    }
+    const out = document.createElement('canvas');
+    out.width = w; out.height = h;
+    const octx = out.getContext('2d', { willReadFrequently: true });
+    const img = octx.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      const up = (y > 0 ? y - 1 : 0) * w, cur = y * w, dn = (y < h - 1 ? y + 1 : h - 1) * w;
+      for (let x = 0; x < w; x++) {
+        const v = Math.round(GAUSS3[0] * tmp[up + x] + GAUSS3[1] * tmp[cur + x] + GAUSS3[2] * tmp[dn + x]);
+        const p = (cur + x) * 4;
+        img.data[p] = img.data[p + 1] = img.data[p + 2] = v;
+        img.data[p + 3] = 255;
+      }
+    }
+    octx.putImageData(img, 0, 0);
+    return out;
+  }
+
   /** 構造化された「英数字・記号のみの単一値」欄か。
       true の欄にだけ 行トリム＋拡大（①④）と PSM=ブロック（③）を適用する。 */
   function isSingleValueField(rule) {
@@ -299,18 +435,267 @@ const Recognizer = (() => {
   }
 
   /** OCR入力キャンバスを構築する。
-      単一値欄は ④ グレースケールのまま拡大（滑らかな補間）→ 行トリム（ゴースト除去）。
-      ハード二値化はしない（拡大後に0/1へ叩き切るとブロック状になり精度が落ちるため。
-      二値化はTesseract内部の大津に任せる）。それ以外の欄は従来通り拡大のみ。 */
+      単一値欄は 行トリム → 拡大 → 二値化＋角戻し。それ以外の欄は従来通り拡大のみ。
+
+      ★順序が重要: 必ず行トリムを先に行う。
+      拡大するかどうかは「文字の高さ」で決めたいが、切り出しには上下の余白やゴースト行が
+      含まれるため、キャンバス全体の高さで判断すると実態とかけ離れる。先に拡大していた
+      従来の順序では、余白を含めた高さが目標値を超えていると「もう十分大きい」と誤判断して
+      拡大せず、その後のトリムで文字が小さいまま Tesseract へ渡っていた
+      （実測: 51pxの切り出しが拡大されないままトリムされ、文字はわずか15pxで渡っていた）。
+      トリムを先にすれば、目標高さが本当に文字の高さに対して効くようになる。 */
   function ocrInputCanvas(cropCanvas, single) {
-    if (single) return preprocessSingleLine(upscaleForOcr(cropCanvas, SINGLE_TARGET_H, SINGLE_MAX_SCALE));
-    return upscaleForOcr(cropCanvas);
+    if (!single) return upscaleForOcr(cropCanvas);
+    const trimmed = preprocessSingleLine(cropCanvas);
+    const scaled = upscaleForOcr(trimmed, SINGLE_TARGET_H, SINGLE_MAX_SCALE);
+    return binarizeSoft(scaled);
   }
 
   /* PSM: 単一値欄は「単一の均一ブロック」(6) で読む。単一行(7)は最上行だけを読むため、
      ゴーストのヘッダー行が上に残ると値（下段の数字）を取りこぼす。6なら全行を読み、
      数字以外はwhitelistで落ちるので値だけが残る。一般欄は従来通りフォーム設定のPSM。 */
   const SINGLE_LINE_PSM = 6;
+
+  /* 文字制約に不合格だったときに読み直す代替PSM（7=単一行, 8=単一語, 13=生の行）。
+     実測（Tesseract 5.3.4・ゴミありの切り出し168件）で、PSM6が外した中の一部は
+     別のPSMなら正しく読めており、制約の合否で選ぶと 66%→73% に改善した。
+     救済されるのは「余分な1文字を拾う」失敗が中心で、報告された症状と一致する。 */
+  const RETRY_PSMS = [7, 8, 13];
+
+  /* 生データの文字数と固定長ルールの桁数の許容ズレ。これを超えたら「桁数が大きく
+     違うので信頼できない」と判定し、制約自体はvalid=trueでも読み直しの対象にする。
+     extractStr（値の前後の余分な文字を除去する仕組み）は「最も一致する固定長の窓」を
+     機械的に選ぶだけで、窓の外にどれだけ余分な文字があったかは見ない。そのため
+     生データが桁数を大きく超過していても（例: 6桁のところ9文字読んでしまった）、
+     窓選択後にcorrectCharの誤認補正（0↔Q等）が偶然辻褄を合わせてしまうと、
+     本来は信頼できない読み取りが constraintValid=true になり得る（実例:
+     "-AB0Q0684"→"AB0006"とvalid判定されたが、正しい値は"AB0684"だった）。
+     1文字程度の超過（薄いゴミ1文字の混入）はextractStrの本来の役割なので許容し、
+     2文字以上の乖離だけを「疑わしい」とみなす。 */
+  const LENGTH_MISMATCH_TOL = 2;
+
+  /* 分割された断片とみなす中心間隔の上限（字形ピッチに対する比）。
+     隣り合う本物の字形は必ずピッチ（字送り幅）ぶん離れているのに対し、
+     1つの字形が複数に分割された断片同士はほぼ同じ位置に重なって出る。
+     実測（実機ログ3件）では本物の間隔が48〜53pxだったのに対し、断片同士は
+     2.5〜14.5pxしかなく、両者の差は極めて大きい。0.5（ピッチの半分）で
+     切れば双方に十分な余裕がある。 */
+  const GLYPH_MERGE_PITCH_RATIO = 0.5;
+
+  /* 分割された字形のどの断片を残すかを決める際、予測位置からのズレの許容量
+     （ピッチに対する比）。これを超える場合はピッチの当てはめ自体が怪しい
+     ＝信用できないので修復しない。 */
+  const GLYPH_SLOT_TOLERANCE = 0.4;
+
+  /* pickByWidthで、幅の自然さの決着に必要な上位2候補の差（中央値に対する比）。
+     これ未満の差では「どちらが本物か幅からは決められない」とみなし、その
+     まとまりの修復自体を諦める（誤った方を自信満々に確定させるより安全）。 */
+  const GLYPH_WIDTH_MARGIN = 0.15;
+
+  /* 可変長欄（金額欄等）の「セカンドオピニオン」に使うPSM。
+     可変長欄は桁数という検算材料が無いため、字形が丸ごと別の文字として
+     誤分類された場合（実機で "704" が "104" と読まれ、7の矩形が1個だけ・
+     幅も他の数字と同等で、矩形からは異常を検出できなかった例がある）、
+     何のフラグも立たないまま確信度86%の緑表示で通ってしまう。
+     そこで別のレイアウト解釈でもう一度読み、最終値が食い違えば「要確認」
+     として利用者に知らせる。
+     PSM7（単一行）を選んだのは、サンドボックスでの実測で、きれいな金額
+     画像（"704"・"591,800"・"1,573,000"）に対しPSM6と完全に同じ最終値を
+     返し、誤検知を出さなかったため（PSM8/13は末尾に余分なカンマを付けた）。
+     比較は生データではなく「正規化・制約適用後の最終値」同士で行う。
+     生データだと "591,800" と "591,800," のような表記ゆれで誤検知するが、
+     最終値ではどちらも "591800" に落ち着くため。 */
+  const SECOND_OPINION_PSM = 7;
+
+  /** 数値配列の中央値。 */
+  function medianOf(nums) {
+    if (!nums.length) return null;
+    const s = [...nums].sort((a, b) => a - b);
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  /* 文字単位の外接矩形から「同じ字形を複数に分割して読んだ」断片を取り除く。
+     文字種の情報だけでは原理的に解けない誤読（例: 生データ "ABOT755" は
+     "O"を消せば"AB7755"、"T"を消せば"AB0755"となり、どちらも「1文字だけ
+     CONFUSE表で補正すれば桁が揃う」ため同点になる）を、字形の位置という
+     別の情報で決着させるために使う。
+
+     当初は「矩形同士が重なっているか」で判定していたが、実機ログの3例で
+     いずれも失敗した。分割された断片は必ずしも重ならないためで、例えば
+     "AB0684"では 0 が O[143-168] Q[156-160] O[160-184] の3つに分割された
+     ものの、Q と 後ろのO は重なっておらず（160で接するだけ）連鎖が途切れる。
+     "AB0755"に至っては T[164-184] と 7[178-199] の重なりが狭い方の幅の30%
+     しかなく、しきい値にわずかに届かなかった。
+
+     そこで判定を「字送りの規則性」に変えた。固定書式の欄は字形が等間隔に
+     並ぶため、本物の字形同士の中心間隔（ピッチ）は一定になる。一方、1つの
+     字形の断片同士はほぼ同じ位置に出るので間隔が極端に小さい。実測でも
+     本物48〜53pxに対し断片2.5〜14.5pxと明確に分かれていた。
+     手順は、①ピッチを推定し、②間隔がピッチの半分未満の矩形をひとかたまり
+     （＝1つの字形）にまとめ、③まとまりの数が桁数と一致した時だけ、
+     ④各まとまりから「等間隔に並ぶはずの位置に最も近い」1つを代表として残す。
+     まとまりの数が桁数と一致しない場合は、値の前後に付いた本物のゴミなど
+     別の要因が混ざっているので手を出さない（既存の前後除去に任せる）。
+
+     金額欄等の可変長ルールには「期待される桁数」自体が無い（帳票ごとに
+     金額の桁が違って当然のため）。この場合はexpectedLenを渡せないので、
+     等間隔の当てはめではなく「間隔の分布そのものから断片と本物の境目を
+     見つける」自己整合的な方式（groupByNaturalGaps）に切り替える。
+
+     @param {string} text        矩形と対応する生の認識文字列
+     @param {Array}  charBoxes   文字単位の外接矩形
+     @param {number} expectedLen 期待される桁数（固定長ルールのみ。0/未指定なら可変長として扱う）
+     @returns {{ text:string, dropped:Array }|null} 修復できない場合は null。 */
+  function repairSplitGlyphs(text, charBoxes, expectedLen) {
+    const L = expectedLen | 0;
+    if (!Array.isArray(charBoxes) || charBoxes.length < 2) return null;
+    if (L && charBoxes.length <= L) return null;   // 桁数既知で余分が無ければ何もしない
+    /* 矩形列と実際に採用したテキストがずれている場合（PSMやTSVとboxで
+       セグメンテーションが食い違う等）は、対応が取れないので手を出さない。 */
+    if (charBoxes.map(b => b.text).join('') !== [...text].filter(c => !/\s/.test(c)).join('')) return null;
+
+    const items = charBoxes.map((b, i) => ({ b, i, c: (b.x0 + b.x1) / 2 })).sort((p, q) => p.c - q.c);
+    const gaps = [];
+    for (let k = 0; k + 1 < items.length; k++) gaps.push(items[k + 1].c - items[k].c);
+
+    const groups = L ? groupByExpectedLen(items, gaps, L) : groupByNaturalGaps(items, gaps);
+    if (!groups || !groups.some(g => g.length > 1)) return null;
+
+    /* まとまりの中でどれを残すかは、桁数が既知かどうかで信頼できる根拠が違う。
+       桁数既知（固定長）なら「等間隔に並ぶはずの位置」を他の桁から当てはめられる
+       （4〜5桁分の参照点があり、内挿で済むことが多い）。桁数不明（可変長）だと
+       参照点が少なく（最少2つ）、まとまりが先頭・末尾にあると外挿になり信頼性が
+       落ちる（実際、2参照点からの外挿で先頭のゴーストの方を残し本物の桁を
+       落とす誤判定をテストで確認した）。そのため可変長では位置の当てはめを
+       使わず、より単純で外挿に頼らない「幅の自然さ」だけで決める
+       （pickByWidth）。 */
+    const drop = L ? pickByPositionFit(groups) : pickByWidth(groups);
+    if (!drop || !drop.size) return null;
+    return {
+      text: charBoxes.filter((_, i) => !drop.has(i)).map(b => b.text).join(''),
+      dropped: charBoxes.filter((_, i) => drop.has(i)),
+    };
+  }
+  /* 固定長ルール向け: 断片を含まないまとまりだけから「等間隔に並ぶはずの位置」
+     （中心 ≒ 切片 + ピッチ×番号）を当てはめる。左端のゴミを巻き込んで太った
+     矩形など外れ値があっても効くよう、全ペアの傾きと切片の中央値で求める。 */
+  function pickByPositionFit(groups) {
+    const solo = groups.map((g, gi) => ({ gi, c: g[0].c, single: g.length === 1 })).filter(s => s.single);
+    if (solo.length < 2) return null;
+    const slopes = [];
+    for (let a = 0; a < solo.length; a++) {
+      for (let b = a + 1; b < solo.length; b++) slopes.push((solo[b].c - solo[a].c) / (solo[b].gi - solo[a].gi));
+    }
+    const fitPitch = medianOf(slopes);
+    if (!fitPitch || fitPitch <= 0) return null;
+    const base = medianOf(solo.map(s => s.c - fitPitch * s.gi));
+    if (base === null) return null;
+
+    const drop = new Set();
+    for (let gi = 0; gi < groups.length; gi++) {
+      const g = groups[gi];
+      if (g.length < 2) continue;
+      const want = base + fitPitch * gi;
+      const ranked = g.map(p => ({ p, off: Math.abs(p.c - want) })).sort((a, b) => a.off - b.off);
+      /* 当てはめた位置から遠すぎる＝そもそも規則性の推定が怪しい。 */
+      if (ranked[0].off > GLYPH_SLOT_TOLERANCE * fitPitch) return null;
+      for (const r of ranked.slice(1)) drop.add(r.p.i);
+    }
+    return drop;
+  }
+  /* 可変長ルール向け: 断片を含まないまとまり（幅）の中央値に対して、
+     まとまり内の各候補が「補正なしでどれだけ自然な幅か」で決める。
+     位置の当てはめ（pickByPositionFit）は参照点が少ない可変長では外挿に
+     頼りがちで信頼できないため使わない。上位2つの幅の差が乏しい場合は
+     決められないとみなし、そのまとまりごと諦める（無理に選ばない）。 */
+  function pickByWidth(groups) {
+    const widthOf = g => g.b.x1 - g.b.x0;
+    const soloWidths = groups.filter(g => g.length === 1).map(g => widthOf(g[0]));
+    const basis = soloWidths.length ? soloWidths : groups.flat().map(widthOf);
+    const median = medianOf(basis);
+    if (!median) return null;
+
+    const drop = new Set();
+    for (const g of groups) {
+      if (g.length < 2) continue;
+      const ranked = g.map(p => ({ p, dev: Math.abs(widthOf(p) - median) })).sort((a, b) => a.dev - b.dev);
+      if (ranked[1].dev - ranked[0].dev < GLYPH_WIDTH_MARGIN * median) return null;
+      for (const r of ranked.slice(1)) drop.add(r.p.i);
+    }
+    return drop;
+  }
+  /* 固定長ルール向け: ピッチを「大きい方から桁数-1個」の間隔の中央値で見積もり
+     （小さい間隔＝断片同士なので混ぜると過小評価される）、ピッチの半分未満の
+     間隔をひとかたまりにする。まとまりの数が桁数と一致しない場合は別の要因
+     （前後の本物のゴミ等）が混ざっているとみなし null を返す。 */
+  function groupByExpectedLen(items, gaps, L) {
+    if (gaps.length < L - 1) return null;
+    const pitch = medianOf([...gaps].sort((a, b) => b - a).slice(0, L - 1));
+    if (!pitch || pitch <= 0) return null;
+    const groups = [[items[0]]];
+    for (let k = 1; k < items.length; k++) {
+      if (items[k].c - items[k - 1].c < GLYPH_MERGE_PITCH_RATIO * pitch) groups[groups.length - 1].push(items[k]);
+      else groups.push([items[k]]);
+    }
+    return groups.length === L ? groups : null;
+  }
+  /* 隣接する矩形が物理的に重なっている（同じ横位置を取り合っている）とみなす
+     重なり率（狭い方の幅に対する比）。2文字が印字上・本当に重なることは
+     無いので、これを超える重なりは「同じ字形を二重に検出した」ことの直接
+     証拠になる（実機ログで確認: "704"の"7"が"7"+ゴースト"1"の2検出に分裂
+     した例で、重なりは狭い方(ゴースト)の幅のちょうど50%だった）。間隔の
+     自然な境目（GLYPH_NATURAL_BREAK_MIN_RATIO）と違い、他の桁との比較なしに
+     2矩形だけで判定できるため、可変長で参照点が少ない場合でも効く。 */
+  const GLYPH_OVERLAP_MERGE_RATIO = 0.3;
+
+  /* 可変長ルール向け（期待桁数が無い金額欄等）: 桁数を仮定できないため、
+     ①物理的な重なり、②間隔の分布から見つかる自然な境目、の2つの根拠で
+     「同じ字形の断片」を判定する。
+     ①は上記の通り2矩形だけで判定できる直接証拠。②は間隔を昇順に並べ、
+     隣り合う値の比が最も大きく開く箇所（自然な境目・1次元のJenks breaksに
+     相当）を探し、それより小さい間隔だけを断片とみなす方式で、重なっては
+     いないが明らかに詰まっている断片（実機ログの"AB0684"の3分割例等）を
+     拾うために残している。境目の飛び幅が乏しい（全体になだらか）場合は
+     ②の根拠は使えないが、①（重なり）だけでも判定は成立する。
+
+     固定長ルールと違い「桁数が合うまとまり数に絞り込む」検算が使えないため
+     （可変長は最終的に何文字になるべきか分からない）、②のしきい値は保守的に
+     取る。実測（固定長の実機ログ3件）では本物の間隔が48〜53pxに対し断片が
+     2.5〜14.5pxで、比にすると3.3倍以上あった。一方、単に「別々の本物の
+     文字がたまたま少し詰まっている」場合の間隔の揺れは経験上2倍未満に収まる
+     ため、その中間である3.0倍を境目の採用ラインとする（これ未満の飛び幅は
+     「断片が混じっている」と決め打つ根拠として弱いとみなし、①が無ければ
+     手を出さない）。 */
+  const GLYPH_NATURAL_BREAK_MIN_RATIO = 3.0;
+  function groupByNaturalGaps(items, gaps) {
+    const overlapRatios = items.slice(1).map((cur, k) => {
+      const prev = items[k].b, c = cur.b;
+      const overlap = Math.min(prev.x1, c.x1) - Math.max(prev.x0, c.x0);
+      const narrow = Math.min(prev.x1 - prev.x0, c.x1 - c.x0);
+      return narrow > 0 ? overlap / narrow : 0;
+    });
+
+    let gapThreshold = null;
+    if (gaps.length >= 2) {   // 比較対象が2つ以上あれば「狭い/広い」の境目を探せる
+      const sorted = [...gaps].sort((a, b) => a - b);
+      let breakIdx = -1, breakRatio = GLYPH_NATURAL_BREAK_MIN_RATIO;
+      for (let i = 0; i + 1 < sorted.length; i++) {
+        const ratio = (sorted[i + 1] + 1) / (sorted[i] + 1);
+        if (ratio > breakRatio) { breakRatio = ratio; breakIdx = i; }
+      }
+      if (breakIdx >= 0) gapThreshold = (sorted[breakIdx] + sorted[breakIdx + 1]) / 2;
+    }
+
+    const groups = [[items[0]]];
+    for (let k = 1; k < items.length; k++) {
+      const byOverlap = overlapRatios[k - 1] >= GLYPH_OVERLAP_MERGE_RATIO;
+      const byGap = gapThreshold != null && (items[k].c - items[k - 1].c) < gapThreshold;
+      if (byOverlap || byGap) groups[groups.length - 1].push(items[k]);
+      else groups.push([items[k]]);
+    }
+    return groups.length < items.length ? groups : null;   // 何も併合されなければ判定材料なし
+  }
 
   /* ④ 単一値欄の拡大目標。Tesseractは字形が小さいと 9↔G / 0↔O / 1↔I などの
      微妙な取り違えを起こしやすい。行の高さがこの値に満たない切り出しだけを拡大して
@@ -376,10 +761,14 @@ const Recognizer = (() => {
     const rotated = await LineRemovalProcessor.rotateCanvas(sourceCanvas, angle);
     const tRotate = performance.now();
 
-    /* ④ 原点の再ローカライズ: 全アンカーを角度固定で再マッチ → 相似変換を推定
-       （複数アンカーが取れればスケール=拡大率と位置ずれを同時に補正） */
+    /* ④ 原点の再ローカライズ: 位置合わせに使うアンカーを角度固定で再マッチ → 相似変換を
+       推定（複数アンカーが取れればスケール=拡大率と位置ずれを同時に補正）。
+       「帳票判定のみ」の役割のアンカーはここでは使わない。判定用は他の帳票と見分けるため
+       広く取ることが多く、広い範囲はページ内の局所的な印刷ズレを平均した「妥協点」に
+       一致しやすい。スコアは高くても位置がぶれるため、対応点に混ぜると位置合わせが悪化する
+       （判定を良くしようと目印を足したら位置合わせがずれる、という形で実際に現れる）。 */
     stage('原点の確定', 0.25);
-    const anchors = form.anchors || [];
+    const anchors = (form.anchors || []).filter(AnchorRoles.usedForAlign);
     const allMatches = [];
     try {
       const tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, imageElement: await dataURLtoImg(a.dataURL) })));
@@ -402,6 +791,7 @@ const Recognizer = (() => {
         if (!r) return;
         const f = r.scale || 1;
         allMatches.push({
+          name: t.a.name || '',
           refX: (t.a.refX || 0) + t.a.w / 2, refY: (t.a.refY || 0) + t.a.h / 2,         // 基準中心
           inX:  r.loc.x + t.a.w * f / 2,     inY:  r.loc.y + t.a.h * f / 2,             // 入力中心（スケール考慮）
           score: r.score, scale: f,
@@ -414,17 +804,41 @@ const Recognizer = (() => {
     let transform;
     if (good.length >= 1)        transform = estimateTransform(good);
     else if (allMatches.length)  transform = estimateTransform([allMatches[0]]);
-    else                         transform = { sx: 1, sy: 1, tx: 0, ty: 0, n: 0 };
+    else                         transform = { sx: 1, sy: 1, tx: 0, ty: 0, n: 0, dropped: 0, kept: [] };
     const tLocalize = performance.now();
+
+    /* 位置合わせの診断。OCR欄の位置がずれたとき、原因が
+         ・目印が別の場所に一致した（誤マッチ）
+         ・基準画像と入力の解像度が違う（倍率が1.0のままでは合わない）
+         ・目印が近くに固まっていて倍率が決まらない
+       のどれなのかは、対応点そのものを見ないと切り分けられないため一覧で出す。
+       「ずれ」= 採用した変換で基準座標を写した位置と、実際に一致した位置との差。
+       正しく合っていれば全て数px以内に収まる。特定の1点だけ大きい＝その目印が犯人。 */
+    if (allMatches.length) {
+      console.log(`[align] 基準画像 ${form.referenceImage ? form.referenceImage.w + 'x' + form.referenceImage.h : '?'}`
+        + ` → 入力 ${rotated.width}x${rotated.height}`
+        + ` / 変換 倍率${transform.sx.toFixed(3)}x${transform.sy.toFixed(3)}`
+        + ` 平行移動(${Math.round(transform.tx)},${Math.round(transform.ty)})`
+        + ` 採用${transform.n}点 除外${transform.dropped || 0}点`);
+      allMatches.forEach(p => {
+        const used = transform.kept.includes(p);
+        const dx = p.inX - (transform.sx * p.refX + transform.tx);
+        const dy = p.inY - (transform.sy * p.refY + transform.ty);
+        console.log(`[align]   ${used ? '採用' : '除外'} "${p.name}" 基準(${Math.round(p.refX)},${Math.round(p.refY)})`
+          + ` → 一致(${Math.round(p.inX)},${Math.round(p.inY)})`
+          + ` ずれ(${Math.round(dx)},${Math.round(dy)}) スコア${p.score.toFixed(2)} 検出倍率${p.scale}`);
+      });
+    }
 
     /* 一致品質の診断: 基準画像と入力画像の縮尺が大きく違うと、ここでの探索
        （LOCALIZE_SCALES の範囲内）で真の倍率を捉えきれず、OCR領域の位置が
        ずれたまま気づかれない恐れがある。検出倍率が探索範囲の端に張り付いて
        いる／信頼できる一致が1つも無い場合は、呼び出し側で警告できるように
        フラグを返す（例: PDFの読み込みDPIが登録時と違いすぎるケース）。 */
-    const usedMatches = good.length ? good : allMatches.slice(0, 1);
+    /* 誤マッチとして捨てた点は以降の判断からも外す（欄ごとの局所変換にも混ぜない）。 */
+    const usedMatches = transform.kept.length ? transform.kept : (good.length ? good : allMatches.slice(0, 1));
     /* 局所アンカー位置決め用の対応点（信頼できる一致が2点以上あるときだけ）。 */
-    const anchorPoints = good.length >= 2 ? good : null;
+    const anchorPoints = transform.kept.length >= 2 ? transform.kept : null;
     const scaleMin = LOCALIZE_SCALES[0], scaleMax = LOCALIZE_SCALES[LOCALIZE_SCALES.length - 1];
     const matchQuality = {
       n: transform.n,
@@ -432,6 +846,9 @@ const Recognizer = (() => {
       bestScale: allMatches.length ? allMatches[0].scale : 1,
       scaleEdge: usedMatches.some(p => p.scale <= scaleMin || p.scale >= scaleMax),
       weakMatch: !good.length,
+      /* 誤マッチとして除外した目印の数。0でなければ、その目印は他の場所（似た四角など）
+         と区別が付いていないため、利用者に作り直しを促す。 */
+      droppedOutliers: transform.dropped || 0,
     };
 
     /* ⑤ 罫線除去（登録された罫線除去パラメータを引き継ぎ） */
@@ -487,6 +904,36 @@ const Recognizer = (() => {
       const single = isSingleValueField(rule);   // 単一値欄は前処理＋単一行PSM
       return { region, rule, active: CharConstraint.isActive(rule), single, lang: p.lang, whitelist: p.whitelist, psm: single ? SINGLE_LINE_PSM : psm };
     });
+    /* OCR結果を最終的な値へ整える（行選択 → 正規化 → パターン抽出 → 文字制約）。
+       PSMを変えて読み直したときに同じ手順を再適用するため、関数へ切り出してある。 */
+    const finishText = (res, region, rule, active, single) => {
+      let text = (res.fullText || '').trim();
+      /* 単一値欄でTesseractが複数行として認識した場合（PSM=6は罫線除去の
+         ゴースト行を別行として拾うことがある）、最も確信度の高い行だけを採用する。
+         whitelistの制約でノイズも数字として出力され得るため、行同士を連結した
+         "051\n8558" のような値をそのまま出さないための対策。複数値を許容する
+         一般欄はこれまで通りfullTextをそのまま使う。 */
+      if (single && res.lines && res.lines.length > 1) {
+        const best = res.lines.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+        text = best.text;
+      }
+      if (doNorm) text = OcrProcessor.normalize(text);
+      if (doKanji) text = OcrProcessor.kanjiToNum(text);
+      const raw = text;
+      if (region.pattern) text = applyPattern(text, region.pattern);   // 期待書式で抽出
+      /* 文字制約による桁別チェック＋誤認補正（O↔0 等）＋前後の余分文字除去 */
+      let constraintValid = true, lengthSuspicious = false, ambiguous = false;
+      if (active) {
+        const cc = CharConstraint.apply(text, rule);
+        text = cc.text; constraintValid = cc.valid; ambiguous = !!cc.ambiguous;
+        const norm = CharConstraint.normalize(rule);
+        if (norm && !norm.variable) {
+          lengthSuspicious = Math.abs([...raw.trim()].length - norm.len) >= LENGTH_MISMATCH_TOL;
+        }
+      }
+      return { text, raw, constraintValid, lengthSuspicious, ambiguous };
+    };
+
     /* 言語切替（worker再初期化）を最小化するため同一言語をまとめて処理する */
     const order = plan.map((_, i) => i).sort((a, b) => (plan[a].lang < plan[b].lang ? -1 : plan[a].lang > plan[b].lang ? 1 : 0));
     const fields = new Array(regions.length);
@@ -503,29 +950,106 @@ const Recognizer = (() => {
       const tFieldStart = performance.now();
       /* 実際にTesseractへ渡す画像。診断表示（切り出し画像との比較）用に保持する */
       const inputCanvas = ocrInputCanvas(cropCanvas, single);
-      const res = await OcrProcessor.recognize(inputCanvas, usePsm, prog => {
-        cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
-      }, useLang, useWl);
-      /* 言語がページ間・領域間で切り替わるとTesseractの言語データ再読み込みが走り
-         大幅に遅くなることがあるため、領域ごとの所要時間と使用言語を記録する。 */
-      console.log(`[perf]   OCR "${region.name}" lang=${useLang} ${(performance.now() - tFieldStart).toFixed(0)}ms`);
-      let text = (res.fullText || '').trim();
-      /* 単一値欄でTesseractが複数行として認識した場合（PSM=6は罫線除去の
-         ゴースト行を別行として拾うことがある）、最も確信度の高い行だけを採用する。
-         whitelistの制約でノイズも数字として出力され得るため、行同士を連結した
-         "051\n8558" のような値をそのまま出さないための対策。複数値を許容する
-         一般欄はこれまで通りfullTextをそのまま使う。 */
-      if (single && res.lines && res.lines.length > 1) {
-        const best = res.lines.reduce((a, b) => (b.confidence > a.confidence ? b : a));
-        text = best.text;
+      const onProg = prog => cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
+      let res = await OcrProcessor.recognize(inputCanvas, usePsm, onProg, useLang, useWl);
+      let out = finishText(res, region, rule, active, single);
+      let readPsm = usePsm;
+      /* 診断: 生データ→制約適用後の値と合否をPSM試行ごとに残す。スクリーンショット
+         なしでも「どのPSMで何が読めたか」を診断コピーだけで追跡できるようにする
+         （抽出窓の誤選択・途中への1文字混入等の切り分けに使う）。 */
+      console.log(`[ocr]   "${region.name}" psm=${usePsm} raw=${JSON.stringify(out.raw)} `
+        + `→ ${JSON.stringify(out.text)} valid=${out.constraintValid} lengthSuspicious=${out.lengthSuspicious} ambiguous=${out.ambiguous}`);
+      /* 疑わしい欄に限り、文字単位の外接矩形を取り直して「1つの字形を複数に
+         分割して読んでしまった」断片を字送りの規則性から特定する。文字種だけでは
+         同点で決められない誤読（ambiguous）を解くための追加情報で、pytesseract
+         経路ではtesseractの再起動を伴うため疑わしい欄だけで実行する。ここで
+         解決できればこの後のPSM読み直し（最大3回のOCR）自体が不要になる。
+         金額欄等の可変長ルールは「桁数」という判定材料自体が無いため、
+         constraintValid/lengthSuspicious/ambiguousがどれも常にtrue/false側に
+         倒れて疑わしさを検知できない（実例: "704"のはずが"7104"・"104"と
+         誤読されても、可変長ルールはどちらも普通に受理してしまう）。他に
+         安価な判定材料が無い以上、可変長の単一値欄は毎回この矩形チェックに
+         回す（固定長欄のような「合否で絞ってから」はできない）。 */
+      const norm = active ? CharConstraint.normalize(rule) : null;
+      const isVariableSingle = single && !!(norm && norm.variable);
+      if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous || isVariableSingle)) {
+        const boxRes = await OcrProcessor.recognize(inputCanvas, usePsm, onProg, useLang, useWl, true);
+        const boxes = boxRes.charBoxes;
+        if (Array.isArray(boxes) && boxes.length) {
+          const expectedLen = (norm && !norm.variable) ? norm.len : 0;
+          const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes, expectedLen);
+          const dropped = new Set((rep ? rep.dropped : []));
+          console.log(`[ocr]   "${region.name}" 文字矩形: `
+            + boxes.map(b => `${b.text}[${b.x0}-${b.x1}]${dropped.has(b) ? '←除外' : ''}`).join(' '));
+          if (rep) {
+            const repRes = { ...boxRes, fullText: rep.text, lines: [{ text: rep.text, confidence: boxRes.confidence || 0 }] };
+            const repOut = finishText(repRes, region, rule, active, single);
+            console.log(`[ocr]   "${region.name}" 分割字形を統合 raw=${JSON.stringify(rep.text)} `
+              + `→ ${JSON.stringify(repOut.text)} valid=${repOut.constraintValid} `
+              + `lengthSuspicious=${repOut.lengthSuspicious} ambiguous=${repOut.ambiguous}`);
+            if (repOut.constraintValid && !repOut.lengthSuspicious && !repOut.ambiguous) { res = repRes; out = repOut; }
+          }
+        }
       }
-      if (doNorm) text = OcrProcessor.normalize(text);
-      if (doKanji) text = OcrProcessor.kanjiToNum(text);
-      const raw = text;
-      if (region.pattern) text = applyPattern(text, region.pattern);   // 期待書式で抽出
-      /* 文字制約による桁別チェック＋誤認補正（O↔0 等）＋前後の余分文字除去 */
-      let constraintValid = true;
-      if (active) { const cc = CharConstraint.apply(text, rule); text = cc.text; constraintValid = cc.valid; }
+      /* 可変長欄のセカンドオピニオン: 別のレイアウト解釈でもう一度読み、最終値が
+         食い違えば「要確認」にする。可変長欄には桁数という検算材料が無く、字形が
+         丸ごと別の文字へ誤分類された場合（実機の "704"→"104"）は矩形の個数にも
+         幅にも異常が出ないため、ここまでの仕組みでは何も検知できず、誤った値が
+         確信度86%の緑表示で通ってしまっていた。値そのものを直せるわけではないが、
+         「この欄は疑わしい」と利用者に伝えられるだけでも、黙って間違うよりは
+         はるかに良い（SECOND_OPINION_PSM のコメント参照）。 */
+      let secondOpinionDiff = null;
+      if (isVariableSingle && usePsm !== SECOND_OPINION_PSM) {
+        const soRes = await OcrProcessor.recognize(inputCanvas, SECOND_OPINION_PSM, onProg, useLang, useWl);
+        const soOut = finishText(soRes, region, rule, active, single);
+        if (soOut.text !== out.text) {
+          secondOpinionDiff = soOut.text;
+          console.log(`[ocr]   "${region.name}" セカンドオピニオン不一致: `
+            + `psm=${readPsm}→${JSON.stringify(out.text)} / psm=${SECOND_OPINION_PSM}→${JSON.stringify(soOut.text)}`
+            + ` （どちらが正しいか判定できないため「要確認」にします）`);
+        }
+      }
+      /* 文字制約に不合格、桁数が大きく食い違う、または抽出候補が複数同点で
+         決められない(ambiguous)なら、別のレイアウト解釈(PSM)で読み直して
+         いずれも満たすものを探す。
+         Tesseractは同じ画像でもPSMによって字の切り出し方が変わり、汚れや字間を
+         余分な1文字として拾ってしまう失敗（AL2451→AL24521、JL3331→JIL3331 等）が
+         PSMを変えるだけで解けることがある。桁数と桁ごとの字種を宣言済みの欄だけが
+         対象で、合否という客観的な判定材料があるからこそ選べる。
+         lengthSuspiciousも見るのは、extractStr（前後の余分な文字を除去する仕組み）が
+         「桁数に最も合う窓」を機械的に選ぶだけで、窓の外にどれだけ余分な文字が
+         あったかは見ないため。生データが桁数を大きく超過していても、窓選択後に
+         誤認補正（0↔Q等）が偶然辻褄を合わせてしまうと、本来信頼できない読み取りが
+         constraintValid=trueになり得る（実例: "-AB0Q0684"→"AB0006"とvalid判定
+         されたが、正しい値は"AB0684"だった）。
+         ambiguousも見るのは、紛れ込み文字（例:Q）に加えて別の桁でも0↔O等の
+         字種またぎの誤認が重なると、どの1文字を削除するかで結果が変わる
+         候補同士が同点になり得るため（実例: "ABOQ750"は"Q"を消せば正しく
+         "AB0750"になるが"B"を消しても同点で"AO0750"になる）。文字種だけでは
+         どちらが正しいか決められないので、確信を持てないまま片方を採用せず
+         読み直しに回す。
+         1回目が全て満たせばそのまま採用するので、これまで正しく読めていた欄の結果は
+         変わらない。追加のOCRは疑わしい欄にだけ発生する。 */
+      if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous)) {
+        for (const altPsm of RETRY_PSMS) {
+          if (altPsm === usePsm) continue;
+          const altRes = await OcrProcessor.recognize(inputCanvas, altPsm, onProg, useLang, useWl);
+          const altOut = finishText(altRes, region, rule, active, single);
+          console.log(`[ocr]   "${region.name}" psm=${altPsm}(再読取) raw=${JSON.stringify(altOut.raw)} `
+            + `→ ${JSON.stringify(altOut.text)} valid=${altOut.constraintValid} lengthSuspicious=${altOut.lengthSuspicious} ambiguous=${altOut.ambiguous}`);
+          if (altOut.constraintValid && !altOut.lengthSuspicious && !altOut.ambiguous) { res = altRes; out = altOut; readPsm = altPsm; break; }
+        }
+      }
+      const { text, raw, constraintValid, lengthSuspicious, ambiguous } = out;
+      /* 言語がページ間・領域間で切り替わるとTesseractの言語データ再読み込みが走り
+         大幅に遅くなることがあるため、領域ごとの所要時間と使用言語を記録する。
+         採用結果（raw/text/valid）も添えることで、再読取してもどれも制約を
+         満たせず最初の結果へ戻ったケース（[ocr]の最終行だけでは分かりにくい）も
+         このサマリ行単体で追える。 */
+      console.log(`[perf]   OCR "${region.name}" lang=${useLang} psm=${readPsm}${readPsm !== usePsm ? '(再読取)' : ''} `
+        + `${(performance.now() - tFieldStart).toFixed(0)}ms 採用: raw=${JSON.stringify(raw)} → ${JSON.stringify(text)} `
+        + `valid=${constraintValid} ambiguous=${ambiguous}`
+        + (secondOpinionDiff !== null ? ` 別解釈=${JSON.stringify(secondOpinionDiff)}(要確認)` : ''));
       /* 信頼度は「最終的な値の文字」基準（周辺のゴミで下がらないように） */
       const conf = valueConfidence(text, res.symbols, confOf(res));
       fields[i] = {
@@ -536,14 +1060,20 @@ const Recognizer = (() => {
         confidence: conf,
         error: res.error || null,
         constraint: active ? CharConstraint.describe(rule) : '',
-        constraintValid,
+        /* 桁数超過・抽出候補の同点（ambiguous）・別解釈との食い違い
+           （secondOpinionDiff）が読み直しでも解消しなかった場合は、既存の
+           「制約不合格」表示に乗せて利用者へ伝える（constraintValid自体は
+           trueでも、値としては信用できないことに変わりないため。
+           LENGTH_MISMATCH_TOL・extractStrのambiguous判定・
+           SECOND_OPINION_PSM を参照）。 */
+        constraintValid: constraintValid && !lengthSuspicious && !ambiguous && secondOpinionDiff === null,
         symbols: res.symbols || [],
         cropDataURL: cropCanvas.toDataURL('image/png'),
         /* 診断: 実際にOCRへ渡した画像（前処理後）と使用パラメータ。
            前処理が効いたか／ゴーストが除けたかを目視で確認できるようにする。
            前処理を通す単一値欄のみPNG化する（他欄は元切り出しとほぼ同一で無駄なため）。 */
         ocrInputDataURL: single ? inputCanvas.toDataURL('image/png') : null,
-        ocrInfo: { preprocessed: single, psm: usePsm, lang: useLang, whitelist: useWl },
+        ocrInfo: { preprocessed: single, psm: readPsm, retried: readPsm !== usePsm, lang: useLang, whitelist: useWl },
       };
     }
 

@@ -33,6 +33,7 @@
     recogPageNum: 1, pageNav: null, navReviewMode: false,
     /* 位置ズレ警告: 帳票id→そのセッションで既に目立つ警告を出したか／件数 */
     posWarnShown: new Set(), posWarnCounts: {},
+    versionData: null,   // /api/version の結果（バージョンバッジ・変更履歴モーダル用）
   };
 
   /* PSM 比較用パターン */
@@ -122,10 +123,91 @@
       S.serverReady = true;
       $('loadingOverlay').classList.add('hidden');
       UI.toast(`サーバーに接続しました（OCRエンジン: ${json.ocrEngine || '不明'}）`, 'success');
+      loadVersionInfo();
     } catch (e) {
       $('loadingMsg').innerHTML = `サーバーに接続できませんでした。ターミナルで <code>python run_server.py</code> を実行しているか確認してください。<br><small>${(e && e.message) ? e.message : e}</small>`;
       UI.toast('サーバーへの接続に失敗しました', 'error', 6000);
     }
+  }
+
+  /* 今動いているコードのバージョン・変更履歴を取得してヘッダーへ反映する。
+     「修正を伝えたが本当に反映されているか分からない」を無くすのが目的なので、
+     取得に失敗してもトーストは出さずヘッダーのバッジ表示だけで静かに知らせる。 */
+  async function loadVersionInfo() {
+    try {
+      const res = await fetch('/api/version');
+      const json = await res.json();
+      S.versionData = json;
+      UI.renderVersionBadge(json.current);
+    } catch (_) { UI.renderVersionBadge(null); }
+  }
+  function openVersionModal() {
+    UI.renderVersionModal(S.versionData || { current: null, history: [] });
+    $('versionModal').classList.remove('hidden');
+  }
+
+  /* ── 文字の取り違え表（全帳票共通、ユーザー編集可） ───────────
+     constraint.jsの組み込み表は「今扱っている帳票・書体」向けの経験則で、
+     別の帳票・書体を扱うようになると合わない/足りないペアが出てくる。
+     コードを直さずここから調整できるようにし、このブラウザ（localStorage）に
+     保存して次回起動時も引き継ぐ。起動直後にCharConstraint.setConfuseTable()
+     まで済ませる必要がある（それ以降のOCR結果の補正すべてに関わるため）。 */
+  const CONFUSE_KEY = 'ocrtool_confuse_overrides';
+  function loadConfuseOverrides() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CONFUSE_KEY) || 'null');
+      if (saved) CharConstraint.setConfuseTable(saved);
+    } catch (_) { /* 壊れていれば組み込み既定のまま（setConfuseTable未呼び出し）でよい */ }
+  }
+  function persistConfuseTable() {
+    try { localStorage.setItem(CONFUSE_KEY, JSON.stringify(CharConstraint.getConfuseTable())); } catch (_) {}
+  }
+  function renderConfuseModal() {
+    UI.renderConfuseTable(CharConstraint.getConfuseTable(), confuseRemoveCandidate, confuseRemoveChar);
+  }
+  function openConfuseModal() {
+    renderConfuseModal();
+    $('confuseModal').classList.remove('hidden');
+  }
+  function confuseRemoveCandidate(ch, cand) {
+    const t = CharConstraint.getConfuseTable();
+    if (!t[ch]) return;
+    t[ch] = t[ch].filter(c => c !== cand);
+    if (!t[ch].length) delete t[ch];
+    CharConstraint.setConfuseTable(t);
+    persistConfuseTable();
+    renderConfuseModal();
+  }
+  function confuseRemoveChar(ch) {
+    const t = CharConstraint.getConfuseTable();
+    delete t[ch];
+    CharConstraint.setConfuseTable(t);
+    persistConfuseTable();
+    renderConfuseModal();
+  }
+  function confuseAddPair() {
+    const chInp = $('confuseNewChar'), candInp = $('confuseNewCand');
+    const ch = chInp.value.trim(), cand = candInp.value.trim();
+    if (!ch || !cand) return UI.toast('「認識された文字」「本来の文字」の両方を入力してください', 'warning');
+    if ([...ch].length !== 1 || [...cand].length !== 1) return UI.toast('1文字ずつ入力してください', 'warning');
+    if (ch === cand) return UI.toast('同じ文字は登録できません', 'warning');
+    const t = CharConstraint.getConfuseTable();
+    const list = t[ch] || [];
+    if (list.includes(cand)) return UI.toast(`「${ch}」→「${cand}」はすでに登録されています`, 'info');
+    t[ch] = [...list, cand];
+    CharConstraint.setConfuseTable(t);
+    persistConfuseTable();
+    chInp.value = ''; candInp.value = '';
+    renderConfuseModal();
+    UI.toast(`「${ch}」→「${cand}」を追加しました`, 'success', 1800);
+    chInp.focus();
+  }
+  function resetConfuseTable() {
+    if (!confirm('文字の取り違え表を組み込みの既定値に戻します。ここまでの追加・削除はすべて失われます。よろしいですか？')) return;
+    CharConstraint.setConfuseTable(null);
+    try { localStorage.removeItem(CONFUSE_KEY); } catch (_) {}
+    renderConfuseModal();
+    UI.toast('既定の取り違え表に戻しました', 'info');
   }
 
   /* ── モード切替 ─────────────────────────────────────── */
@@ -162,7 +244,7 @@
     updateRepositionBanner();
     $('regCanvas').style.display = 'none'; $('regCanvasPlaceholder').style.display = 'flex';
     $('editorEmpty').classList.add('hidden'); $('editorForm').classList.remove('hidden');
-    UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly);
+    UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorRole);
     UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
     refreshSteps();
     setTimeout(() => $('formNameInput').focus(), 50);
@@ -182,7 +264,7 @@
     $('editorEmpty').classList.add('hidden'); $('editorForm').classList.remove('hidden');
     setDrawMode('anchor');
     updateRepositionBanner();
-    UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly);
+    UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorRole);
     UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
     await setReference(f.referenceImage.dataURL);
     refreshSteps();
@@ -230,7 +312,7 @@
         r.x = Math.round(r.x * sx); r.y = Math.round(r.y * sy);
         r.w = Math.max(1, Math.round(r.w * sx)); r.h = Math.max(1, Math.round(r.h * sy));
       });
-      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly);
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorRole);
       UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
       UI.toast(`基準画像のサイズが変わったため、目印${S.anchors.length}件・OCR領域${S.regions.length}件の位置を自動調整しました（${Math.round(sx * 100)}%）`, 'info', 4500);
     }
@@ -324,7 +406,7 @@
         crop.getContext('2d', { willReadFrequently: true }).drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
         Object.assign(a, { name, dataURL: crop.toDataURL('image/png'), w: p.w, h: p.h, refX: p.x, refY: p.y });
       }
-      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly);
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorRole);
     } else if (repos && repos.kind === 'region') {
       const r = S.regions.find(x => x.id === repos.id);
       if (r) Object.assign(r, { name, x: p.x, y: p.y, w: p.w, h: p.h });
@@ -334,7 +416,7 @@
       const crop = document.createElement('canvas'); crop.width = p.w; crop.height = p.h;
       crop.getContext('2d', { willReadFrequently: true }).drawImage(S.refImg, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
       S.anchors.push({ id: uid(), name, dataURL: crop.toDataURL('image/png'), w: p.w, h: p.h, refX: p.x, refY: p.y });
-      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly);
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorRole);
     } else {
       S.regions.push({ id: uid(), name, x: p.x, y: p.y, w: p.w, h: p.h });
       UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
@@ -344,14 +426,20 @@
     redrawRegCanvas(); refreshSteps();
     UI.toast(repos ? `「${name}」の範囲を更新しました` : `「${name}」を追加しました`, 'success', 1600);
   }
-  function removeAnchor(id) { S.anchors = S.anchors.filter(a => a.id !== id); UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly); redrawRegCanvas(); refreshSteps(); }
+  function removeAnchor(id) { S.anchors = S.anchors.filter(a => a.id !== id); UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorRole); redrawRegCanvas(); refreshSteps(); }
   function removeRegion(id) { S.regions = S.regions.filter(r => r.id !== id); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName); redrawRegCanvas(); refreshSteps(); }
   function setRegionPattern(id, val) { const r = S.regions.find(x => x.id === id); if (r) r.pattern = (val || '').trim(); }
   function setRegionGlobalName(id, val) { const r = S.regions.find(x => x.id === id); if (r) r.globalName = (val || '').trim(); }
   function renameAnchor(id, name) { const a = S.anchors.find(x => x.id === id); if (a) { a.name = name; redrawRegCanvas(); } }
-  /* 「位置合わせ専用」トグル: ONにするとこのアンカーは帳票の自動判定（classify/voting）
-     から外れ、位置合わせ（prepareの再ローカライズ）だけに使われる。 */
-  function setAnchorAlignOnly(id, val) { const a = S.anchors.find(x => x.id === id); if (a) { a.alignOnly = !!val; refreshSteps(); } }
+  /* 目印の役割を設定する。判定（classify/voting）と位置合わせ（prepareの再ローカライズ）は
+     それぞれ自分の役割を持つ目印だけを使う。旧フラグ alignOnly は role に一本化するため
+     取り除く（読み込み時の解釈は AnchorRoles.roleOf が担う）。 */
+  function setAnchorRole(id, role) {
+    const a = S.anchors.find(x => x.id === id);
+    if (!a) return;
+    a.role = role; delete a.alignOnly;
+    refreshSteps();
+  }
   function renameRegion(id, name) { const r = S.regions.find(x => x.id === id); if (r) { r.name = name; redrawRegCanvas(); } }
   function openRegionConstraintEditor(id) {
     const r = S.regions.find(x => x.id === id); if (!r) return;
@@ -400,7 +488,7 @@
       const name = prompt('識別アンカー名を入力', `アンカー${S.anchors.length + 1}`);
       if (name === null) return;
       S.anchors.push({ id: uid(), name: (name || 'アンカー').trim(), dataURL, w: img.naturalWidth, h: img.naturalHeight, refX: r.loc.x, refY: r.loc.y });
-      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly); redrawRegCanvas(); refreshSteps();
+      UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorRole); redrawRegCanvas(); refreshSteps();
       UI.toast(`自動配置しました（スコア ${r.score.toFixed(2)}, 位置 ${r.loc.x},${r.loc.y}）`, 'success', 3500);
     } catch (e) { UI.toast('処理に失敗しました: ' + e.message, 'error'); }
   }
@@ -414,10 +502,10 @@
   const ANCHOR_COLLISION_WARN = 0.45;   // voting.jsのacceptFloorと揃える（採用判定に効き得る水準）
   async function checkAnchorSimilarity() {
     if (!S.anchors.length) return UI.toast('目印を1つ以上登録してから実行してください', 'warning');
-    /* alignOnly（位置合わせ専用）は帳票判定に使わないので、他帳票との誤マッチが
-       起きても判定には影響しない＝この識別性チェックの対象外にする。 */
-    const classifyAnchors = S.anchors.filter(a => !a.alignOnly);
-    if (!classifyAnchors.length) return UI.toast('帳票判定に使う目印がありません（すべて「位置合わせ専用」です）', 'info', 5000);
+    /* 「位置合わせのみ」は帳票判定に使わないので、他帳票との誤マッチが起きても判定には
+       影響しない＝この識別性チェックの対象外にする。 */
+    const classifyAnchors = S.anchors.filter(AnchorRoles.usedForClassify);
+    if (!classifyAnchors.length) return UI.toast('帳票判定に使う目印がありません（すべて「位置合わせのみ」です）', 'info', 5000);
     const others = S.forms.filter(f => f.id !== S.editingId && f.referenceImage && f.referenceImage.dataURL);
     if (!others.length) return UI.toast('比較できる他の帳票がありません（先に複数の帳票を登録してください）', 'info');
     UI.toast('他の帳票との類似度を確認中…', 'info', 2500);
@@ -444,6 +532,56 @@
     UI.toast(nWarn
       ? `${nWarn} 件の目印で他の帳票との高い類似度を検出しました（一覧に表示）`
       : '他の帳票との高い類似度は検出されませんでした', nWarn ? 'warning' : 'success', 4500);
+  }
+
+  /* ── 目印のページ内一意性チェック（位置合わせの信頼性） ──
+     「他の帳票との類似度」が判定用アンカーの要件を見るのに対し、こちらは位置合わせ用
+     アンカーの要件＝同じページ内に紛らわしい相手がいないかを見る。帳票は同じ形の枠や
+     罫線交点が並ぶため、罫線と余白だけを切り取った目印は他の枠と区別が付かず、実運用で
+     別の場所へ一致して位置合わせを壊す（アンカー分布の端の点が誤マッチすると、その軸の
+     倍率だけが潰れる）。登録段階でその危険を可視化する。 */
+  /* 次点ピークが最良のこの割合以上に迫っていたら危険/注意。
+     この照合は基準画像そのものに対して行うため最良ピークはほぼ満点＝最良条件での測定に
+     なる。実際の入力ではノイズ・印刷ズレ・倍率差で両者とも劣化し差は縮むため、ここで
+     僅差なら実運用では容易に順位が入れ替わる。したがって厳しめに倒す。 */
+  const UNIQ_DANGER_RATIO = 0.85;
+  const UNIQ_WARN_RATIO   = 0.70;
+  function uniquenessVerdict(r) {
+    if (!r.best) return { level: null, text: '' };
+    const ratio = r.second / r.best;
+    const pct = Math.round(r.second * 100);
+    if (ratio >= UNIQ_DANGER_RATIO) return { level: 'danger', text: `ページ内に酷似 ${pct}%` };
+    if (ratio >= UNIQ_WARN_RATIO)   return { level: 'warn',   text: `紛らわしい ${pct}%` };
+    return { level: null, text: '' };
+  }
+  async function checkAnchorUniqueness() {
+    if (!S.anchors.length) return UI.toast('目印を1つ以上登録してから実行してください', 'warning');
+    if (!S.refImg) return UI.toast('先に基準画像を読み込んでください', 'warning');
+    if (!S.serverReady) return UI.toast('サーバーに接続中です', 'warning');
+    /* ページ内での一意性が要るのは位置合わせ用の目印だけ。判定はスコアの高さだけを見て
+       ページ内のどこで一致したかは問わないため、「帳票判定のみ」の目印は対象外にする。 */
+    const alignAnchors = S.anchors.filter(AnchorRoles.usedForAlign);
+    if (!alignAnchors.length) return UI.toast('位置合わせに使う目印がありません（すべて「帳票判定のみ」です）', 'info', 5000);
+    UI.toast('ページ内での一意性を確認中…', 'info', 2500);
+    try {
+      const templates = await Promise.all(alignAnchors.map(async a => ({
+        id: a.id, imageElement: await dataURLtoImg(a.dataURL),
+      })));
+      const results = await MatcherEngine.checkUniqueness(canvasFromImg(S.refImg), templates);
+      UI.renderAnchorUniqueness(results, uniquenessVerdict);
+      let danger = 0, warn = 0;
+      results.forEach(r => {
+        const v = uniquenessVerdict(r);
+        if (v.level === 'danger') danger++; else if (v.level === 'warn') warn++;
+      });
+      if (danger) {
+        UI.toast(`⚠ ${danger} 件の目印がページ内の別の場所と酷似しています（一覧に表示）。位置合わせが別の場所に吸い寄せられる恐れがあります。枠や罫線だけでなく、文字を含む範囲へ描き直してください。`, 'warning', 15000);
+      } else if (warn) {
+        UI.toast(`${warn} 件の目印にやや紛らわしい相手がページ内にあります（一覧に表示）。文字を含めるとより安定します。`, 'warning', 9000);
+      } else {
+        UI.toast('すべての目印はページ内で十分に一意です', 'success', 4500);
+      }
+    } catch (e) { UI.toast('処理に失敗しました: ' + (e.message || e), 'error', 6000); }
   }
 
   /* ── 罫線除去パラメータ UI 連携 ─────────────────────── */
@@ -499,7 +637,10 @@
     if (!name) { $('formNameInput').focus(); return UI.toast('帳票名を入力してください', 'warning'); }
     if (!S.refImg) return UI.toast('基準画像を設定してください', 'warning');
     if (!S.anchors.length) return UI.toast('識別アンカーを1つ以上設定してください', 'warning');
-    if (!S.anchors.some(a => !a.alignOnly)) return UI.toast('帳票判定に使うアンカーが必要です。少なくとも1つは「位置合わせ専用」を外してください', 'warning', 5000);
+    /* 判定と位置合わせは別工程なので、それぞれに最低1つ必要（どちらかが0だとその工程が
+       成立しない）。 */
+    if (!S.anchors.some(AnchorRoles.usedForClassify)) return UI.toast('帳票判定に使う目印がありません。少なくとも1つを「判定＋位置合わせ」か「帳票判定のみ」にしてください', 'warning', 6000);
+    if (!S.anchors.some(AnchorRoles.usedForAlign)) return UI.toast('位置合わせに使う目印がありません。少なくとも1つを「判定＋位置合わせ」か「位置合わせのみ」にしてください', 'warning', 6000);
     if (!S.regions.length) return UI.toast('OCR領域を1つ以上設定してください', 'warning');
 
     const form = {
@@ -550,7 +691,7 @@
         S.refNatW = 0; S.refNatH = 0;   // 通常読み込みでは自動スケール調整を発動させない（setReference参照）
         $('formNameInput').value = f.name;
         applyLineRemovalToUI(f.lineRemoval); $('regPsm').value = String(f.ocrSettings.psm);
-        UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorAlignOnly); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
+        UI.renderAnchorList(S.anchors, removeAnchor, renameAnchor, startRepositionAnchor, setAnchorRole); UI.renderRegionList(S.regions, removeRegion, setRegionPattern, openRegionConstraintEditor, renameRegion, startRepositionRegion, setRegionGlobalName);
         await setReference(f.referenceImage.dataURL);
         UI.toast('サンプルレイアウトを読み込みました。確認して保存してください', 'info', 4000);
       });
@@ -646,12 +787,22 @@
        （＝スコア自体は悪くなくても位置精度が落ちる）。scaleEdge/weakMatchのスコア閾値
        だけでは検出できないため、目印数からも独立して案内する。 */
     const singleAnchor = (form.anchors || []).length <= 1;
-    if (!(matchQuality.scaleEdge || matchQuality.weakMatch || singleAnchor)) return;
+    const dropped = matchQuality.droppedOutliers || 0;
+    if (!(matchQuality.scaleEdge || matchQuality.weakMatch || singleAnchor || dropped)) return;
     S.posWarnCounts[form.id] = (S.posWarnCounts[form.id] || 0) + 1;
     if (S.posWarnShown.has(form.id)) return;
     S.posWarnShown.add(form.id);
     const pct = Math.round((matchQuality.bestScale || 1) * 100);
     const scoreIssue = matchQuality.weakMatch || matchQuality.scaleEdge;
+    /* 誤マッチを除外できた場合は、位置合わせ自体は残りの目印で成立している。
+       ただし原因（他と見分けの付かない目印）は残るので、作り直しを促す。 */
+    if (dropped && !scoreIssue) {
+      UI.toast(
+        `⚠ 「${form.name}」: 目印${dropped}個が別の場所に一致したため、位置合わせから除外しました（残りの目印で位置合わせ済み）。枠や罫線だけの目印は他の四角と見分けが付きません。文字を含む範囲に描き直すと安定します。`,
+        'warning', 15000
+      );
+      return;
+    }
     if (!scoreIssue) {
       /* スコア上は問題なし＝「壊れている」わけではないので警告ではなく助言として出す。
          2つ目を足すだけでも「1点頼み」からは脱するが、広い識別用アンカー＋狭い精密用
@@ -1157,6 +1308,47 @@
     navigator.clipboard.writeText(lines.join('\n')).then(() => UI.toast('全フィールドをコピーしました', 'success')).catch(() => UI.toast('コピーに失敗しました', 'error'));
   }
 
+  /* ── 診断情報をコピー ────────────────────────────────
+     速度・精度の問題を報告する際、これまではDevToolsのConsoleとサーバーのターミナルを
+     別々に開いて該当ログを自分で探す必要があった。この app.js の console.log 呼び出しは
+     [perf]/[align] 診断ログのみ（他の用途に使っていない）なので、diag_log.js が
+     溜めているブラウザ側の直近ログと、サーバー側の直近ログ（/api/diagnostics、
+     matcher.py/app.py の [perf] 出力を applog.py が保持）をまとめて1回のコピーで
+     渡せるようにする。DevToolsを開く必要自体を無くすのが狙い。 */
+  async function copyDiagnostics() {
+    const parts = [
+      '=== OCRtool2 診断情報 ===',
+      `生成日時: ${new Date().toLocaleString('ja-JP')}`,
+      `画面: ${navigator.userAgent}`,
+      '',
+    ];
+    try {
+      const res = await fetch('/api/diagnostics');
+      const json = await res.json();
+      parts.push(`--- サーバー (OpenCV ${json.opencvVersion || '?'} / ${json.ocrEngine || '?'} ${json.tesseractVersion || ''} / CPU${json.cpuCount || '?'}) ---`);
+      /* tesserocrを入れたはずなのにpytesseractへフォールバックしたままの場合、理由を
+         毎回このコピーだけで追えるようにする（「pythonで直接importして再現して
+         ください」という往復を無くすため。ocr_server.py health_info()参照）。 */
+      if (json.tesserocrUnavailableReason) parts.push(`[warn] tesserocrが使われていません: ${json.tesserocrUnavailableReason}`);
+      /* 健全なら概ね50〜150ms。これより大きい場合、機械側の要因（他プロセスの負荷・
+         サーマルスロットリング等）でこのサーバー全体が遅くなっている可能性が高い。 */
+      if (typeof json.calibrationNowMs === 'number') parts.push(`[health] 今の校正値=${json.calibrationNowMs}ms（健全な目安: 50〜150ms）`);
+      parts.push(...(json.serverLog && json.serverLog.length ? json.serverLog : ['(ログなし。サーバーが未起動か、まだ何も実行していません)']));
+    } catch (_) {
+      parts.push('--- サーバー ---', '(取得できませんでした。サーバーに接続できているか確認してください)');
+    }
+    parts.push('', '--- ブラウザ ---');
+    const clientLog = DiagLog.recent();
+    parts.push(...(clientLog.length ? clientLog : ['(ログなし。問題が起きた操作をもう一度行ってから押してください)']));
+
+    try {
+      await navigator.clipboard.writeText(parts.join('\n'));
+      UI.toast('診断情報をコピーしました。会話にそのまま貼り付けてください', 'success', 4000);
+    } catch (_) {
+      UI.toast('コピーに失敗しました', 'error');
+    }
+  }
+
   /* ════════════════════════════════════════════════════
      複数ページ一括OCR（PDFの全ページ）
      ════════════════════════════════════════════════════ */
@@ -1262,9 +1454,17 @@
     /* idx件処理済み時点での「残り推定時間」の文字列（実測が無い最初の1件目は算出不可） */
     const etaText = idx => idx < 1 ? '' : `（残り約${formatDuration((Date.now() - batchStartTime) / idx * (total - idx))}）`;
     /* タブを離れて放置した場合にChromeのバックグラウンドタイマー間引きが起きていないか
-       ログで裏付けられるよう、一括処理中だけ可視状態の変化を記録する。 */
-    const onVisChange = () => console.log(`[perf] visibilitychange hidden=${document.hidden} at ${Date.now() - batchStartTime}ms`);
+       ログで裏付けられるよう、一括処理中だけ可視状態の変化を記録する。
+       実測（[perf] rasterize ログ）で、hidden中はPDFのラスタライズ(canvas描画)だけが
+       ブラウザの省電力機能により大幅に遅延する（同じ区間でもサーバー側のOCR/判定は
+       正常な速度のまま）ことを確認済み。処理を速くする手立てはこちら側には無い
+      （ブラウザの挙動）ため、タブを離れないよう促す注意書きを表示する。 */
+    const onVisChange = () => {
+      console.log(`[perf] visibilitychange hidden=${document.hidden} at ${Date.now() - batchStartTime}ms`);
+      UI.setBatchBgWarn(review, document.hidden);
+    };
     document.addEventListener('visibilitychange', onVisChange);
+    UI.setBatchBgWarn(review, document.hidden);   // 開始時点で既にhiddenの場合も反映
 
     let cur = ocrAt(0);                          // 先頭ページのOCRを先行開始
     try {
@@ -1296,6 +1496,7 @@
       }
     } finally {
       document.removeEventListener('visibilitychange', onVisChange);
+      UI.setBatchBgWarn(review, false);
       /* 詳細ペインでのページ送り用に PDF を保持するため、ここでは破棄しない */
     }
     if (review) reviewBatchClose();              // 確認カルーセルを閉じてからサマリを出す（重なり防止）
@@ -1899,11 +2100,16 @@
       forms.forEach(f => { const o = document.createElement('option'); o.value = f.id; o.textContent = `${f.name}（${f.count}件）`; sel.appendChild(o); });
       const allOpt = document.createElement('option'); allOpt.value = ''; allOpt.textContent = `すべての帳票（${rows.length}件・共通名(任意)を設定した項目はまとめて照合できます）`;
       sel.appendChild(allOpt);
-      sel.value = forms[0].id;   // 既定は最新の結果が属する帳票（rowsは新しい順）
+      /* 既定は「すべての帳票」。以前は最新の結果が属する帳票だけに絞っていたが、
+         帳票を編集・再保存するとformIdが変わり別集計になることがあり、30件OCRした
+         のに気づかず10件（最新のformId分）しか照合されない事故があった。件数の
+         絞り込みは意図的に選ぶ操作であるべきで、黙って一部だけに絞られる状態を
+         既定にしない。 */
+      sel.value = '';
     } else {
       row.classList.add('hidden');
     }
-    recRebuildOcrSide(forms.length > 1 ? forms[0].id : '');
+    recRebuildOcrSide('');
     recFill('recExtKey', []); recFill('recExtVal', ['(なし)']);
     if (S.recLastSettings) {
       $('recNumeric').checked = !!S.recLastSettings.numeric;
@@ -2383,6 +2589,8 @@
 
   /* ── Init ───────────────────────────────────────────── */
   function init() {
+    /* OCR結果の補正（correctChar）に関わるため、他の何よりも先に済ませておく。 */
+    loadConfuseOverrides();
     initAccordions(); initRegSliders(); initRegCanvasEvents(); initDbgControls(); initRrPan();
     CharRuleEditor.init();
     PdfImport.init();
@@ -2408,6 +2616,7 @@
     setupDrop('anchorDropZone', f => acceptFile(f, useAsAnchor), 'anchorFileInput');
     $('anchorFileInput').addEventListener('change', e => { const f = e.target.files[0]; if (f) acceptFile(f, useAsAnchor); e.target.value = ''; });
     $('btnCheckAnchorSimilarity').addEventListener('click', checkAnchorSimilarity);
+    $('btnCheckAnchorUniqueness').addEventListener('click', checkAnchorUniqueness);
     $('regBinaryMethod').addEventListener('change', updateBinaryRows);
 
     /* 描画 */
@@ -2541,6 +2750,18 @@
     $('closeSampleFormModal').addEventListener('click', () => $('sampleFormModal').classList.add('hidden'));
     $('sampleFormModal').addEventListener('click', e => { if (e.target === $('sampleFormModal')) $('sampleFormModal').classList.add('hidden'); });
     $('btnHelp').addEventListener('click', () => $('helpModal').classList.remove('hidden'));
+    $('btnCopyDiagnostics').addEventListener('click', copyDiagnostics);
+    $('btnVersion').addEventListener('click', openVersionModal);
+    $('closeVersionModal').addEventListener('click', () => $('versionModal').classList.add('hidden'));
+    $('versionModal').addEventListener('click', e => { if (e.target === $('versionModal')) $('versionModal').classList.add('hidden'); });
+    $('btnConfuseTable').addEventListener('click', openConfuseModal);
+    $('closeConfuseModal').addEventListener('click', () => $('confuseModal').classList.add('hidden'));
+    $('confuseModal').addEventListener('click', e => { if (e.target === $('confuseModal')) $('confuseModal').classList.add('hidden'); });
+    $('confuseAddPair').addEventListener('click', confuseAddPair);
+    $('confuseResetDefault').addEventListener('click', resetConfuseTable);
+    [$('confuseNewChar'), $('confuseNewCand')].forEach(inp => {
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); confuseAddPair(); } });
+    });
     $('closeHelpModal').addEventListener('click', () => $('helpModal').classList.add('hidden'));
     $('helpModal').addEventListener('click', e => { if (e.target === $('helpModal')) $('helpModal').classList.add('hidden'); });
     document.addEventListener('keydown', e => {

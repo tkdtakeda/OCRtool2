@@ -39,6 +39,15 @@
   </div>
 
   <nav class="header-nav">
+    <button id="btnVersion" class="ver-badge" title="今動いているコードのバージョンを確認・変更履歴を見る">
+      <i class="fas fa-code-branch"></i> <span id="verBadgeText">v.----</span>
+    </button>
+    <button id="btnCopyDiagnostics" class="btn btn-icon" title="速度・精度の問題を報告するとき用。サーバーとブラウザの直近ログをまとめてコピーします（DevToolsを探す必要はありません）">
+      <i class="fas fa-clipboard-list"></i>
+    </button>
+    <button id="btnConfuseTable" class="btn btn-icon" title="文字の取り違え表（OCRが読み間違えやすい文字の対応）を確認・編集します。すべての帳票に共通で使われます">
+      <i class="fas fa-font"></i>
+    </button>
     <button id="btnSettings" class="btn btn-icon" title="設定（判定しきい値・マッチング精度）">
       <i class="fas fa-gear"></i>
     </button>
@@ -242,6 +251,7 @@
             <div class="list-hdr">
               <span class="dot dot-anchor"></span> 目印（アンカー） <span id="anchorCount" class="list-count">0</span>
               <button type="button" id="btnCheckAnchorSimilarity" class="btn btn-ghost btn-xs list-hdr-act" title="各目印を他の登録済み帳票の基準画像と照合し、紛らわしい（高スコアで一致してしまう）目印がないか確認します"><i class="fas fa-shield-halved"></i> 他の帳票との類似度をチェック</button>
+              <button type="button" id="btnCheckAnchorUniqueness" class="btn btn-ghost btn-xs list-hdr-act" title="各目印をこの帳票自身の基準画像と照合し、ページ内に酷似した場所がないか確認します。位置合わせ用の目印は「ページ内で一意」であることが必要で、罫線や枠だけの目印は他の枠と区別が付かず、別の場所へ一致して位置合わせを壊します"><i class="fas fa-clone"></i> ページ内での一意性をチェック</button>
             </div>
             <div id="anchorList" class="mini-list"><div class="mini-empty">未登録</div></div>
           </div>
@@ -494,6 +504,45 @@
 </div>
 
 <!-- ヘルプ / 設計思想モーダル -->
+<!-- バージョン・変更履歴（今動いているコードが最新の修正を含んでいるかを確認する用） -->
+<div class="modal-overlay hidden" id="versionModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr"><h2><i class="fas fa-code-branch"></i> バージョン・変更履歴</h2>
+      <button class="modal-close" id="closeVersionModal"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <div id="verCurrentBox" class="ver-current"></div>
+      <h3 class="ver-hist-title">変更履歴（新しい順）</h3>
+      <div id="verHistoryList" class="ver-hist-list"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="confuseModal">
+  <div class="modal modal--lg">
+    <div class="modal-hdr"><h2><i class="fas fa-font"></i> 文字の取り違え表</h2>
+      <button class="modal-close" id="closeConfuseModal"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="modal-bdy">
+      <p class="confuse-desc">
+        OCR結果を文字制約（許可文字・桁数）に合わせて自動補正するとき、「実際に認識された文字」→「本来あり得る候補」の対応を調べる表です。
+        <b>すべての帳票に共通して適用されます</b>（特定の帳票・欄だけに効く読み替えは、各帳票のOCR領域設定にある「読み替え」を使ってください）。
+        ここでの変更はこのブラウザに保存され、次回起動時も引き継がれます。
+      </p>
+      <div class="confuse-toolbar">
+        <button id="confuseResetDefault" class="btn btn-ghost btn-sm"><i class="fas fa-rotate-left"></i> 既定に戻す</button>
+      </div>
+      <div class="confuse-add-row">
+        <input id="confuseNewChar" class="confuse-char-input" maxlength="1" placeholder="認識された文字" spellcheck="false">
+        <span class="confuse-arrow">→</span>
+        <input id="confuseNewCand" class="confuse-char-input" maxlength="1" placeholder="本来の文字" spellcheck="false">
+        <button id="confuseAddPair" class="btn btn-primary btn-sm"><i class="fas fa-plus"></i> 追加</button>
+      </div>
+      <div id="confuseList" class="confuse-list"></div>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay hidden" id="helpModal">
   <div class="modal modal--lg">
     <div class="modal-hdr"><h2><i class="fas fa-circle-question"></i> 使い方と設計思想</h2>
@@ -876,6 +925,7 @@
       <button class="modal-close" id="reviewClose"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="modal-bdy">
+      <div id="reviewBgWarn" class="reposition-banner hidden"><i class="fas fa-triangle-exclamation"></i> <span>このタブを離れている間、ブラウザの省電力機能によりPDFの読み込みが大幅に遅くなります。処理中はこのタブを表示したままにしてください。</span></div>
       <div id="reviewBatchBar" class="review-batch-bar hidden">
         <div class="ocr-progress-track"><div id="reviewBatchFill" class="ocr-progress-fill"></div></div>
         <span id="reviewBatchMsg" class="ocr-progress-msg"></span>
@@ -962,6 +1012,7 @@
       <button class="modal-close" id="batchClose"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="modal-bdy">
+      <div id="batchBgWarn" class="reposition-banner hidden"><i class="fas fa-triangle-exclamation"></i> <span>このタブを離れている間、ブラウザの省電力機能によりPDFの読み込みが大幅に遅くなります。処理中はこのタブを表示したままにしてください。</span></div>
       <div id="batchProgress" class="recog-progress">
         <div class="ocr-progress-track"><div id="batchProgressFill" class="ocr-progress-fill"></div></div>
         <span id="batchProgressMsg" class="ocr-progress-msg">処理中…</span>
@@ -983,6 +1034,9 @@
 
 <!-- Toast -->
 <div id="toastContainer" class="toast-container"></div>
+<!-- diag_log.js は他の全スクリプトより先に読み込む（console.log呼び出しを
+     1件も取りこぼさず診断バッファへ残すため）。 -->
+<script src="diag_log.js"></script>
 <!-- OCR・画像マッチングはPythonサーバー側（app.py等）へ移管したため、
      以前ここにあったOpenCV.js/Tesseract.jsのCDN読み込みは不要になった。
      PDFのページ画像化にのみ使うpdf.jsだけ残す。 -->
@@ -994,6 +1048,7 @@
 <script src="constraint.js"></script>
 <!-- logic -->
 <script src="db.js"></script>
+<script src="anchor_roles.js"></script>
 <script src="voting.js"></script>
 <script src="recognizer.js"></script>
 <script src="sample_forms.js"></script>
