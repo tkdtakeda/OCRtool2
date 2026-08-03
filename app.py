@@ -187,12 +187,19 @@ def create_app() -> Flask:
                 for t in (body.get('templates') or [])
             ]
             results = matcher.self_uniqueness(full_rgba, templates)
+            # 既定の一意性チェック(results)は等倍のみ。呼び出し側が scales を渡した
+            # 場合だけ追加でマルチスケール走査(scan_scales)も行う（コストが数倍に
+            # 増えるため、常時は実行しない。matcher.scan_scales のdocstring参照）。
+            scan = None
+            scales = body.get('scales')
+            if scales:
+                scan = matcher.scan_scales(full_rgba, templates, [float(s) for s in scales])
             applog.log(f'[perf] /api/anchor-uniqueness {(time.perf_counter() - t0) * 1000:.0f}ms '
-                  f'(templates={len(templates)})')
-            return jsonify({'results': results, 'error': None})
+                  f'(templates={len(templates)}, scales={len(scales) if scales else 0})')
+            return jsonify({'results': results, 'scan': scan, 'error': None})
         except Exception as e:  # noqa: BLE001 - JS側は必ずerrorを見て例外化する
             applog.log(f'[perf] /api/anchor-uniqueness failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
-            return jsonify({'results': {}, 'error': str(e)})
+            return jsonify({'results': {}, 'scan': None, 'error': str(e)})
 
     # ── 傾き補正（LineRemovalProcessor.rotateCanvas 相当） ──
     @app.post('/api/rotate')

@@ -130,6 +130,10 @@
 .anchor-unique-warn { display: inline-flex; align-items: center; gap: 4px; font-size: .66rem; font-weight: 700; border-radius: 8px; padding: 1px 7px; white-space: nowrap; cursor: help; }
 .anchor-unique-warn.is-danger { color: #991B1B; background: #FEE2E2; }
 .anchor-unique-warn.is-warn   { color: #92400E; background: #FEF3C7; }
+/* 他倍率での一致（参考値・自動判定なし）チップ。danger/warnと違い「危険」と断定しない
+   中立色にする（縮小方向のスケールでは補間ノイズにより弱い相関が偶然出ることがあり、
+   警告色にすると誤解を招くため。studio_ui.js renderAnchorUniqueness参照）。 */
+.anchor-scale-scan { display: inline-flex; align-items: center; gap: 4px; font-size: .66rem; font-weight: 700; color: var(--c-text-2); background: var(--c-surface2); border: 1px solid var(--c-border-dk); border-radius: 8px; padding: 1px 7px; white-space: nowrap; cursor: help; }
 .mini-list { display: flex; flex-direction: column; gap: 4px; }
 .mini-empty { font-size: .72rem; color: var(--c-text-3); padding: 6px; text-align: center; }
 /* 名前を最優先で読めるようにする: 位置表示・ボタンは幅固定（縮めない）にして、
@@ -623,6 +627,13 @@
 .rec-ocr-sample-img { max-width: 100%; max-height: 46px; object-fit: contain; }
 .rec-ocr-sample-empty { font-size: .7rem; color: var(--c-text-3); }
 .rec-run-row { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+/* ②の直後（プリセット行の真下）に置く実行ボタン。キー/値カードは<details>で
+   折りたたみ、プリセットで前回設定が自動復元される通常時はスクロールせずに
+   すぐ実行できるようにする。 */
+.rec-run-row--top { margin: 2px 0 12px; }
+.rec-settings-details { margin-bottom: 12px; }
+.rec-settings-details summary { display: flex; align-items: center; gap: 7px; }
+.rec-settings-details .rec-settings { padding: 10px 12px 2px; margin-bottom: 0; }
 .rec-summary { font-size: .82rem; color: var(--c-text-2); padding: 8px 11px; background: var(--c-surface2); border: 1px solid var(--c-border); border-radius: var(--r-sm); margin-bottom: 10px; }
 .rec-result-tbl td:last-child { text-align: center; font-weight: 700; font-size: .9rem; }
 .rv-ok { color: var(--c-suc); } .rv-no { color: var(--c-err); } .rv-miss { color: var(--c-text-3); }
@@ -672,3 +683,41 @@
 .onboard-text b { color: var(--c-pri-dk); }
 .onboard-bar .btn-icon-sm { width: 26px; height: 26px; border-radius: 50%; color: var(--c-text-3); }
 .onboard-bar .btn-icon-sm:hover { background: #fff; color: var(--c-err); }
+
+/* ── 診断情報ビュー（diag_viewer.js） ─────────────────── */
+.diag-head { font-size: .74rem; color: var(--c-text-3); font-family: 'IBM Plex Mono', monospace; margin-bottom: 10px; line-height: 1.6; word-break: break-all; }
+.diag-loading { color: var(--c-text-3); font-size: .85rem; padding: 20px; text-align: center; }
+.diag-subhdr { font-size: .85rem; font-weight: 700; color: var(--c-text); margin: 16px 0 8px; }
+.diag-note { font-size: .74rem; color: var(--c-text-3); margin: -4px 0 8px; line-height: 1.5; }
+.diag-mono { font-family: 'IBM Plex Mono', monospace; font-size: .76rem; }
+
+.diag-align-block { border: 1px solid var(--c-border); border-radius: var(--r-sm); padding: 10px 12px; margin-bottom: 12px; background: var(--c-surface2); }
+.diag-align-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+.diag-scale-big { font-size: 1.05rem; font-weight: 700; color: var(--c-text); font-family: 'IBM Plex Mono', monospace; }
+.diag-scale-big.diag-text-bad { color: var(--c-err); }
+
+.diag-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+.diag-table th { text-align: left; padding: 4px 8px; color: var(--c-text-3); font-weight: 700; font-size: .68rem; text-transform: uppercase; letter-spacing: .02em; border-bottom: 1px solid var(--c-border-dk); }
+.diag-table td { padding: 4px 8px; border-bottom: 1px solid var(--c-border); color: var(--c-text-2); }
+.diag-table tr:last-child td { border-bottom: none; }
+.diag-table-sm { margin-top: 4px; }
+.diag-row-dropped { opacity: .55; }
+.diag-row-bad { background: #FEF2F2; }
+.diag-text-bad { color: var(--c-err); font-weight: 700; }
+.diag-tag-used { color: var(--c-suc); font-size: .68rem; font-weight: 700; }
+.diag-tag-dropped { color: var(--c-text-3); font-size: .68rem; font-weight: 700; }
+
+.diag-warn-box { display: flex; align-items: flex-start; gap: 8px; background: #FFFBEB; border: 1px solid #FDE68A; color: #92400E; border-radius: var(--r-sm); padding: 8px 12px; font-size: .78rem; line-height: 1.6; margin: 8px 0; }
+.diag-warn-box i { margin-top: 2px; flex-shrink: 0; }
+.diag-warn-box--err { background: #FEF2F2; border-color: #FECACA; color: var(--c-err); }
+
+.diag-ocr-card { border: 1px solid var(--c-border); border-radius: var(--r-sm); padding: 8px 12px; margin-bottom: 8px; background: var(--c-surface2); }
+.diag-ocr-name { font-weight: 700; font-size: .82rem; color: var(--c-text); margin-bottom: 4px; }
+.diag-ocr-lines { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.diag-ocr-lines li { font-family: 'IBM Plex Mono', monospace; font-size: .72rem; color: var(--c-text-2); word-break: break-all; }
+
+.diag-details { margin-top: 10px; border: 1px solid var(--c-border); border-radius: var(--r-sm); overflow: hidden; }
+.diag-details summary { cursor: pointer; padding: 8px 12px; font-size: .8rem; font-weight: 700; color: var(--c-text-2); background: var(--c-surface2); user-select: none; }
+.diag-details[open] summary { border-bottom: 1px solid var(--c-border); }
+.diag-raw { max-height: 260px; overflow-y: auto; padding: 8px 12px; font-family: 'IBM Plex Mono', monospace; font-size: .7rem; color: var(--c-text-3); line-height: 1.6; }
+.diag-raw div { white-space: pre-wrap; word-break: break-all; }

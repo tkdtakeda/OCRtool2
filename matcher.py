@@ -68,6 +68,18 @@ try:
 except ValueError:
     pass
 
+# 探索画像を「元より大きくしない」最適化のON/OFF（既定ON）。
+# スケール f の探索は「テンプレ固定・探索画像を 1/f 倍」で行っていたが、f<1 では
+# 探索画像が巨大化し、matchTemplateのコストが跳ね上がる（実測: f=0.546 で
+# 1画像あたり646ms、f=1.0 の75msに対して8.6倍）。幾何的な対応関係は
+# 「探索画像を1/f倍して原寸テンプレと照合」＝「探索画像は原寸のままテンプレをf倍に縮小」
+# で同じなので、f<1 のときは後者に切り替える（f>=1 は元々探索画像が縮む側なので現行のまま）。
+# 実測: スコア差は最大0.028、一致位置の差は最大6px、真の位置の当て方は同等以上
+# （むしろ拡大補間によるボケが無い分ピーク値は上がる: 0.9565→0.9842）。
+# 帳票判定(voting.js)の順位・採否が変わらないことを複数帳票の合成テストで確認済み。
+# 万一この変更で判定挙動が変わった場合は OCRTOOL_MATCH_NO_UPSCALE=0 で即座に旧挙動へ戻せる。
+NO_UPSCALE = os.environ.get('OCRTOOL_MATCH_NO_UPSCALE', '1') not in ('0', 'false', 'False')
+
 
 # ── 校正プローブ（診断用・既定OFF） ────────────────────────
 # コストが既知の基準測定。固定サイズの合成画像に対して matchTemplate を1回だけ実行し、
@@ -228,6 +240,72 @@ def self_uniqueness(full_rgba: np.ndarray, templates: list[dict[str, Any]]) -> d
     return out
 
 
+def scan_scales(full_rgba: np.ndarray, templates: list[dict[str, Any]],
+                 scale_factors: list[float]) -> dict[str, list[dict[str, Any]]]:
+    """各テンプレートについて、指定した各スケールで基準画像内のどこかに強い一致が
+    ないかを調べる（self_uniquenessとは別の、マルチスケール専用の補助関数）。
+
+    背景: self_uniqueness は登録スケール(1.0)でしか基準画像内を照合しないため、
+    「等倍では一意だが、他のスケールでは基準画像内の別の場所と酷似する」目印を
+    見逃す。実際に、等倍チェックで「一意」と判定された目印が、単体だけでの
+    実行時マッチングで77%スケールにて基準画像内の別の場所に高スコアで一致して
+    しまい、位置合わせが大きく破綻した実例がある（複数の目印が絡んだ多数決の
+    問題ではなく、1個の目印だけでも起きた）。
+
+    一方、サンドボックスでの合成テストにより、縮小方向のスケールでは画像補間の
+    影響で、紛らわしい相手が実在しないテンプレートでも弱い誤検知(corr≈0.5前後)
+    が起こりうることも分かっている。閾値だけで「危険/安全」を自動判定すると、
+    他の（問題ない）帳票にまで誤警告を広げる恐れがあるため、ここでは危険度の
+    判定は一切行わず、各スケールでの最良一致（スコアと位置）という生の数値だけを
+    返す。危険かどうかの最終判断は呼び出し側（UI経由で利用者）に委ねる。
+
+    self_uniqueness と違い次点(second)は求めない（「このスケールで基準画像の
+    どこかに強い一致があるか」だけが関心事で、次点の要否は等倍の一意性判定
+    （既存のself_uniqueness）が別途担っているため）。
+
+    戻り値: { id: [ {"scale","best","bestLoc"}, ... ] }  各テンプレートについて
+            scale_factors の順（＝呼び出し側の並び）そのまま。
+    """
+    full_gray_orig = _to_gray(full_rgba)
+    tpl_mats = []
+    for t in templates:
+        g = _to_gray(t['rgba'])
+        tpl_mats.append({'id': t['id'], 'mat': g, 'std': _std_dev_of(g)})
+
+    # スケールごとの探索画像を先に作る（match_all と同じ考え方。テンプレート固定・
+    # 基準画像側を 1/f 倍することで、実際の認識(prepare)と同じ向きの探索にする）。
+    prepared: list[tuple[float, np.ndarray]] = []
+    for f in scale_factors:
+        scaled = full_gray_orig if abs(f - 1) < 1e-6 else _resize_gray(full_gray_orig, 1.0 / f)
+        prepared.append((f, scaled))
+
+    def _one(f: float, full_gray: np.ndarray, tm: dict[str, Any]) -> dict[str, Any] | None:
+        tpl, th, tw = tm['mat'], tm['mat'].shape[0], tm['mat'].shape[1]
+        if th > full_gray.shape[0] or tw > full_gray.shape[1]:
+            return None
+        res = cv2.matchTemplate(full_gray, tpl, cv2.TM_CCOEFF_NORMED)
+        _, corr, _, loc = cv2.minMaxLoc(res)
+        x, y = loc
+        window_std = _std_dev_of(full_gray[y:y + th, x:x + tw])
+        reliability = min(_std_ramp(tm['std']), _std_ramp(window_std))
+        score = float(corr) * (STD_PENALTY_FLOOR + (1 - STD_PENALTY_FLOOR) * reliability)
+        return {'scale': f, 'best': score, 'bestLoc': {'x': js_round(x * f), 'y': js_round(y * f)}}
+
+    n_jobs = len(prepared) * len(tpl_mats)
+    n_workers = max(1, min(MAX_MATCH_WORKERS, n_jobs, os.cpu_count() or 4))
+    out: dict[str, list[dict[str, Any]]] = {tm['id']: [] for tm in tpl_mats}
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        jobs = [(tm['id'], pool.submit(_one, f, full_gray, tm))
+                for f, full_gray in prepared for tm in tpl_mats]
+        for tid, fut in jobs:
+            r = fut.result()
+            if r:
+                out[tid].append(r)
+    for tid in out:
+        out[tid].sort(key=lambda r: r['scale'])
+    return out
+
+
 def _build_angles(angle_range: float, angle_step: float) -> list[float]:
     if angle_range == 0 or angle_step == 0:
         return [0.0]
@@ -271,12 +349,32 @@ def match_all(
     angles = _build_angles(angle_range, angle_step)
 
     # 1) 角度×スケールぶんの探索画像を先に作る（rotate/resizeは1回数msと軽いので直列でよい）。
-    prepared: list[tuple[float, float, np.ndarray]] = []
+    #    scale_tpl=True の組では探索画像を拡大せず、代わりにテンプレ側をf倍に縮小する
+    #    （NO_UPSCALE の説明を参照。幾何的な対応関係は同じで、コストだけが下がる）。
+    prepared: list[tuple[float, float, np.ndarray, bool]] = []
     for angle in angles:
         rotated = _rotate_gray(full_gray, angle)
         for f in scale_factors:
-            scaled = rotated if abs(f - 1) < 1e-6 else _resize_gray(rotated, 1.0 / f)
-            prepared.append((angle, f, scaled))
+            if NO_UPSCALE and f < 1.0:
+                prepared.append((angle, f, rotated, True))
+            else:
+                scaled = rotated if abs(f - 1) < 1e-6 else _resize_gray(rotated, 1.0 / f)
+                prepared.append((angle, f, scaled, False))
+
+    # 縮小したテンプレは (テンプレ, f) ごとに1回だけ作って全角度で使い回す
+    # （角度ごとに作り直すと、角度数ぶんだけ無駄なresize+meanStdDevが走る）。
+    tpl_cache: dict[tuple[str, float], tuple[np.ndarray, float]] = {}
+
+    def _tpl_for(tm: dict[str, Any], f: float, scale_tpl: bool) -> tuple[np.ndarray, float]:
+        if not scale_tpl:
+            return tm['mat'], tm['std']
+        key = (tm['id'], f)
+        hit = tpl_cache.get(key)
+        if hit is None:
+            small = _resize_gray(tm['mat'], f)
+            hit = (small, _std_dev_of(small))
+            tpl_cache[key] = hit
+        return hit
 
     # 2) 重いのは cv2.matchTemplate 自体（探索画像1枚あたり数十ms）。
     #    (角度, スケール, アンカー) の組はすべて互いに独立しているため、フラットに
@@ -287,12 +385,13 @@ def match_all(
     serial_ms = 0.0
     sum_match = sum_minmax = sum_std = 0.0
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        jobs = [
-            (tm, angle, f, pool.submit(_run_match, scaled, tm['mat'], tm['std']))
-            for angle, f, scaled in prepared
-            for tm in tpl_mats
-        ]
-        for tm, angle, f, fut in jobs:
+        jobs = []
+        for angle, f, scaled, scale_tpl in prepared:
+            for tm in tpl_mats:
+                tpl_mat, tpl_std = _tpl_for(tm, f, scale_tpl)
+                jobs.append((tm, angle, f, scale_tpl,
+                             pool.submit(_run_match, scaled, tpl_mat, tpl_std)))
+        for tm, angle, f, scale_tpl, fut in jobs:
             score, (lx, ly), (ms_match, ms_minmax, ms_std, call_ms) = fut.result()
             serial_ms += call_ms
             sum_match += ms_match
@@ -300,13 +399,16 @@ def match_all(
             sum_std += ms_std
             cur = results[tm['id']]
             if score > cur['score']:
+                # テンプレ縮小側は探索画像が原寸のままなので、座標に f を掛けてはいけない
+                # （画像を1/f倍したぶんを戻す補正が不要なため）。
+                back = (1.0 if scale_tpl else f) / work_scale
                 results[tm['id']] = {
                     'score': score,
                     'angle': angle,
                     'scale': f,
                     'loc': {
-                        'x': js_round(lx * f / work_scale),
-                        'y': js_round(ly * f / work_scale),
+                        'x': js_round(lx * back),
+                        'y': js_round(ly * back),
                     },
                 }
     # 実効の並列度を診断: 各照合の実時間合計(serial_ms)を並列区間の実測(par_wall)で割る。

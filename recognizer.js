@@ -95,23 +95,64 @@ const Recognizer = (() => {
      支持点を数える際、各アンカーがテンプレート探索で独立に検出した倍率の中央値
      （medScale）と大きく食い違うペアの変換は候補から外す。これが無いと、絶対値としては
      一致点を稼げても sx が0.3倍等の非現実的な変換が「たまたま」複数点を説明してしまい、
-     誤って多数派に選ばれることがあった（実データで実際に発生を確認）。 */
+     誤って多数派に選ばれることがあった（実データで実際に発生を確認）。
+
+     ただし、この medScale 制約自体が仇になるケースが実機で見つかった: 3つの独立した
+     アンカーが、それぞれ単体のテンプレート探索でも一貫して間違った倍率（実測77%。
+     帳票内の別の場所に、たまたま揃って高いスコアで誤マッチした）を検出したため、
+     medScale 自体がその77%に汚染された。この状態では、アンカー同士の相対位置から
+     計算すると残差数px・角度差1°未満で無矛盾に説明できる「真に正しい変換」（実測で
+     ほぼ100%）が、「medScaleと食い違う」という理由だけで候補から弾かれ、逆に77%という
+     誤った変換の方が「多数決で勝つ」という転倒が起きていた。
+     対策として、medScale制約ありの結果と、値域チェック(0.4〜2.5)のみで制約なしの結果を
+     両方評価し、制約なしの方が同じかそれ以上の点数を、大幅に（半分未満に）小さい残差で
+     説明できる場合はそちらを採用する。「大幅に小さい」という条件が、SCALE_AGREE_TOL
+     本来の目的（非現実的な変換が偶然複数点を通ってしまうのを防ぐ）の代役を果たす
+     （非現実的な変換が実在の複数点を、制約ありの場合の半分未満の残差で説明できる
+     確率は低い）。
+     戻り値に scaleOverride を含めるのは、ここで見つけた「ペア自身が示す信頼できる
+     倍率」を estimateTransform 側の後続処理にも伝えるため。除外点が0（=全点が
+     inlierとして残る）だと estimateTransform は medScale を素通しで使い続けるが、
+     それは今回のように「全員が独立に同じ間違った倍率を検出した」ケースでは汚染
+     されたままの値であり、後段の位置回帰（axis関数）が正しい回帰結果を「medScaleと
+     食い違う」という理由で再び棄却してしまう（実機で確認済み）。scaleOverride を
+     渡せば、この転倒を防げる。 */
   function ransacInliers(pairs, medScale) {
-    let best = null, bestSupport = -1;
-    for (let i = 0; i < pairs.length; i++) {
-      for (let j = i + 1; j < pairs.length; j++) {
-        const tf = pairTransform(pairs[i], pairs[j], medScale);
-        if (!tf || tf.sx < 0.4 || tf.sx > 2.5 || tf.sy < 0.4 || tf.sy > 2.5) continue;
-        if (Math.abs(tf.sx - medScale) > SCALE_AGREE_TOL * medScale) continue;
-        if (Math.abs(tf.sy - medScale) > SCALE_AGREE_TOL * medScale) continue;
-        const inliers = pairs.filter(p => residual(p, tf) <= OUTLIER_TOL_PX);
-        const support = inliers.reduce((s, p) => s + (p.score || 0.5), 0);
-        if (inliers.length > (best ? best.length : 0) || (best && inliers.length === best.length && support > bestSupport)) {
-          best = inliers; bestSupport = support;
+    const evaluate = (constrainToMedScale) => {
+      let best = null, bestTf = null, bestSupport = -1;
+      for (let i = 0; i < pairs.length; i++) {
+        for (let j = i + 1; j < pairs.length; j++) {
+          const tf = pairTransform(pairs[i], pairs[j], medScale);
+          if (!tf || tf.sx < 0.4 || tf.sx > 2.5 || tf.sy < 0.4 || tf.sy > 2.5) continue;
+          if (constrainToMedScale) {
+            if (Math.abs(tf.sx - medScale) > SCALE_AGREE_TOL * medScale) continue;
+            if (Math.abs(tf.sy - medScale) > SCALE_AGREE_TOL * medScale) continue;
+          }
+          const inliers = pairs.filter(p => residual(p, tf) <= OUTLIER_TOL_PX);
+          const support = inliers.reduce((s, p) => s + (p.score || 0.5), 0);
+          if (inliers.length > (best ? best.length : 0) || (best && inliers.length === best.length && support > bestSupport)) {
+            best = inliers; bestTf = tf; bestSupport = support;
+          }
         }
       }
+      return best ? { inliers: best, tf: bestTf, maxResidual: Math.max(...best.map(p => residual(p, bestTf))) } : null;
+    };
+
+    const constrained = evaluate(true);
+    /* 2点（ペア1組だけ）でも意味がある: constrained/fallbackは同じ唯一のペアを
+       評価するが、そのペアの変換がmedScaleと一致すれば両者は同じ結果になり
+       （残差も同一なので下の0.5倍判定でfallbackが不要に選ばれることはない）、
+       食い違えばconstrainedが候補なし(null)になり、fallback（値域チェックのみ）
+       だけがそのペアを拾える。1点は比較対象が無いためそもそも呼ばれない
+       （estimateTransform側の分岐）。 */
+    const fallback = pairs.length >= 2 ? evaluate(false) : null;
+    if (fallback && fallback.inliers.length >= 2
+        && (!constrained
+            || (fallback.inliers.length >= constrained.inliers.length
+                && fallback.maxResidual < constrained.maxResidual * 0.5))) {
+      return { points: fallback.inliers, scaleOverride: { sx: fallback.tf.sx, sy: fallback.tf.sy } };
     }
-    return (best && best.length >= 2) ? best : pairs;   // 有効なペアが無ければ従来通り全点使う
+    return { points: (constrained && constrained.inliers.length >= 2) ? constrained.inliers : pairs, scaleOverride: null };   // 有効なペアが無ければ従来通り全点使う
   }
 
   /* ── 幾何: 複数アンカーから軸ごとの拡大率＋平行移動を推定 ── */
@@ -144,14 +185,31 @@ const Recognizer = (() => {
     }
     /* 照合倍率の中央値（探索は 0.6〜2.0 と広く、密集アンカーでも安定して得られる） */
     const medScaleAll = median(all.map(p => p.scale || 1));
-    /* 別の場所へ誤マッチした点を先に捨てる。倍率だけでなく平行移動も、誤マッチ点が
-       加重平均に混じるとその分だけ引きずられるため、推定前に取り除く必要がある。
-       ペア総当たりは3点未満では機能しない（2点は常に一致するペアが1組しか無く、
-       多数決にならない）ため、2点以下はそのまま使う。 */
-    const pairs = all.length >= 3 ? ransacInliers(all, medScaleAll) : all;
+    /* 除外（外れ値を捨てる）ための多数決は3点未満では機能しない（2点は常に一致する
+       ペアが1組しか無く、多数決にならない）。しかし ransacInliers が持つもう一つの
+       役割——「唯一のペア自身が示す変換が medScale と食い違う場合に、そちらを
+       信頼できる scaleOverride として返す」——は、多数決ではなく2点1組の関係だけで
+       完結するため2点でも意味がある。実機で、位置合わせ用アンカーが2点しか無い
+       帳票（他のアンカーを判定のみに変更した後等）でも、その2点が両方とも独立に
+       同じ間違った倍率を検出してしまい、medScaleがその2点だけで汚染されるケースが
+       確認された。3点以上なら複数ペアの多数決で真の変換を見つけられるが、2点では
+       唯一のペア自身の変換をmedScale制約なしで信頼するしかなく、それでも「値域
+       チェック(0.4〜2.5)」は残るため、非現実的な変換まで無条件に信頼するわけでは
+       ない。1点はそもそも比較対象が無く呼び出し不要。 */
+    const ransac = all.length >= 2 ? ransacInliers(all, medScaleAll) : { points: all, scaleOverride: null };
+    const pairs = ransac.points;
     const dropped = all.length - pairs.length;
     const n = pairs.length;
-    const medScale = dropped ? median(pairs.map(p => p.scale || 1)) : medScaleAll;
+    /* medScale の決定: ransacInliers が「各アンカー個別のmedScale制約」をバイパスして
+       採用した場合（scaleOverride あり）は、その根拠になった信頼できる倍率をそのまま
+       引き継ぐ。そうしないと、除外点が0（=全点がinlierとして残る）のケースで下の
+       axis関数が medScaleAll（汚染されている可能性がある値）を素通しで使い続け、
+       ransacInliers がせっかく見つけた正しい変換を、位置回帰(sReg)が「medScaleと
+       食い違う」という理由で再び棄却してしまう（ransacInliersのコメント参照）。 */
+    const medScaleX = ransac.scaleOverride ? ransac.scaleOverride.sx
+                     : (dropped ? median(pairs.map(p => p.scale || 1)) : medScaleAll);
+    const medScaleY = ransac.scaleOverride ? ransac.scaleOverride.sy
+                     : (dropped ? median(pairs.map(p => p.scale || 1)) : medScaleAll);
     /* 加重は score をそのまま使う（呼び出し側は score>=0.4 のみを渡すため、常に正）。
        スコア差を過度に増幅しないよう線形のまま用いる。 */
     const weights = pairs.map(p => Math.max(1e-3, p.score || 0));
@@ -159,12 +217,13 @@ const Recognizer = (() => {
     /* 軸ごと: 広がりが十分なら加重位置回帰で連続倍率を精密化、狭ければ照合倍率を採用。
        平行移動は採用倍率 s を固定して t = 加重平均(in - s*ref)（＝回帰の切片と同値だが、
        倍率誤差から切り離した頑健な平行移動になる）。 */
-    const axis = (gr, gi) => {
+    const axis = (gr, gi, medScale) => {
       let mr = 0, mi = 0, lo = Infinity, hi = -Infinity;
       pairs.forEach((p, i) => { const r = gr(p); mr += weights[i] * r; mi += weights[i] * gi(p); if (r < lo) lo = r; if (r > hi) hi = r; });
       mr /= wSum; mi /= wSum;
       let s = medScale;
-      if ((hi - lo) >= MIN_SPAN_FOR_SCALE) {
+      const wide = (hi - lo) >= MIN_SPAN_FOR_SCALE;
+      if (wide) {
         let num = 0, den = 0;
         pairs.forEach((p, i) => { const dr = gr(p) - mr, di = gi(p) - mi; num += weights[i] * dr * di; den += weights[i] * dr * dr; });
         const sReg = den > 1e-6 ? num / den : NaN;
@@ -174,10 +233,27 @@ const Recognizer = (() => {
         if (isFinite(sReg) && sReg >= 0.4 && sReg <= 2.5
             && Math.abs(sReg - medScale) <= SCALE_AGREE_TOL * medScale) s = sReg;
       }
-      return { s, t: mi - s * mr };
+      /* wide: この軸に倍率を独自に決める情報があったか（広がり不足なら medScale を
+         素通ししただけ＝この軸単独では倍率を検証できていない）。mr/mi は後段の
+         「片方の軸を他方の倍率で補う」補正で、加重平均を保ったまま倍率だけ
+         差し替えるために必要。 */
+      return { s, t: mi - s * mr, wide, mr, mi };
     };
-    const X = axis(p => p.refX, p => p.inX);
-    const Y = axis(p => p.refY, p => p.inY);
+    let X = axis(p => p.refX, p => p.inX, medScaleX);
+    let Y = axis(p => p.refY, p => p.inY, medScaleY);
+    /* 片方の軸だけアンカーの広がりが足りず（MIN_SPAN_FOR_SCALE未満）、medScaleを
+       素通ししただけの倍率が残るケースを補う。紙のスキャン・撮影は通常縦横で同じ
+       倍率になるため、もう片方の軸（広がりが十分で、回帰またはscaleOverrideにより
+       確定した信頼できる倍率）と大きく食い違うなら、そちらの倍率で置き換える
+       （平行移動は各軸の加重平均位置を保ったまま倍率だけ差し替える）。
+       実機で、2点しかアンカーが無く、その2点のX座標がたまたま近い（間隔59px）
+       帳票では、Y軸は正しく100%近くに修正できたのに、X軸だけ情報不足で汚染された
+       77%のまま残るケースを確認した。 */
+    if (!X.wide && Y.wide && Math.abs(X.s - Y.s) > SCALE_AGREE_TOL * Y.s) {
+      X = { s: Y.s, t: X.mi - Y.s * X.mr };
+    } else if (!Y.wide && X.wide && Math.abs(Y.s - X.s) > SCALE_AGREE_TOL * X.s) {
+      Y = { s: X.s, t: Y.mi - X.s * Y.mr };
+    }
     return { sx: X.s, sy: Y.s, tx: X.t, ty: Y.t, n, dropped, kept: pairs };
   }
 
@@ -392,14 +468,21 @@ const Recognizer = (() => {
    *
    * なお中央値フィルタによるノイズ除去も試したが、細い字画（1・L）を消して落字を
    * 招くため採用しない（実測で正答率が下がった）。
+   *
+   * erodePx=1 を渡すと、二値化の直後にインクを1px痩せさせてからガウスを掛ける。
+   * これは本線の入力ではなく、セカンドオピニオン用の「別の見え方の画像」を作る
+   * ためのオプション（SECOND_OPINION の解説を参照）。痩せは細い字画を消す危険が
+   * あるため本線には使わないが、意見が割れたときの検算材料としては、本線と
+   * 誤りが相関しない画像として価値がある。
    */
-  function binarizeSoft(canvas) {
+  function binarizeSoft(canvas, erodePx = 0) {
     const w = canvas.width, h = canvas.height;
     if (w < 3 || h < 3) return canvas;
     const gray = toGrayOverWhite(canvas);
     const thr = otsuThreshold(gray);
     const bin = new Float32Array(w * h);
     for (let i = 0; i < bin.length; i++) bin[i] = gray[i] < thr ? 0 : 255;
+    if (erodePx > 0) erodeInk(bin, w, h);
 
     /* 横方向 → 縦方向の順に1次元で畳み込む（端は最近傍で補う） */
     const tmp = new Float32Array(w * h);
@@ -428,14 +511,61 @@ const Recognizer = (() => {
     return out;
   }
 
+  /** 二値配列(0=インク/255=白)のインクを1px痩せさせる（8近傍に白が1つでもあれば白へ）。
+      画像端の外は白とみなす。binarizeSoftのerodePx用の内部ヘルパー。 */
+  function erodeInk(bin, w, h) {
+    const src = Float32Array.from(bin);
+    const at = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 255 : src[y * w + x];
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (src[y * w + x] !== 0) continue;
+        let touchesWhite = false;
+        for (let dy = -1; dy <= 1 && !touchesWhite; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (at(x + dx, y + dy) !== 0) { touchesWhite = true; break; }
+          }
+        }
+        if (touchesWhite) bin[y * w + x] = 255;
+      }
+    }
+  }
+
+  /* OCR入力の四辺に足す白余白(px)。
+     Tesseract(LSTM)は行の周囲に十分な余白が無いと行の正規化が乱れ、字形を丸ごと
+     別の文字として誤分類することがある（公式FAQも境界余白の追加を推奨している）。
+     行トリム（preprocessSingleLine）は上下に2pxしか余白を残さないため、このツールの
+     単一値欄はまさにその「余白不足」の状態でTesseractへ渡っていた。
+     実測: 縦棒がほぼ垂直な等幅書体（Courier系）の太字「704」が、余白不足だと
+     "104"（7が丸ごと1に誤分類）や "7104"（7が7+ゴースト1に二重検出）になる現象を
+     サンドボックスで再現できた（実機の矩形ログと同一シグネチャ）。四辺に12pxの
+     白枠を足すだけで、再現した誤読10ケース全てが "704" に戻り、フォント6種×
+     サイズ×劣化条件の回帰ベンチでも悪化しないことを確認して採用した。 */
+  const OCR_MARGIN_PX = 12;
+
+  /** キャンバスの四辺に白余白を付けたコピーを返す（OCR入力専用） */
+  function padCanvas(canvas, m) {
+    const c = document.createElement('canvas');
+    c.width = canvas.width + m * 2;
+    c.height = canvas.height + m * 2;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(canvas, m, m);
+    return c;
+  }
+
   /** 構造化された「英数字・記号のみの単一値」欄か。
       true の欄にだけ 行トリム＋拡大（①④）と PSM=ブロック（③）を適用する。 */
   function isSingleValueField(rule) {
     return CharConstraint.isActive(rule) && CharConstraint.isLatinOnly(rule);
   }
 
-  /** OCR入力キャンバスを構築する。
-      単一値欄は 行トリム → 拡大 → 二値化＋角戻し。それ以外の欄は従来通り拡大のみ。
+  /** 単一値欄のOCR入力一式を構築する。
+      main  = 本線の入力（行トリム → 拡大 → 二値化＋角戻し → 白枠）。
+      erode / gray = セカンドオピニオン用の変種（必要になるまで作らない遅延生成）。
+        erode: 二値化時にインクを1px痩せさせた版。太字で字画同士が近づいた見え方を戻す。
+        gray : 二値化せずグレーのまま渡す版。二値化そのものが招いた誤読の検算用。
+      いずれも同じトリム・拡大結果を共有し、白枠（OCR_MARGIN_PX）も同様に付ける。
 
       ★順序が重要: 必ず行トリムを先に行う。
       拡大するかどうかは「文字の高さ」で決めたいが、切り出しには上下の余白やゴースト行が
@@ -444,11 +574,20 @@ const Recognizer = (() => {
       拡大せず、その後のトリムで文字が小さいまま Tesseract へ渡っていた
       （実測: 51pxの切り出しが拡大されないままトリムされ、文字はわずか15pxで渡っていた）。
       トリムを先にすれば、目標高さが本当に文字の高さに対して効くようになる。 */
-  function ocrInputCanvas(cropCanvas, single) {
-    if (!single) return upscaleForOcr(cropCanvas);
+  function buildSingleInputs(cropCanvas) {
     const trimmed = preprocessSingleLine(cropCanvas);
     const scaled = upscaleForOcr(trimmed, SINGLE_TARGET_H, SINGLE_MAX_SCALE);
-    return binarizeSoft(scaled);
+    return {
+      main:  padCanvas(binarizeSoft(scaled), OCR_MARGIN_PX),
+      erode: () => padCanvas(binarizeSoft(scaled, 1), OCR_MARGIN_PX),
+      gray:  () => padCanvas(scaled, OCR_MARGIN_PX),
+    };
+  }
+
+  /** OCR入力キャンバス（本線のみ）。単一値欄以外は従来通り拡大のみ。 */
+  function ocrInputCanvas(cropCanvas, single) {
+    if (!single) return upscaleForOcr(cropCanvas);
+    return buildSingleInputs(cropCanvas).main;
   }
 
   /* PSM: 単一値欄は「単一の均一ブロック」(6) で読む。単一行(7)は最上行だけを読むため、
@@ -492,20 +631,26 @@ const Recognizer = (() => {
      まとまりの修復自体を諦める（誤った方を自信満々に確定させるより安全）。 */
   const GLYPH_WIDTH_MARGIN = 0.15;
 
-  /* 可変長欄（金額欄等）の「セカンドオピニオン」に使うPSM。
+  /* ── 可変長欄（金額欄等）のセカンドオピニオン ─────────────
      可変長欄は桁数という検算材料が無いため、字形が丸ごと別の文字として
      誤分類された場合（実機で "704" が "104" と読まれ、7の矩形が1個だけ・
      幅も他の数字と同等で、矩形からは異常を検出できなかった例がある）、
      何のフラグも立たないまま確信度86%の緑表示で通ってしまう。
-     そこで別のレイアウト解釈でもう一度読み、最終値が食い違えば「要確認」
-     として利用者に知らせる。
-     PSM7（単一行）を選んだのは、サンドボックスでの実測で、きれいな金額
-     画像（"704"・"591,800"・"1,573,000"）に対しPSM6と完全に同じ最終値を
-     返し、誤検知を出さなかったため（PSM8/13は末尾に余分なカンマを付けた）。
+
+     以前は「同じ画像を別のレイアウト解釈（PSM7）で読み直す」方式だったが、
+     この誤読をサンドボックスで再現して測ったところ、PSM6で"104"になる画像は
+     PSM7でも全ケース"104"になった（実機でも同様で、要確認フラグは立たなかった）。
+     同じ画像を見る限り、レイアウト解釈を変えても誤りは相関する。
+
+     そこで検算は「同じ画像の別解釈」ではなく「別の見え方に加工した画像」で行う。
+     本線（二値化＋角戻し）に対し、①インクを1px痩せさせた版（erode）で読み直し、
+     一致すればそのまま採用。食い違えば ②グレー版（gray・二値化なし）でもう一度
+     読み、2対1の多数決で決める。本線が少数派なら多数派の値を採用し（実測で、
+     再現した"104"誤読はerode版・gray版とも"704"と正しく読めた）、三者三様なら
+     どれも信用できないので本線の値のまま「要確認」として利用者に知らせる。
      比較は生データではなく「正規化・制約適用後の最終値」同士で行う。
      生データだと "591,800" と "591,800," のような表記ゆれで誤検知するが、
      最終値ではどちらも "591800" に落ち着くため。 */
-  const SECOND_OPINION_PSM = 7;
 
   /** 数値配列の中央値。 */
   function medianOf(nums) {
@@ -697,6 +842,107 @@ const Recognizer = (() => {
     return groups.length < items.length ? groups : null;   // 何も併合されなければ判定材料なし
   }
 
+  /* ── 字形検証: 「1」と読まれた字形が本当は「7」ではないかを画素で確かめる ──
+     背景: 縦棒がほぼ垂直な書体（Courier系等幅など）の「7」は、LSTMに字形丸ごと
+     「1」と誤分類されることがある（実機の"704"→"104"。矩形の個数も幅も正常で、
+     白枠の追加や、別前処理画像（痩せ版）での読み直しでも「104」のまま直らない
+     頑固なケースが実在する）。OCRで読み直す限り、同じ絵を見ている誤りは相関して
+     しまうため、この1↔7だけはOCRに頼らず字形の物理的性質で判定する:
+       「7」の上部横バーは標準的な数字幅のほぼ全域を塗るが、
+       「1」の上部（旗＋縦棒）はどの書体でもそこまで届かない。
+     メトリクスは「字形上部28%の行の最長連続インクラン長 ÷ Wref」。
+       ・最長連続ランなので、隣の字形の欠片が矩形に紛れ込んでも値が膨らまない
+       ・Wref（標準的な数字幅）は同じ読み取り結果の「1以外の数字」矩形幅の中央値
+         ＝同一書体・同一条件の実測値。比較対象が無い値（1だけ等）は判定しない
+     さらに前提条件として、字形幅がWrefの72%〜130%の範囲内であることも要求する
+     （下限: ほとんどの書体の本物の1は細く、画素を見るまでもなく除外できる。
+      上限: 幅がWrefを大きく超える矩形は、隣の字形の断片が紛れ込んで矩形自体が
+      壊れている可能性が高く、上部バー率の値も信頼できないため対象外にする）。
+
+     しきい値の実測（本番の前処理パイプライン全体を通した17書体×サイズ6×ブラー4
+     ×値13種、幅が正常範囲(0.72〜1.3)の字形のみ、計約2800件）:
+       当初、単一文字だけを理想的に描画した簡易実測（1の最大0.720/7の最小0.815）
+       から0.78を採用したが、本番と同じ前処理（フィールド全体を描画→行トリム→
+       拡大→二値化→白枠）を通した条件で再実測したところ、本物の「1」でも
+       LiberationMono等の一部書体・小サイズでratio=0.78〜0.84に達する例が
+       見つかり、実際に本物の"71"を"77"に誤って書き換える事故（誤フリップ）が
+       発生した。「1」を誤って"7"にする害（正しく読めていた値を壊す）は、
+       「7」を検出し損ねる害（元々読めなかった値が読めないまま）より遥かに
+       重いため、閾値を0.85まで引き上げた。この設定で同データセットの「1」の
+       誤フリップは0件（1452件中）、「7」の正しい検出率は96.6%を維持する
+       （0.78時点の98.6%からの低下は許容する）。実機の"704"→"104"の再現
+       ケース（頑固8件）は0.85でも全件検出できることを確認済み。 */
+  const SEVEN_TOPBAR_MIN_RATIO = 0.85;   // 上部バー率がこれ以上なら「7」と判定
+  const SEVEN_TOPBAR_TOP_FRAC  = 0.28;   // 「上部」= 字形の実インク高さの上から28%
+  const SEVEN_WIDTH_MIN_RATIO  = 0.72;   // 判定の前提: 字形幅 ≥ Wref×この値
+  const SEVEN_WIDTH_MAX_RATIO  = 1.3;    // 判定の前提: 字形幅 ≤ Wref×この値（隣接字形の混入を除外）
+
+  /** 矩形内の画素から「上部の最長連続インクラン ÷ wref」を求める。 */
+  function sevenTopBarRatio(canvas, box, wref) {
+    const x0 = Math.max(0, Math.floor(box.x0)), y0 = Math.max(0, Math.floor(box.y0));
+    const x1 = Math.min(canvas.width, Math.ceil(box.x1)), y1 = Math.min(canvas.height, Math.ceil(box.y1));
+    const w = x1 - x0, h = y1 - y0;
+    if (w < 2 || h < 2) return 0;
+    const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(x0, y0, w, h).data;
+    /* 白地合成の輝度<128をインクとする（本線・変種とも白背景の画像なので固定で足りる） */
+    const ink = new Uint8Array(w * h);
+    for (let p = 0, i = 0; p < ink.length; p++, i += 4) {
+      const a = d[i + 3] / 255;
+      const lum = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) * a + 255 * (1 - a);
+      ink[p] = lum < 128 ? 1 : 0;
+    }
+    /* 矩形はTesseract報告のままだと余白を含むことがあるため、実インクの上下端に詰める */
+    let top = -1, bottom = -1;
+    for (let y = 0; y < h && top < 0; y++) { for (let x = 0; x < w; x++) if (ink[y * w + x]) { top = y; break; } }
+    for (let y = h - 1; y >= 0 && bottom < 0; y--) { for (let x = 0; x < w; x++) if (ink[y * w + x]) { bottom = y; break; } }
+    if (top < 0) return 0;
+    const rows = Math.max(1, Math.ceil((bottom - top + 1) * SEVEN_TOPBAR_TOP_FRAC));
+    let best = 0;
+    for (let y = top; y < top + rows && y <= bottom; y++) {
+      let run = 0;
+      for (let x = 0; x < w; x++) {
+        if (ink[y * w + x]) { run++; if (run > best) best = run; }
+        else run = 0;
+      }
+    }
+    return best / wref;
+  }
+
+  /** 「1」と読まれた各字形を画素検証し、7と判定されれば置換した文字列を返す。
+      置換が1つも無ければ null。canvas はその矩形群を生成したOCR入力画像。 */
+  function fixSevenReadAsOne(canvas, boxes, logPrefix) {
+    if (!canvas || !Array.isArray(boxes) || boxes.length < 2) return null;
+    const otherWidths = boxes.filter(b => b.text >= '0' && b.text <= '9' && b.text !== '1')
+                             .map(b => b.x1 - b.x0);
+    /* 基準幅(wref)の根拠が1個だけだと、その1個自体が破損（隣接文字が滲んで
+       融合した等）していた場合に無防備になる。936ケース回帰で見つかった
+       残存誤フリップ('1,000'→70, LiberationMono/11px/blur0.7)はまさにこの
+       ケースで、本来3個あるはずの'0'がrepairViaBoxesの分割統合処理で1個
+       (幅17px)に潰され、その単独の幅がそのままwrefとして採用されていた。
+       2個以上の裏付けを必須にすることで、この誤フリップは実測でゼロになり、
+       正しい「7」検出（頑固197ケース・936ケース双方）には影響しないことを
+       確認済み。 */
+    if (otherWidths.length < 2) return null;
+    const wref = medianOf(otherWidths);
+    if (!wref || wref < 4) return null;   // 数px程度では画素検証の分解能が無い
+    let flipped = 0;
+    const texts = boxes.map(b => {
+      if (b.text !== '1') return b.text;
+      const w = b.x1 - b.x0;
+      if (w < SEVEN_WIDTH_MIN_RATIO * wref) return b.text;   // 細い＝本物の1
+      if (w > SEVEN_WIDTH_MAX_RATIO * wref) return b.text;   // 太すぎ＝隣接字形の混入で矩形自体が信用できない
+      const ratio = sevenTopBarRatio(canvas, b, wref);
+      if (ratio >= SEVEN_TOPBAR_MIN_RATIO) {
+        console.log(`${logPrefix} 字形検証: 「1」[${b.x0}-${b.x1}]は上部バー率${ratio.toFixed(2)}`
+          + `≥${SEVEN_TOPBAR_MIN_RATIO}（幅${b.x1 - b.x0}px/基準${Math.round(wref)}px）→「7」に修正`);
+        flipped++;
+        return '7';
+      }
+      return b.text;
+    });
+    return flipped ? texts.join('') : null;
+  }
+
   /* ④ 単一値欄の拡大目標。Tesseractは字形が小さいと 9↔G / 0↔O / 1↔I などの
      微妙な取り違えを起こしやすい。行の高さがこの値に満たない切り出しだけを拡大して
      認識する（最大 SINGLE_MAX_SCALE 倍）。
@@ -774,17 +1020,42 @@ const Recognizer = (() => {
       const tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, imageElement: await dataURLtoImg(a.dataURL) })));
       const tplList = tpls.map(t => ({ id: t.id, imageElement: t.imageElement }));
       /* 粗→細のスケール探索で「拡大・縮小された帳票」を正しく捉える。
-         ① 粗く広い範囲(0.6〜2.0)でアンカーを発見し、最良スコアの倍率を暫定採用。
-         ② その暫定倍率の周辺(±6%)を細かく再探索し、位置精度を上げる。
+         ① 粗く広い範囲(0.6〜2.0)で各アンカーを個別に探索。
+         ② 各アンカー自身の暫定倍率(①の自己ベスト)の周辺(±9%)を、アンカーごとに
+            独立して細かく再探索し、位置精度を上げる。
          狭い固定範囲だと大きく拡大された帳票でアンカーを取り逃がすか倍率が範囲端に
          張り付き、離れたOCR欄ほどずれていた。細探索を角度固定・少数スケールで足すだけ
-         なので追加コストは小さい。 */
+         なので追加コストは小さい。
+         ※ 以前は②を「全アンカー中の最良スコア1つ」が決めた単一のprovScaleの周辺に
+         全アンカー共有で限定していたが、これは自身の粗探索ベストが他アンカーと
+         異なるアンカーを、その本来の近傍から一度も探せなくする副作用があった。
+         実測（倍率0.799の誤検出調査）で、スコアが最も高かった「宛先」の粗ベスト
+         (倍率0.85)が共有provScaleに採用され、「金額①」は自身の粗ベスト(倍率0.6)
+         とは無関係にその狭い範囲(0.85±9%)しか探せず、0.799止まりになっていたことを
+         [align-scale]ログで直接確認した。1回のmatchAll呼び出しで済ませるため、
+         各アンカーの細探索候補の和集合を渡す（各アンカーは返ってきた結果のうち
+         自分にとってベストなものを採用するので、アンカーごとに別々に呼び出すのと
+         数学的に同じ結果になる）。 */
       const coarse = await MatcherEngine.matchAll(rotated, tplList,
         { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES });
-      let provScale = 1, provBest = -Infinity;
-      tpls.forEach(t => { const r = coarse.get(t.id); if (r && r.score > provBest) { provBest = r.score; provScale = r.scale || 1; } });
+      const fineScaleUnion = new Set();
+      tpls.forEach(t => {
+        const rc = coarse.get(t.id);
+        fineScalesAround(rc ? (rc.scale || 1) : 1).forEach(s => fineScaleUnion.add(s));
+      });
       const fine = await MatcherEngine.matchAll(rotated, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: fineScalesAround(provScale) });
+        { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b) });
+      /* 診断用ログ: 各アンカーが自身の粗探索ベストの近傍をどれだけ細探索で改善できたか。
+         もし依然としてアンカー間で粗ベストの倍率が大きく食い違っているなら、
+         それはこの探索範囲の問題ではなく、そのアンカー自体の識別性・画像品質の
+         問題である可能性が高い（両方を切り分けるための情報として残す）。 */
+      console.log(`[align-scale] 各アンカーが自身の粗探索ベストを中心に独立して細探索（共有provScaleは廃止、細探索候補の和集合${fineScaleUnion.size}点）`);
+      tpls.forEach(t => {
+        const rc = coarse.get(t.id), rf = fine.get(t.id);
+        if (!rc) return;
+        console.log(`[align-scale]   "${t.a.name || t.id}" 粗探索(0.6〜2.0の全域)自身のベスト: スコア${rc.score.toFixed(2)} 倍率${rc.scale}`
+          + (rf ? ` / 自身の近傍での細探索ベスト: スコア${rf.score.toFixed(2)} 倍率${rf.scale}` : ''));
+      });
       tpls.forEach(t => {
         const rc = coarse.get(t.id), rf = fine.get(t.id);
         const r = (rf && (!rc || rf.score >= rc.score)) ? rf : rc;   // 粗・細で高スコア側を採用
@@ -814,6 +1085,15 @@ const Recognizer = (() => {
        のどれなのかは、対応点そのものを見ないと切り分けられないため一覧で出す。
        「ずれ」= 採用した変換で基準座標を写した位置と、実際に一致した位置との差。
        正しく合っていれば全て数px以内に収まる。特定の1点だけ大きい＝その目印が犯人。 */
+    /* 採用点(kept)の中で、確定した変換に対する残差(dx,dyの絶対値)の最大値。
+       RANSAC(ransacInliers)はペア単位の残差で多数決を取るため、複数の目印が
+       「たまたま同じ間違った変換」を一貫して支持してしまうケース（帳票内の繰り返し
+       パターンで複数の目印が揃って別の場所へ誤マッチする等）を弾けないことがある。
+       この場合、除外0点・採用点数は正常でも、確定した変換に対する各点の当てはまりは
+       悪いままなので、それを別途チェックして matchQuality.residualHigh に反映する
+       （OUTLIER_TOL_PXは「正しく一致した点同士の残差は最大でも数十px」という実測に
+       基づく値なので、採用点がこれを超えるのはその前提が崩れているサイン）。 */
+    let maxKeptResidual = 0;
     if (allMatches.length) {
       console.log(`[align] 基準画像 ${form.referenceImage ? form.referenceImage.w + 'x' + form.referenceImage.h : '?'}`
         + ` → 入力 ${rotated.width}x${rotated.height}`
@@ -824,6 +1104,7 @@ const Recognizer = (() => {
         const used = transform.kept.includes(p);
         const dx = p.inX - (transform.sx * p.refX + transform.tx);
         const dy = p.inY - (transform.sy * p.refY + transform.ty);
+        if (used) maxKeptResidual = Math.max(maxKeptResidual, Math.abs(dx), Math.abs(dy));
         console.log(`[align]   ${used ? '採用' : '除外'} "${p.name}" 基準(${Math.round(p.refX)},${Math.round(p.refY)})`
           + ` → 一致(${Math.round(p.inX)},${Math.round(p.inY)})`
           + ` ずれ(${Math.round(dx)},${Math.round(dy)}) スコア${p.score.toFixed(2)} 検出倍率${p.scale}`);
@@ -849,6 +1130,13 @@ const Recognizer = (() => {
       /* 誤マッチとして除外した目印の数。0でなければ、その目印は他の場所（似た四角など）
          と区別が付いていないため、利用者に作り直しを促す。 */
       droppedOutliers: transform.dropped || 0,
+      /* 採用点同士が確定した変換と矛盾している（=どれかが本来と別の場所に一致している
+         可能性が高い）ことを示すフラグ。droppedOutliers=0・scaleEdge=false・
+         weakMatch=falseの「一見正常」な表示でも、複数の目印が帳票内の似た構造
+         （繰り返す罫線パターン等）へ揃って誤マッチすると、RANSACの多数決では
+         誤マッチ側が「多数派」として採用されてしまうことがある。採用点数や検出倍率
+         だけでは分からないため、最終変換への当てはまりの悪さを別途チェックする。 */
+      residualHigh: maxKeptResidual > OUTLIER_TOL_PX,
     };
 
     /* ⑤ 罫線除去（登録された罫線除去パラメータを引き継ぎ） */
@@ -948,8 +1236,10 @@ const Recognizer = (() => {
         continue;
       }
       const tFieldStart = performance.now();
-      /* 実際にTesseractへ渡す画像。診断表示（切り出し画像との比較）用に保持する */
-      const inputCanvas = ocrInputCanvas(cropCanvas, single);
+      /* 実際にTesseractへ渡す画像。診断表示（切り出し画像との比較）用に保持する。
+         単一値欄は変種（erode/gray）も同じトリム・拡大結果から遅延生成できるようにする */
+      const inputSet = single ? buildSingleInputs(cropCanvas) : null;
+      const inputCanvas = inputSet ? inputSet.main : ocrInputCanvas(cropCanvas, false);
       const onProg = prog => cb.onOcr && cb.onOcr(oi, regions.length, region.name, prog.status, prog.progress);
       let res = await OcrProcessor.recognize(inputCanvas, usePsm, onProg, useLang, useWl);
       let out = finishText(res, region, rule, active, single);
@@ -972,41 +1262,91 @@ const Recognizer = (() => {
          回す（固定長欄のような「合否で絞ってから」はできない）。 */
       const norm = active ? CharConstraint.normalize(rule) : null;
       const isVariableSingle = single && !!(norm && norm.variable);
-      if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous || isVariableSingle)) {
-        const boxRes = await OcrProcessor.recognize(inputCanvas, usePsm, onProg, useLang, useWl, true);
+      /* 文字矩形を取り直し、分割字形（1つの字形の二重検出）を修復した読み取りを返す。
+         修復不要・修復不能・修復結果が制約を満たさない場合は null。
+         本線だけでなくセカンドオピニオンの変種画像にも同じ修復を掛けるため関数化
+         （変種側にも "7104" のような二重検出は同様に起こり得る）。 */
+      const repairViaBoxes = async (canvas, label) => {
+        const boxRes = await OcrProcessor.recognize(canvas, usePsm, onProg, useLang, useWl, true);
         const boxes = boxRes.charBoxes;
-        if (Array.isArray(boxes) && boxes.length) {
-          const expectedLen = (norm && !norm.variable) ? norm.len : 0;
-          const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes, expectedLen);
-          const dropped = new Set((rep ? rep.dropped : []));
-          console.log(`[ocr]   "${region.name}" 文字矩形: `
-            + boxes.map(b => `${b.text}[${b.x0}-${b.x1}]${dropped.has(b) ? '←除外' : ''}`).join(' '));
-          if (rep) {
-            const repRes = { ...boxRes, fullText: rep.text, lines: [{ text: rep.text, confidence: boxRes.confidence || 0 }] };
-            const repOut = finishText(repRes, region, rule, active, single);
-            console.log(`[ocr]   "${region.name}" 分割字形を統合 raw=${JSON.stringify(rep.text)} `
-              + `→ ${JSON.stringify(repOut.text)} valid=${repOut.constraintValid} `
-              + `lengthSuspicious=${repOut.lengthSuspicious} ambiguous=${repOut.ambiguous}`);
-            if (repOut.constraintValid && !repOut.lengthSuspicious && !repOut.ambiguous) { res = repRes; out = repOut; }
-          }
-        }
+        if (!Array.isArray(boxes) || !boxes.length) return null;
+        const expectedLen = (norm && !norm.variable) ? norm.len : 0;
+        const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes, expectedLen);
+        const dropped = new Set((rep ? rep.dropped : []));
+        console.log(`[ocr]   "${region.name}"${label} 文字矩形: `
+          + boxes.map(b => `${b.text}[${b.x0}-${b.x1}]${dropped.has(b) ? '←除外' : ''}`).join(' '));
+        /* ① 分割字形（同じ字形の二重検出）の統合 → ② 残った矩形で字形検証（1↔7） */
+        const keptBoxes = boxes.filter(b => !dropped.has(b));
+        let text = rep ? rep.text : null;
+        const geoText = fixSevenReadAsOne(canvas, keptBoxes, `[ocr]   "${region.name}"${label}`);
+        let geoFixed = false;
+        if (geoText != null) { text = geoText; geoFixed = true; }
+        if (text == null) return null;
+        const repRes = { ...boxRes, fullText: text, lines: [{ text, confidence: boxRes.confidence || 0 }] };
+        const repOut = finishText(repRes, region, rule, active, single);
+        console.log(`[ocr]   "${region.name}"${label} ${geoFixed ? '字形検証を反映' : '分割字形を統合'} `
+          + `raw=${JSON.stringify(text)} → ${JSON.stringify(repOut.text)} valid=${repOut.constraintValid} `
+          + `lengthSuspicious=${repOut.lengthSuspicious} ambiguous=${repOut.ambiguous}`);
+        return (repOut.constraintValid && !repOut.lengthSuspicious && !repOut.ambiguous)
+          ? { res: repRes, out: repOut, geoFixed } : null;
+      };
+      let mainGeoFixed = false;
+      if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous || isVariableSingle)) {
+        const fixed = await repairViaBoxes(inputCanvas, '');
+        if (fixed) { res = fixed.res; out = fixed.out; mainGeoFixed = !!fixed.geoFixed; }
       }
-      /* 可変長欄のセカンドオピニオン: 別のレイアウト解釈でもう一度読み、最終値が
-         食い違えば「要確認」にする。可変長欄には桁数という検算材料が無く、字形が
-         丸ごと別の文字へ誤分類された場合（実機の "704"→"104"）は矩形の個数にも
-         幅にも異常が出ないため、ここまでの仕組みでは何も検知できず、誤った値が
-         確信度86%の緑表示で通ってしまっていた。値そのものを直せるわけではないが、
-         「この欄は疑わしい」と利用者に伝えられるだけでも、黙って間違うよりは
-         はるかに良い（SECOND_OPINION_PSM のコメント参照）。 */
+      /* 可変長欄のセカンドオピニオン: 別の見え方に加工した画像（変種）で読み直し、
+         2対1の多数決で確定する（方式の背景と実測はファイル先頭側の
+         「可変長欄のセカンドオピニオン」コメント参照）。
+         ・本線と痩せ版(erode)が一致 → そのまま採用（追加コストは1回の読みだけ）
+         ・食い違えばグレー版(gray)で三者目を読み、多数派の値を採用
+         ・三者三様なら本線の値のまま「要確認」フラグ
+         変種の読みが本線と食い違った場合、その食い違いが分割字形（二重検出）の
+         せいである可能性があるので、比較の前に変種側も矩形修復を試みる。
+
+         字形検証（fixSevenReadAsOne）が本線の値を修正した場合は多数決を行わない。
+         この誤読はOCRがどの画像でも同じ間違いをする（誤りが相関する）ことが実測で
+         分かっており、画素という物理的証拠に基づく判定を、相関した多数決で
+         覆してしまっては本末転倒のため（変種側の読みも同じ"104"側に倒れ、
+         2対1で誤った値に戻してしまう）。 */
       let secondOpinionDiff = null;
-      if (isVariableSingle && usePsm !== SECOND_OPINION_PSM) {
-        const soRes = await OcrProcessor.recognize(inputCanvas, SECOND_OPINION_PSM, onProg, useLang, useWl);
-        const soOut = finishText(soRes, region, rule, active, single);
-        if (soOut.text !== out.text) {
-          secondOpinionDiff = soOut.text;
+      let secondOpinionNote = '';
+      if (mainGeoFixed) {
+        secondOpinionNote = '字形検証で修正';
+      } else if (isVariableSingle && inputSet) {
+        const eroCanvas = inputSet.erode();
+        const eroRes = await OcrProcessor.recognize(eroCanvas, usePsm, onProg, useLang, useWl);
+        let ero = { res: eroRes, out: finishText(eroRes, region, rule, active, single) };
+        if (ero.out.text !== out.text) {
           console.log(`[ocr]   "${region.name}" セカンドオピニオン不一致: `
-            + `psm=${readPsm}→${JSON.stringify(out.text)} / psm=${SECOND_OPINION_PSM}→${JSON.stringify(soOut.text)}`
-            + ` （どちらが正しいか判定できないため「要確認」にします）`);
+            + `本線=${JSON.stringify(out.text)} / 痩せ版=${JSON.stringify(ero.out.text)} → 修復と三者目で裁定`);
+          ero = (await repairViaBoxes(eroCanvas, ' 痩せ版')) || ero;
+        }
+        if (ero.out.text !== out.text) {
+          const grayCanvas = inputSet.gray();
+          const grayRes = await OcrProcessor.recognize(grayCanvas, usePsm, onProg, useLang, useWl);
+          let gray = { res: grayRes, out: finishText(grayRes, region, rule, active, single) };
+          if (gray.out.text !== out.text && gray.out.text !== ero.out.text) {
+            gray = (await repairViaBoxes(grayCanvas, ' グレー版')) || gray;
+          }
+          if (gray.out.text === ero.out.text && ero.out.text) {
+            /* 本線だけが少数派 → 多数派（痩せ版・グレー版が一致した値）を採用 */
+            console.log(`[ocr]   "${region.name}" 多数決で修正: 本線=${JSON.stringify(out.text)}`
+              + ` → 採用=${JSON.stringify(ero.out.text)}（痩せ版・グレー版が一致）`);
+            secondOpinionNote = `多数決で修正(本線=${JSON.stringify(out.text)})`;
+            res = ero.res; out = ero.out;
+          } else if (gray.out.text === out.text) {
+            /* 本線が多数派 → 痩せ版の少数意見は棄却（フラグも立てない） */
+            console.log(`[ocr]   "${region.name}" 本線を維持: グレー版が本線と一致`
+              + `（痩せ版=${JSON.stringify(ero.out.text)}は少数派として棄却）`);
+          } else {
+            /* 三者三様 → どれも信用できない。本線の値のまま要確認 */
+            secondOpinionDiff = ero.out.text;
+            console.log(`[ocr]   "${region.name}" セカンドオピニオン三者三様: `
+              + `本線=${JSON.stringify(out.text)} / 痩せ版=${JSON.stringify(ero.out.text)}`
+              + ` / グレー版=${JSON.stringify(gray.out.text)}`
+              + ` （どれが正しいか判定できないため「要確認」にします）`);
+          }
         }
       }
       /* 文字制約に不合格、桁数が大きく食い違う、または抽出候補が複数同点で
@@ -1049,7 +1389,8 @@ const Recognizer = (() => {
       console.log(`[perf]   OCR "${region.name}" lang=${useLang} psm=${readPsm}${readPsm !== usePsm ? '(再読取)' : ''} `
         + `${(performance.now() - tFieldStart).toFixed(0)}ms 採用: raw=${JSON.stringify(raw)} → ${JSON.stringify(text)} `
         + `valid=${constraintValid} ambiguous=${ambiguous}`
-        + (secondOpinionDiff !== null ? ` 別解釈=${JSON.stringify(secondOpinionDiff)}(要確認)` : ''));
+        + (secondOpinionDiff !== null ? ` 別解釈=${JSON.stringify(secondOpinionDiff)}(要確認)` : '')
+        + (secondOpinionNote ? ` ${secondOpinionNote}` : ''));
       /* 信頼度は「最終的な値の文字」基準（周辺のゴミで下がらないように） */
       const conf = valueConfidence(text, res.symbols, confOf(res));
       fields[i] = {
@@ -1060,12 +1401,12 @@ const Recognizer = (() => {
         confidence: conf,
         error: res.error || null,
         constraint: active ? CharConstraint.describe(rule) : '',
-        /* 桁数超過・抽出候補の同点（ambiguous）・別解釈との食い違い
+        /* 桁数超過・抽出候補の同点（ambiguous）・セカンドオピニオンの三者三様
            （secondOpinionDiff）が読み直しでも解消しなかった場合は、既存の
            「制約不合格」表示に乗せて利用者へ伝える（constraintValid自体は
            trueでも、値としては信用できないことに変わりないため。
            LENGTH_MISMATCH_TOL・extractStrのambiguous判定・
-           SECOND_OPINION_PSM を参照）。 */
+           「可変長欄のセカンドオピニオン」コメントを参照）。 */
         constraintValid: constraintValid && !lengthSuspicious && !ambiguous && secondOpinionDiff === null,
         symbols: res.symbols || [],
         cropDataURL: cropCanvas.toDataURL('image/png'),
@@ -1073,7 +1414,9 @@ const Recognizer = (() => {
            前処理が効いたか／ゴーストが除けたかを目視で確認できるようにする。
            前処理を通す単一値欄のみPNG化する（他欄は元切り出しとほぼ同一で無駄なため）。 */
         ocrInputDataURL: single ? inputCanvas.toDataURL('image/png') : null,
-        ocrInfo: { preprocessed: single, psm: readPsm, retried: readPsm !== usePsm, lang: useLang, whitelist: useWl },
+        ocrInfo: { preprocessed: single, psm: readPsm, retried: readPsm !== usePsm, lang: useLang, whitelist: useWl,
+                   /* セカンドオピニオンの裁定結果（'' = 一致または対象外）。UIの診断行に出す */
+                   opinion: secondOpinionNote || (secondOpinionDiff !== null ? '不一致(要確認)' : '') },
       };
     }
 

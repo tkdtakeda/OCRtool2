@@ -554,6 +554,17 @@
     if (ratio >= UNIQ_WARN_RATIO)   return { level: 'warn',   text: `紛らわしい ${pct}%` };
     return { level: null, text: '' };
   }
+  /* 一意性チェックの等倍判定（uniquenessVerdict・danger/warnバッジ）とは別に、
+     実際の認識(prepare)が探索する全スケール範囲でも基準画像内に強い一致がないかを
+     走査する（matcher.py scan_scales参照）。等倍では一意でも他スケールでは基準画像内の
+     別の場所と酷似する目印が実在した（1個の目印だけで倍率が77%に誤検出された実例）
+     ため、参考情報として追加する。危険/安全の自動判定はしない。
+     recognizer.js の LOCALIZE_SCALES（8点・粗探索用）とは別に、こちらは独自に
+     もっと密な刻みを使う。実例（77%）を8点刻みで検証したところ、隣接する
+     刻み(71%/85%)ではテンプレートと双子のサイズが合わずスコアが下がり、
+     「一致なし」と誤って見逃すケースがあった。密な刻みならその間の値でも
+     検出できる（計算コストは上がるが、これは低頻度の登録時操作なので許容する）。 */
+  const UNIQUENESS_SCAN_SCALES = [0.6, 0.65, 0.71, 0.77, 0.85, 0.92, 1.0, 1.09, 1.19, 1.30, 1.42, 1.55, 1.68, 1.83, 2.0];
   async function checkAnchorUniqueness() {
     if (!S.anchors.length) return UI.toast('目印を1つ以上登録してから実行してください', 'warning');
     if (!S.refImg) return UI.toast('先に基準画像を読み込んでください', 'warning');
@@ -562,24 +573,34 @@
        ページ内のどこで一致したかは問わないため、「帳票判定のみ」の目印は対象外にする。 */
     const alignAnchors = S.anchors.filter(AnchorRoles.usedForAlign);
     if (!alignAnchors.length) return UI.toast('位置合わせに使う目印がありません（すべて「帳票判定のみ」です）', 'info', 5000);
-    UI.toast('ページ内での一意性を確認中…', 'info', 2500);
+    UI.toast('ページ内での一意性を確認中…（他倍率での走査も行うため通常より時間がかかります）', 'info', 3500);
     try {
       const templates = await Promise.all(alignAnchors.map(async a => ({
         id: a.id, imageElement: await dataURLtoImg(a.dataURL),
       })));
-      const results = await MatcherEngine.checkUniqueness(canvasFromImg(S.refImg), templates);
-      UI.renderAnchorUniqueness(results, uniquenessVerdict);
+      const { results, scan } = await MatcherEngine.checkUniqueness(canvasFromImg(S.refImg), templates,
+        { scales: UNIQUENESS_SCAN_SCALES });
+      UI.renderAnchorUniqueness(results, uniquenessVerdict, scan);
       let danger = 0, warn = 0;
       results.forEach(r => {
         const v = uniquenessVerdict(r);
         if (v.level === 'danger') danger++; else if (v.level === 'warn') warn++;
       });
+      /* 他スケールでの「注目に値する」一致（登録スケールから明確に離れており、
+         かつそれなりに強い相関）がある目印の数。danger/warnとは独立にカウントする
+         （等倍では一意=danger/warn無しでも、他スケールでの一致は起こりうるため）。 */
+      const scanHits = alignAnchors.filter(a => {
+        const s = scan.get(a.id);
+        return s && s.some(e => Math.abs(e.scale - 1) > 0.02 && e.best >= 0.5);
+      }).length;
       if (danger) {
         UI.toast(`⚠ ${danger} 件の目印がページ内の別の場所と酷似しています（一覧に表示）。位置合わせが別の場所に吸い寄せられる恐れがあります。枠や罫線だけでなく、文字を含む範囲へ描き直してください。`, 'warning', 15000);
       } else if (warn) {
         UI.toast(`${warn} 件の目印にやや紛らわしい相手がページ内にあります（一覧に表示）。文字を含めるとより安定します。`, 'warning', 9000);
+      } else if (scanHits) {
+        UI.toast(`ℹ️ 登録した倍率(100%)では一意ですが、${scanHits} 件の目印は他の倍率で基準画像内に気になる一致があります（一覧の「他倍率」チップにカーソルを合わせると詳細）。実際の帳票が登録時と違う倍率で来ると、その一致に吸い寄せられる可能性があります。`, 'info', 12000);
       } else {
-        UI.toast('すべての目印はページ内で十分に一意です', 'success', 4500);
+        UI.toast('すべての目印はページ内で十分に一意です（他倍率でも目立った一致はありません）', 'success', 4500);
       }
     } catch (e) { UI.toast('処理に失敗しました: ' + (e.message || e), 'error', 6000); }
   }
@@ -731,6 +752,36 @@
     UI.toast('画像 または PDF を読み込んでください', 'warning', 4000);
   }
 
+  /* 帳票自動判定の結果を診断ログへ残す。複数の帳票（レイアウト）を登録している場合、
+     「間違った帳票が選ばれ、その帳票のアンカーが今回の入力とは一致しない」という
+     まったく別の原因（位置合わせ自体は壊れていない）を、[align]のログだけからは
+     見分けられない。診断ビューアの[align]セクションと合わせて見れば、「帳票の選択
+     ミス」と「同じ帳票内でのアンカー誤マッチ」を切り分けられるようにする。 */
+  function logClassifyDecision(decision, scores) {
+    const best = decision.best;
+    const runner = decision.runnerUp;
+    console.log(`[classify] 判定=${decision.decision} 確信度=${Math.round((decision.confidence || 0) * 100)}% `
+      + `採用="${best ? best.formName : 'なし'}"${best ? ` peak=${best.peak.toFixed(2)} agg=${best.agg.toFixed(2)}` : ''}`
+      + (runner ? ` / 次点="${runner.formName}" agg=${runner.agg.toFixed(2)}` : ' / 次点なし'));
+    /* 採用された補正角度の分布を出す。帳票判定(classify)は「テンプレ数×角度数×
+       スケール数」回のテンプレートマッチングを行い、その大半を占める最大の処理時間
+       要因になっている（実測105回中105回、全体の約8割）。角度探索は範囲±2°/刻み1°で
+       5倍の乗数として効くため、もし実際に採用される角度が常に0°なら、範囲を狭める
+       だけで5倍近い高速化ができる。逆に0°以外が選ばれているならこの探索は必要で、
+       削ってはいけない。どちらなのかは実際に採用された角度を見ないと判断できない
+       ため、ここに残す（フラットベッドスキャナーなら0°が並ぶ想定）。 */
+    if (scores && scores.size) {
+      const tally = new Map();
+      scores.forEach(r => {
+        const a = r && typeof r.angle === 'number' ? r.angle : 0;
+        tally.set(a, (tally.get(a) || 0) + 1);
+      });
+      const parts = [...tally.entries()].sort((x, y) => x[0] - y[0]).map(([a, n]) => `${a}°×${n}`);
+      console.log(`[classify] 採用された補正角度の内訳: ${parts.join(' ')}`
+        + `（すべて0°なら角度探索の範囲を狭めて高速化できる余地あり）`);
+    }
+  }
+
   async function runRecognize() {
     if (!S.serverReady) return UI.toast('サーバーに接続中です', 'warning');
     if (!S.recogCanvas) return UI.toast('画像を読み込んでください', 'warning');
@@ -741,6 +792,7 @@
     await new Promise(r => setTimeout(r, 30));
     try {
       const { decision, scores } = await Recognizer.classify(S.recogCanvas, S.forms, classifyOpts());
+      logClassifyDecision(decision, scores);
       S.lastClassify = { decision, scores };
       UI.setPipeline('decide', ['match']);
       UI.renderDecision(decision, S.forms, {});
@@ -785,15 +837,32 @@
        ページ内の局所的な印刷ズレ（罫線幅の微差・紙送りの個体差等）の影響を受けやすく、
        matchTemplateは単一の剛体変換しか仮定しないため一致位置が「妥協点」に寄れる
        （＝スコア自体は悪くなくても位置精度が落ちる）。scaleEdge/weakMatchのスコア閾値
-       だけでは検出できないため、目印数からも独立して案内する。 */
-    const singleAnchor = (form.anchors || []).length <= 1;
+       だけでは検出できないため、目印数からも独立して案内する。
+       ※ form.anchors.length（登録数）ではなく matchQuality.n（今回実際に位置合わせへ
+       採用された点数）で判定する。登録数を見ていた旧実装では、目印を複数登録していても
+       スコア不足(<0.4)やRANSACの除外で実質1点しか使われなかった回（＝この警告が最も
+       必要な場面）を素通りしてしまっていた。 */
+    const singleAnchor = (matchQuality.n || 0) <= 1;
     const dropped = matchQuality.droppedOutliers || 0;
-    if (!(matchQuality.scaleEdge || matchQuality.weakMatch || singleAnchor || dropped)) return;
+    const residualHigh = !!matchQuality.residualHigh;
+    if (!(matchQuality.scaleEdge || matchQuality.weakMatch || singleAnchor || dropped || residualHigh)) return;
     S.posWarnCounts[form.id] = (S.posWarnCounts[form.id] || 0) + 1;
     if (S.posWarnShown.has(form.id)) return;
     S.posWarnShown.add(form.id);
     const pct = Math.round((matchQuality.bestScale || 1) * 100);
     const scoreIssue = matchQuality.weakMatch || matchQuality.scaleEdge;
+    /* 採用点同士が確定した変換と矛盾している＝どれかの目印が本来と別の場所（似た罫線・
+       繰り返しパターン等）に一致している可能性が高い。「採用○点・除外0点」という
+       表示だけでは気づけない不整合のため、他の判定より先に案内する。 */
+    if (residualHigh) {
+      UI.toast(
+        `⚠ 「${form.name}」: 採用した目印${matchQuality.n}点の位置関係が、確定した倍率${pct}%と矛盾しています。`
+        + `いずれかの目印が本来と別の場所（似た罫線や繰り返しパターン等）に一致している可能性が高いです。`
+        + `診断ログの[align]行で「ずれ」の大きい目印を確認し、文字を含む範囲へ描き直すか、その目印を削除してください。`,
+        'warning', 18000
+      );
+      return;
+    }
     /* 誤マッチを除外できた場合は、位置合わせ自体は残りの目印で成立している。
        ただし原因（他と見分けの付かない目印）は残るので、作り直しを促す。 */
     if (dropped && !scoreIssue) {
@@ -1308,14 +1377,16 @@
     navigator.clipboard.writeText(lines.join('\n')).then(() => UI.toast('全フィールドをコピーしました', 'success')).catch(() => UI.toast('コピーに失敗しました', 'error'));
   }
 
-  /* ── 診断情報をコピー ────────────────────────────────
+  /* ── 診断情報の収集 ──────────────────────────────────
      速度・精度の問題を報告する際、これまではDevToolsのConsoleとサーバーのターミナルを
      別々に開いて該当ログを自分で探す必要があった。この app.js の console.log 呼び出しは
      [perf]/[align] 診断ログのみ（他の用途に使っていない）なので、diag_log.js が
      溜めているブラウザ側の直近ログと、サーバー側の直近ログ（/api/diagnostics、
-     matcher.py/app.py の [perf] 出力を applog.py が保持）をまとめて1回のコピーで
-     渡せるようにする。DevToolsを開く必要自体を無くすのが狙い。 */
-  async function copyDiagnostics() {
+     matcher.py/app.py の [perf] 出力を applog.py が保持）をまとめて1回で取り出せる
+     ようにする。DevToolsを開く必要自体を無くすのが狙い。
+     「コピー」（そのまま会話に貼り付ける用）と「表示」（自分でHTML上で内容を確認する用、
+     DiagViewer参照）の両方が同じログを使うため、収集部分をここに切り出す。 */
+  async function gatherDiagnostics() {
     const parts = [
       '=== OCRtool2 診断情報 ===',
       `生成日時: ${new Date().toLocaleString('ja-JP')}`,
@@ -1326,10 +1397,6 @@
       const res = await fetch('/api/diagnostics');
       const json = await res.json();
       parts.push(`--- サーバー (OpenCV ${json.opencvVersion || '?'} / ${json.ocrEngine || '?'} ${json.tesseractVersion || ''} / CPU${json.cpuCount || '?'}) ---`);
-      /* tesserocrを入れたはずなのにpytesseractへフォールバックしたままの場合、理由を
-         毎回このコピーだけで追えるようにする（「pythonで直接importして再現して
-         ください」という往復を無くすため。ocr_server.py health_info()参照）。 */
-      if (json.tesserocrUnavailableReason) parts.push(`[warn] tesserocrが使われていません: ${json.tesserocrUnavailableReason}`);
       /* 健全なら概ね50〜150ms。これより大きい場合、機械側の要因（他プロセスの負荷・
          サーマルスロットリング等）でこのサーバー全体が遅くなっている可能性が高い。 */
       if (typeof json.calibrationNowMs === 'number') parts.push(`[health] 今の校正値=${json.calibrationNowMs}ms（健全な目安: 50〜150ms）`);
@@ -1340,12 +1407,31 @@
     parts.push('', '--- ブラウザ ---');
     const clientLog = DiagLog.recent();
     parts.push(...(clientLog.length ? clientLog : ['(ログなし。問題が起きた操作をもう一度行ってから押してください)']));
+    return parts.join('\n');
+  }
 
+  async function copyDiagnostics() {
     try {
-      await navigator.clipboard.writeText(parts.join('\n'));
+      await navigator.clipboard.writeText(await gatherDiagnostics());
       UI.toast('診断情報をコピーしました。会話にそのまま貼り付けてください', 'success', 4000);
     } catch (_) {
       UI.toast('コピーに失敗しました', 'error');
+    }
+  }
+
+  /* ── 診断情報を表示（HTML整形ビュー） ───────────────────
+     コピーしたテキストをそのまま読むのは、特に[align]（位置合わせ）行が
+     「基準座標→一致座標・ずれ・スコア・検出倍率」と情報密度が高く、生ログのままでは
+     どの目印が怪しいのか読み取りにくい。DiagViewer（diag_viewer.js）でテーブル化・
+     色分けし、ズレの大きい目印がひと目で分かるようにする。 */
+  async function showDiagnosticsViewer() {
+    $('diagViewerModal').classList.remove('hidden');
+    $('diagViewerBody').innerHTML = '<p class="diag-loading"><i class="fas fa-spinner fa-spin"></i> 取得中…</p>';
+    try {
+      const text = await gatherDiagnostics();
+      $('diagViewerBody').innerHTML = DiagViewer.render(text);
+    } catch (e) {
+      $('diagViewerBody').innerHTML = `<p class="diag-loading">取得に失敗しました: ${e.message || e}</p>`;
     }
   }
 
@@ -1361,6 +1447,7 @@
     const t0 = performance.now();
     try {
       const { decision, scores } = await Recognizer.classify(canvas, S.forms, classifyOpts());
+      logClassifyDecision(decision, scores);
       const t1 = performance.now();
       const candId = decision.best && decision.best.formId;
       const useId = forcedFormId || candId;
@@ -2751,6 +2838,9 @@
     $('sampleFormModal').addEventListener('click', e => { if (e.target === $('sampleFormModal')) $('sampleFormModal').classList.add('hidden'); });
     $('btnHelp').addEventListener('click', () => $('helpModal').classList.remove('hidden'));
     $('btnCopyDiagnostics').addEventListener('click', copyDiagnostics);
+    $('btnShowDiagnostics').addEventListener('click', showDiagnosticsViewer);
+    $('closeDiagViewerModal').addEventListener('click', () => $('diagViewerModal').classList.add('hidden'));
+    $('diagViewerModal').addEventListener('click', e => { if (e.target === $('diagViewerModal')) $('diagViewerModal').classList.add('hidden'); });
     $('btnVersion').addEventListener('click', openVersionModal);
     $('closeVersionModal').addEventListener('click', () => $('versionModal').classList.add('hidden'));
     $('versionModal').addEventListener('click', e => { if (e.target === $('versionModal')) $('versionModal').classList.add('hidden'); });

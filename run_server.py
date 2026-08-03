@@ -22,6 +22,16 @@ import webbrowser
 
 DEFAULT_PORT = 5001
 
+# 本ツール自身が同梱するトップレベルのモジュール名。ImportErrorがこのどれかを
+# 指している場合は「pipで入れる外部パッケージが無い」のではなく「このファイル
+# 自体がフォルダに存在しない」（ダウンロード/コピーが不完全）ケースであり、
+# `pip install -r requirements.txt` を案内しても解決しない（pipはPyPI上の
+# パッケージしか入れられず、本ツール固有のファイルは配布できないため）。
+_LOCAL_MODULES = {
+    'app', 'applog', 'ocr_server', 'matcher', 'imaging',
+    'health_monitor', 'processor_server', 'version_info',
+}
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description='帳票OCR統合ツール ローカルサーバー')
@@ -33,8 +43,17 @@ def main() -> int:
         import ocr_server as ocr
         from app import create_app
     except ImportError as e:
-        print(f'[エラー] 必要なパッケージが見つかりません: {e}', file=sys.stderr)
-        print('先に `pip install -r requirements.txt` を実行してください。', file=sys.stderr)
+        missing = getattr(e, 'name', None)
+        if missing in _LOCAL_MODULES:
+            print(f'[エラー] 本ツールを構成するファイルが見つかりません: {e}', file=sys.stderr)
+            print(f'  "{missing}.py" が run_server.py と同じフォルダに存在しません。', file=sys.stderr)
+            print('  プロジェクトの一部ファイルが欠けた状態でダウンロード/コピーされた可能性があります', file=sys.stderr)
+            print('  （git pullが不完全、zip展開の失敗、ウイルス対策ソフトによる隔離など）。', file=sys.stderr)
+            print('  → 配布元（gitリポジトリ、または配布物一式）から取得し直してください。', file=sys.stderr)
+            print('  ※ `pip install` は外部パッケージ用のコマンドのため、これでは解決しません。', file=sys.stderr)
+        else:
+            print(f'[エラー] 必要な外部パッケージが見つかりません: {e}', file=sys.stderr)
+            print('先に `pip install -r requirements.txt` を実行してください。', file=sys.stderr)
         return 1
 
     if not ocr.is_ready():

@@ -35,7 +35,17 @@ const PdfImport = (() => {
        （DevToolsの警告の直接の原因）。 */
     const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);   // 透過PDF対策
-    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    /* intent:'print' を指定する。pdf.js内部(InternalRenderTask)は
+       `useRequestAnimationFrame: !intentPrint` で描画の継続をスケジュールしており、
+       既定(intent省略='display')ではwindow.requestAnimationFrameで次のチャンクを
+       予約する。requestAnimationFrameはタブが非表示(バックグラウンド)の間は
+       ブラウザに完全に停止されるため、一括OCR中にタブを離れると、複数チャンクの
+       描画を要するページでラスタライズが止まってしまう（実測: 罫線・文字数が
+       多いテスト帳票でチャンク数=3、intent:'print'では0で、この依存自体が
+       消える）。'print'に切り替えるとPromiseベースの継続に変わり、この停止が
+       起きなくなる。実際の帳票を模した合成PDFで、両intentの出力が完全に
+       ピクセル一致（差分0）することを確認済みで、画質への影響はない。 */
+    await page.render({ canvasContext: ctx, viewport: vp, intent: 'print' }).promise;
     return c;
   }
 
@@ -150,6 +160,17 @@ const PdfImport = (() => {
     pages.sort((x, y) => x - y);
     return { pages, formFor };
   }
+  /* 範囲行の増減を伴わない変更（ページ数の反映）だけを行う軽量版。
+     pa-from/pa-toの変更時にrenderAssigns()（行DOMの全作り直し）を呼ぶと、
+     Tabキーでの次要素への移動中にブラウザがフォーカス先として狙っていた
+     要素そのものが消え、移動先を見失って先頭要素に戻ってしまう
+     （値を直してTabで次の項目へ、という一番よくある操作が壊れていた）。
+     行を増減しない限りDOM構造は変わらないため、ボタン表示の更新だけで足りる。 */
+  function updateBatchButton() {
+    const { pages } = resolveBatch();
+    $('pdfBatchBtn').innerHTML = `<i class="fas fa-layer-group"></i> 一括OCR（${pages.length}ページ）`;
+    $('pdfBatchBtn').disabled = pages.length === 0;
+  }
   function renderAssigns() {
     const show = batchAvailable();
     $('pdfBatchAssign').style.display = show ? '' : 'none';
@@ -162,15 +183,13 @@ const PdfImport = (() => {
         + ` – <input type="number" class="pdf-range-input pa-to" min="1" max="${numPages}" value="${a.to}">`
         + ` → <select class="pselect pa-form">${formOptionsHTML(a.formId)}</select>`
         + ` <button type="button" class="pa-del" title="この範囲を削除"${assigns.length <= 1 ? ' disabled' : ''}><i class="fas fa-xmark"></i></button>`;
-      row.querySelector('.pa-from').addEventListener('change', e => { a.from = parseInt(e.target.value, 10) || 1; renderAssigns(); });
-      row.querySelector('.pa-to').addEventListener('change', e => { a.to = parseInt(e.target.value, 10) || numPages; renderAssigns(); });
+      row.querySelector('.pa-from').addEventListener('change', e => { a.from = parseInt(e.target.value, 10) || 1; updateBatchButton(); });
+      row.querySelector('.pa-to').addEventListener('change', e => { a.to = parseInt(e.target.value, 10) || numPages; updateBatchButton(); });
       row.querySelector('.pa-form').addEventListener('change', e => { a.formId = e.target.value; });
       row.querySelector('.pa-del').addEventListener('click', () => { assigns.splice(i, 1); renderAssigns(); });
       wrap.appendChild(row);
     });
-    const { pages } = resolveBatch();
-    $('pdfBatchBtn').innerHTML = `<i class="fas fa-layer-group"></i> 一括OCR（${pages.length}ページ）`;
-    $('pdfBatchBtn').disabled = pages.length === 0;
+    updateBatchButton();
   }
   function addAssign() {
     const last = assigns[assigns.length - 1];
@@ -189,7 +208,7 @@ const PdfImport = (() => {
       const vp = page.getViewport({ scale: previewScale });
       const c = $('pdfPreviewCanvas');
       c.width = Math.round(vp.width); c.height = Math.round(vp.height);
-      await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+      await page.render({ canvasContext: c.getContext('2d'), viewport: vp, intent: 'print' }).promise;   // renderPageToCanvas参照: rAF依存回避
       const out = page.getViewport({ scale: dpi / 72 });   // 1pt=1/72inch → scale=dpi/72
       $('pdfOutInfo').textContent = `読み込みサイズ: ${Math.round(out.width)} × ${Math.round(out.height)} px（${dpi} DPI）`;
     } catch (e) {
