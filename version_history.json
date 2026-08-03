@@ -1,5 +1,11 @@
 [
   {
+    "version": "2026-07-29.19",
+    "date": "2026-07-29",
+    "summary": "tesserocrへ切り替わらない場合、診断コピーに失敗理由がそのまま出るようにした",
+    "detail": "背景: tesserocr導入作業中、conda環境（tesseract 5.2.0がconda-forge経由で導入済み）でサーバーを起動しても、診断コピーのサーバー情報は「pytesseract」のままだった。tesserocrがインストールできているかどうかは外からは分からず、失敗の理由（未インストールなのか、importは通るが初期化（tessdataの検出等）で失敗しているのか）を確認するには、その都度\n  python -c \"import tesserocr\"\nを実行してもらうしかなかった。\n\n対策: ocr_server.py の _init_engine() は、tesserocrの初期化に失敗した際の理由を元々 _INIT_ERROR に保持していたが、フォールバック先のpytesseractが正常に動いてしまうと、この理由がどこにも表示されないまま埋もれていた。\nhealth_info() が返す情報に tesserocrUnavailableReason を追加し（pytesseractへフォールバックしている時だけ、tesserocr初期化失敗の理由をそのまま乗せる）、/api/diagnostics 経由でも返すようにした。診断コピーのサーバー情報の直後に\n  [warn] tesserocrが使われていません: <実際の例外メッセージ>\nという行が自動的に出るようになる。\n\n検証: サンドボックス（tesserocr未インストール環境）で /api/diagnostics の応答に該当フィールドが正しい理由付きで含まれること、実際にブラウザから「診断情報をコピー」ボタンを押した結果（クリップボードの中身）にも[warn]行が正しく出ることをPlaywrightで確認した。"
+  },
+  {
     "version": "2026-07-29.18",
     "date": "2026-07-29",
     "summary": "tesserocr導入の下準備。conda-forge配置のtessdataも自動検出できるよう候補パスを追加",

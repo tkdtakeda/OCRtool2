@@ -134,6 +134,10 @@ def create_app() -> Flask:
             'ocrEngine': info['ocrEngine'],
             'tesseractVersion': info['tesseractVersion'],
             'cpuCount': os.cpu_count(),
+            # tesserocrを入れたのにpytesseractへフォールバックしたままの場合、
+            # 理由を診断コピーだけで追えるようにする（「pythonで直接importして
+            # 再現してください」という往復を無くすため）。
+            'tesserocrUnavailableReason': info.get('tesserocrUnavailableReason'),
         })
 
     # ── 画像マッチング（MatcherEngine.matchAll 相当） ──────

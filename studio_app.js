@@ -1326,6 +1326,10 @@
       const res = await fetch('/api/diagnostics');
       const json = await res.json();
       parts.push(`--- サーバー (OpenCV ${json.opencvVersion || '?'} / ${json.ocrEngine || '?'} ${json.tesseractVersion || ''} / CPU${json.cpuCount || '?'}) ---`);
+      /* tesserocrを入れたはずなのにpytesseractへフォールバックしたままの場合、理由を
+         毎回このコピーだけで追えるようにする（「pythonで直接importして再現して
+         ください」という往復を無くすため。ocr_server.py health_info()参照）。 */
+      if (json.tesserocrUnavailableReason) parts.push(`[warn] tesserocrが使われていません: ${json.tesserocrUnavailableReason}`);
       /* 健全なら概ね50〜150ms。これより大きい場合、機械側の要因（他プロセスの負荷・
          サーマルスロットリング等）でこのサーバー全体が遅くなっている可能性が高い。 */
       if (typeof json.calibrationNowMs === 'number') parts.push(`[health] 今の校正値=${json.calibrationNowMs}ms（健全な目安: 50〜150ms）`);

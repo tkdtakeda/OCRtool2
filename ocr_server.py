@@ -421,4 +421,13 @@ def health_info() -> dict[str, Any]:
             tesseract_version = str(_pytesseract.get_tesseract_version())
     except Exception:  # noqa: BLE001 - 診断情報なので失敗しても健康チェック自体は止めない
         pass
-    return {'ocrEngine': _ENGINE, 'tesseractVersion': tesseract_version, 'languages': languages}
+    # tesserocrが入っているのにpytesseractへフォールバックしている場合、なぜ使われて
+    # いないのかが今まで診断ログのどこにも出ていなかった（_INIT_ERRORはOCR自体が
+    # 全滅した時のエラー表示にしか使っていなかったため）。tesserocrを入れたはずなのに
+    # 切り替わらない、という報告に対応する際、毎回「pythonで直接importして再現して
+    # ください」と頼む必要が無いよう、フォールバック時は理由をそのまま出す。
+    tesserocr_note = _INIT_ERROR if (_ENGINE == 'pytesseract' and _INIT_ERROR) else None
+    return {
+        'ocrEngine': _ENGINE, 'tesseractVersion': tesseract_version, 'languages': languages,
+        'tesserocrUnavailableReason': tesserocr_note,
+    }
