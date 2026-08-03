@@ -554,13 +554,17 @@
     if (ratio >= UNIQ_WARN_RATIO)   return { level: 'warn',   text: `紛らわしい ${pct}%` };
     return { level: null, text: '' };
   }
-  /* recognizer.js の LOCALIZE_SCALES と同じ値。一意性チェックの等倍判定
-     （uniquenessVerdict・danger/warnバッジ）とは別に、実際の認識(prepare)が
-     探索する全スケール範囲でも基準画像内に強い一致がないかを走査する
-     （matcher.py scan_scales参照）。等倍では一意でも他スケールでは基準画像内の
-     別の場所と酷似する目印が実在した（1個の目印だけで倍率が77%に誤検出された
-     実例）ため、参考情報として追加する。危険/安全の自動判定はしない。 */
-  const UNIQUENESS_SCAN_SCALES = [0.6, 0.71, 0.85, 1.0, 1.19, 1.42, 1.68, 2.0];
+  /* 一意性チェックの等倍判定（uniquenessVerdict・danger/warnバッジ）とは別に、
+     実際の認識(prepare)が探索する全スケール範囲でも基準画像内に強い一致がないかを
+     走査する（matcher.py scan_scales参照）。等倍では一意でも他スケールでは基準画像内の
+     別の場所と酷似する目印が実在した（1個の目印だけで倍率が77%に誤検出された実例）
+     ため、参考情報として追加する。危険/安全の自動判定はしない。
+     recognizer.js の LOCALIZE_SCALES（8点・粗探索用）とは別に、こちらは独自に
+     もっと密な刻みを使う。実例（77%）を8点刻みで検証したところ、隣接する
+     刻み(71%/85%)ではテンプレートと双子のサイズが合わずスコアが下がり、
+     「一致なし」と誤って見逃すケースがあった。密な刻みならその間の値でも
+     検出できる（計算コストは上がるが、これは低頻度の登録時操作なので許容する）。 */
+  const UNIQUENESS_SCAN_SCALES = [0.6, 0.65, 0.71, 0.77, 0.85, 0.92, 1.0, 1.09, 1.19, 1.30, 1.42, 1.55, 1.68, 1.83, 2.0];
   async function checkAnchorUniqueness() {
     if (!S.anchors.length) return UI.toast('目印を1つ以上登録してから実行してください', 'warning');
     if (!S.refImg) return UI.toast('先に基準画像を読み込んでください', 'warning');
@@ -748,6 +752,19 @@
     UI.toast('画像 または PDF を読み込んでください', 'warning', 4000);
   }
 
+  /* 帳票自動判定の結果を診断ログへ残す。複数の帳票（レイアウト）を登録している場合、
+     「間違った帳票が選ばれ、その帳票のアンカーが今回の入力とは一致しない」という
+     まったく別の原因（位置合わせ自体は壊れていない）を、[align]のログだけからは
+     見分けられない。診断ビューアの[align]セクションと合わせて見れば、「帳票の選択
+     ミス」と「同じ帳票内でのアンカー誤マッチ」を切り分けられるようにする。 */
+  function logClassifyDecision(decision) {
+    const best = decision.best;
+    const runner = decision.runnerUp;
+    console.log(`[classify] 判定=${decision.decision} 確信度=${Math.round((decision.confidence || 0) * 100)}% `
+      + `採用="${best ? best.formName : 'なし'}"${best ? ` peak=${best.peak.toFixed(2)} agg=${best.agg.toFixed(2)}` : ''}`
+      + (runner ? ` / 次点="${runner.formName}" agg=${runner.agg.toFixed(2)}` : ' / 次点なし'));
+  }
+
   async function runRecognize() {
     if (!S.serverReady) return UI.toast('サーバーに接続中です', 'warning');
     if (!S.recogCanvas) return UI.toast('画像を読み込んでください', 'warning');
@@ -758,6 +775,7 @@
     await new Promise(r => setTimeout(r, 30));
     try {
       const { decision, scores } = await Recognizer.classify(S.recogCanvas, S.forms, classifyOpts());
+      logClassifyDecision(decision);
       S.lastClassify = { decision, scores };
       UI.setPipeline('decide', ['match']);
       UI.renderDecision(decision, S.forms, {});
@@ -1358,10 +1376,6 @@
       const res = await fetch('/api/diagnostics');
       const json = await res.json();
       parts.push(`--- サーバー (OpenCV ${json.opencvVersion || '?'} / ${json.ocrEngine || '?'} ${json.tesseractVersion || ''} / CPU${json.cpuCount || '?'}) ---`);
-      /* tesserocrを入れたはずなのにpytesseractへフォールバックしたままの場合、理由を
-         毎回このコピーだけで追えるようにする（「pythonで直接importして再現して
-         ください」という往復を無くすため。ocr_server.py health_info()参照）。 */
-      if (json.tesserocrUnavailableReason) parts.push(`[warn] tesserocrが使われていません: ${json.tesserocrUnavailableReason}`);
       /* 健全なら概ね50〜150ms。これより大きい場合、機械側の要因（他プロセスの負荷・
          サーマルスロットリング等）でこのサーバー全体が遅くなっている可能性が高い。 */
       if (typeof json.calibrationNowMs === 'number') parts.push(`[health] 今の校正値=${json.calibrationNowMs}ms（健全な目安: 50〜150ms）`);
@@ -1412,6 +1426,7 @@
     const t0 = performance.now();
     try {
       const { decision, scores } = await Recognizer.classify(canvas, S.forms, classifyOpts());
+      logClassifyDecision(decision);
       const t1 = performance.now();
       const candId = decision.best && decision.best.formId;
       const useId = forcedFormId || candId;

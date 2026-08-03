@@ -151,6 +151,50 @@ const DiagViewer = (() => {
       </div>`;
   }
 
+  /* ── [classify] 行: 帳票自動判定の結果 ──────────────────────────
+     複数の帳票（レイアウト）を登録している場合、「間違った帳票が選ばれ、その
+     帳票のアンカーが今回の入力とは一致しない」という、[align]セクションだけでは
+     見分けられない原因がある。1位と2位のスコア差が小さい場合は、帳票の取り違えを
+     疑うよう案内する（studio_app.js logClassifyDecision が出力するログを解析）。 */
+  const RE_CLASSIFY = /^\[classify\] 判定=(\S+) 確信度=(\d+)% 採用="([^"]*)"(?: peak=([\d.]+) agg=([\d.]+))?(?: \/ 次点="([^"]*)" agg=([\d.]+)| \/ 次点なし)$/;
+  /* 1位と2位のagg差がこの割合未満なら「僅差」として注意を促す。断定的な閾値では
+     ないため、UNIQUENESS同様に中立的な表示に留める。 */
+  const CLASSIFY_CLOSE_MARGIN_RATIO = 0.20;
+
+  function renderClassifySection(lines) {
+    const entries = [];
+    lines.forEach(line => {
+      const m = RE_CLASSIFY.exec(line);
+      if (m) entries.push({
+        decision: m[1], confidence: +m[2], formName: m[3],
+        peak: m[4] != null ? parseFloat(m[4]) : null, agg: m[5] != null ? parseFloat(m[5]) : null,
+        runnerName: m[6] || null, runnerAgg: m[7] != null ? parseFloat(m[7]) : null,
+      });
+    });
+    if (!entries.length) return '';
+    /* 同じ設定で繰り返し実行されることが多いため、直近1件だけを主表示にし、
+       残りは生ログとして折りたたむ（[align]と同様、最新の状態が分かればよい）。 */
+    const last = entries[entries.length - 1];
+    const closeCall = last.runnerName && last.agg != null && last.runnerAgg != null
+      && (last.agg - last.runnerAgg) < CLASSIFY_CLOSE_MARGIN_RATIO * last.agg;
+    return `
+      <p class="diag-subhdr">帳票自動判定</p>
+      <div class="diag-align-block">
+        <div class="diag-align-summary">
+          <span class="diag-mono">判定=${esc(last.decision)} ／ 確信度${last.confidence}%</span>
+        </div>
+        <table class="diag-table"><thead><tr><th></th><th>帳票名</th><th>peak</th><th>agg</th></tr></thead><tbody>
+          <tr><td>採用</td><td>${esc(last.formName)}</td><td class="diag-mono">${last.peak != null ? last.peak.toFixed(2) : '－'}</td><td class="diag-mono">${last.agg != null ? last.agg.toFixed(2) : '－'}</td></tr>
+          ${last.runnerName ? `<tr class="${closeCall ? 'diag-row-bad' : ''}"><td>次点</td><td>${esc(last.runnerName)}</td><td class="diag-mono">－</td><td class="diag-mono${closeCall ? ' diag-text-bad' : ''}">${last.runnerAgg.toFixed(2)}</td></tr>` : ''}
+        </tbody></table>
+        ${closeCall ? `<p class="diag-warn-box"><i class="fas fa-triangle-exclamation"></i>
+          採用した帳票「${esc(last.formName)}」と次点「${esc(last.runnerName)}」のスコア差が僅かです。
+          もし位置合わせや読み取り結果がおかしい場合、実は次点の帳票の方が正しい可能性があります。
+          「OCR実行」画面で帳票を手動選択し、次点の帳票でも試してみてください。</p>` : ''}
+        ${entries.length > 1 ? `<p class="diag-note">直近の判定のみ表示（計${entries.length}回分のログあり）</p>` : ''}
+      </div>`;
+  }
+
   /* ── [ocr] 行: 領域名でグルーピングして時系列のまま表示 ──────────── */
   const RE_OCR_NAME = /^\[ocr\]\s+"([^"]*)"\s?(.*)$/;
   function renderOcrSection(lines) {
@@ -189,12 +233,13 @@ const DiagViewer = (() => {
   function render(text) {
     const lines = String(text || '').split('\n');
     const headLines = [];
-    const perfLines = [], healthLines = [], warnLines = [], errLines = [], ocrLines = [], alignLines = [], otherLines = [];
+    const perfLines = [], healthLines = [], warnLines = [], errLines = [], ocrLines = [], alignLines = [], classifyLines = [], otherLines = [];
     let inHeader = true;
     lines.forEach(line => {
       if (line.startsWith('--- サーバー') || line.startsWith('--- ブラウザ')) { inHeader = false; return; }
       if (inHeader) { headLines.push(line); return; }
       if (line.startsWith('[align]')) alignLines.push(line);
+      else if (line.startsWith('[classify]')) classifyLines.push(line);
       else if (line.startsWith('[ocr]')) ocrLines.push(line);
       else if (line.startsWith('[perf]')) perfLines.push(line);
       else if (line.startsWith('[health]')) healthLines.push(line);
@@ -203,6 +248,7 @@ const DiagViewer = (() => {
       else if (line.trim()) otherLines.push(line);
     });
 
+    const classifyHtml = renderClassifySection(classifyLines);
     const alignBlocks = parseAlignBlocks(alignLines);
     const alignHtml = alignBlocks.length
       ? `<p class="diag-subhdr">位置合わせ（目印マッチング）</p>${alignBlocks.map(renderAlignBlock).join('')}`
@@ -215,7 +261,7 @@ const DiagViewer = (() => {
     const errHtml = errLines.length
       ? `<div class="diag-warn-box diag-warn-box--err">${errLines.map(l => `<div>${esc(l)}</div>`).join('')}</div>` : '';
 
-    if (!alignBlocks.length && !ocrLines.length && !perfLines.length && !healthLines.length && !warnLines.length) {
+    if (!classifyLines.length && !alignBlocks.length && !ocrLines.length && !perfLines.length && !healthLines.length && !warnLines.length) {
       return `<div class="diag-head">${headHtml}</div><p class="diag-loading">認識をまだ実行していないか、ログが空です。「OCR実行」を一度行ってから開き直してください。</p>`;
     }
 
@@ -223,6 +269,7 @@ const DiagViewer = (() => {
       <div class="diag-head">${headHtml}</div>
       ${errHtml}
       ${warnHtml}
+      ${classifyHtml}
       ${alignHtml}
       ${ocrHtml}
       ${renderRawSection('速度ログ', perfLines, 'diag-raw-perf')}
