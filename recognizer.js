@@ -914,7 +914,15 @@ const Recognizer = (() => {
     if (!canvas || !Array.isArray(boxes) || boxes.length < 2) return null;
     const otherWidths = boxes.filter(b => b.text >= '0' && b.text <= '9' && b.text !== '1')
                              .map(b => b.x1 - b.x0);
-    if (!otherWidths.length) return null;
+    /* 基準幅(wref)の根拠が1個だけだと、その1個自体が破損（隣接文字が滲んで
+       融合した等）していた場合に無防備になる。936ケース回帰で見つかった
+       残存誤フリップ('1,000'→70, LiberationMono/11px/blur0.7)はまさにこの
+       ケースで、本来3個あるはずの'0'がrepairViaBoxesの分割統合処理で1個
+       (幅17px)に潰され、その単独の幅がそのままwrefとして採用されていた。
+       2個以上の裏付けを必須にすることで、この誤フリップは実測でゼロになり、
+       正しい「7」検出（頑固197ケース・936ケース双方）には影響しないことを
+       確認済み。 */
+    if (otherWidths.length < 2) return null;
     const wref = medianOf(otherWidths);
     if (!wref || wref < 4) return null;   // 数px程度では画素検証の分解能が無い
     let flipped = 0;
