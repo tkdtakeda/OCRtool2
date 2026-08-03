@@ -766,6 +766,82 @@ const Recognizer = (() => {
     return groups.length < items.length ? groups : null;   // 何も併合されなければ判定材料なし
   }
 
+  /* ── 字形検証: 「1」と読まれた字形が本当は「7」ではないかを画素で確かめる ──
+     背景: 縦棒がほぼ垂直な書体（Courier系等幅など）の「7」は、LSTMに字形丸ごと
+     「1」と誤分類されることがある（実機の"704"→"104"。矩形の個数も幅も正常で、
+     白枠の追加や、別前処理画像（痩せ版）での読み直しでも「104」のまま直らない
+     頑固なケースが実在する）。OCRで読み直す限り、同じ絵を見ている誤りは相関して
+     しまうため、この1↔7だけはOCRに頼らず字形の物理的性質で判定する:
+       「7」の上部横バーは標準的な数字幅のほぼ全域を塗るが、
+       「1」の上部（旗＋縦棒）はどの書体でもそこまで届かない。
+     メトリクスは「字形上部28%の行の最長連続インクラン長 ÷ Wref」。
+       ・最長連続ランなので、隣の字形の欠片が矩形に紛れ込んでも値が膨らまない
+       ・Wref（標準的な数字幅）は同じ読み取り結果の「1以外の数字」矩形幅の中央値
+         ＝同一書体・同一条件の実測値。比較対象が無い値（1だけ等）は判定しない
+     実測（セリフ・太字・等幅・ゴシック17書体×サイズ6×ブラー3×シアー3、各378構成）:
+       「1」の最大値0.720 / 「7」の最小値0.815 で、しきい値0.78が全構成を正しく分ける。
+     さらに前提条件として字形幅がWrefの72%以上であることも要求する（ほとんどの
+     書体の本物の1は細く、画素を見るまでもなく除外できる）。 */
+  const SEVEN_TOPBAR_MIN_RATIO = 0.78;   // 上部バー率がこれ以上なら「7」と判定
+  const SEVEN_TOPBAR_TOP_FRAC  = 0.28;   // 「上部」= 字形の実インク高さの上から28%
+  const SEVEN_WIDTH_MIN_RATIO  = 0.72;   // 判定の前提: 字形幅 ≥ Wref×この値
+
+  /** 矩形内の画素から「上部の最長連続インクラン ÷ wref」を求める。 */
+  function sevenTopBarRatio(canvas, box, wref) {
+    const x0 = Math.max(0, Math.floor(box.x0)), y0 = Math.max(0, Math.floor(box.y0));
+    const x1 = Math.min(canvas.width, Math.ceil(box.x1)), y1 = Math.min(canvas.height, Math.ceil(box.y1));
+    const w = x1 - x0, h = y1 - y0;
+    if (w < 2 || h < 2) return 0;
+    const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(x0, y0, w, h).data;
+    /* 白地合成の輝度<128をインクとする（本線・変種とも白背景の画像なので固定で足りる） */
+    const ink = new Uint8Array(w * h);
+    for (let p = 0, i = 0; p < ink.length; p++, i += 4) {
+      const a = d[i + 3] / 255;
+      const lum = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) * a + 255 * (1 - a);
+      ink[p] = lum < 128 ? 1 : 0;
+    }
+    /* 矩形はTesseract報告のままだと余白を含むことがあるため、実インクの上下端に詰める */
+    let top = -1, bottom = -1;
+    for (let y = 0; y < h && top < 0; y++) { for (let x = 0; x < w; x++) if (ink[y * w + x]) { top = y; break; } }
+    for (let y = h - 1; y >= 0 && bottom < 0; y--) { for (let x = 0; x < w; x++) if (ink[y * w + x]) { bottom = y; break; } }
+    if (top < 0) return 0;
+    const rows = Math.max(1, Math.ceil((bottom - top + 1) * SEVEN_TOPBAR_TOP_FRAC));
+    let best = 0;
+    for (let y = top; y < top + rows && y <= bottom; y++) {
+      let run = 0;
+      for (let x = 0; x < w; x++) {
+        if (ink[y * w + x]) { run++; if (run > best) best = run; }
+        else run = 0;
+      }
+    }
+    return best / wref;
+  }
+
+  /** 「1」と読まれた各字形を画素検証し、7と判定されれば置換した文字列を返す。
+      置換が1つも無ければ null。canvas はその矩形群を生成したOCR入力画像。 */
+  function fixSevenReadAsOne(canvas, boxes, logPrefix) {
+    if (!canvas || !Array.isArray(boxes) || boxes.length < 2) return null;
+    const otherWidths = boxes.filter(b => b.text >= '0' && b.text <= '9' && b.text !== '1')
+                             .map(b => b.x1 - b.x0);
+    if (!otherWidths.length) return null;
+    const wref = medianOf(otherWidths);
+    if (!wref || wref < 4) return null;   // 数px程度では画素検証の分解能が無い
+    let flipped = 0;
+    const texts = boxes.map(b => {
+      if (b.text !== '1') return b.text;
+      if ((b.x1 - b.x0) < SEVEN_WIDTH_MIN_RATIO * wref) return b.text;   // 細い＝本物の1
+      const ratio = sevenTopBarRatio(canvas, b, wref);
+      if (ratio >= SEVEN_TOPBAR_MIN_RATIO) {
+        console.log(`${logPrefix} 字形検証: 「1」[${b.x0}-${b.x1}]は上部バー率${ratio.toFixed(2)}`
+          + `≥${SEVEN_TOPBAR_MIN_RATIO}（幅${b.x1 - b.x0}px/基準${Math.round(wref)}px）→「7」に修正`);
+        flipped++;
+        return '7';
+      }
+      return b.text;
+    });
+    return flipped ? texts.join('') : null;
+  }
+
   /* ④ 単一値欄の拡大目標。Tesseractは字形が小さいと 9↔G / 0↔O / 1↔I などの
      微妙な取り違えを起こしやすい。行の高さがこの値に満たない切り出しだけを拡大して
      認識する（最大 SINGLE_MAX_SCALE 倍）。
@@ -1056,18 +1132,25 @@ const Recognizer = (() => {
         const dropped = new Set((rep ? rep.dropped : []));
         console.log(`[ocr]   "${region.name}"${label} 文字矩形: `
           + boxes.map(b => `${b.text}[${b.x0}-${b.x1}]${dropped.has(b) ? '←除外' : ''}`).join(' '));
-        if (!rep) return null;
-        const repRes = { ...boxRes, fullText: rep.text, lines: [{ text: rep.text, confidence: boxRes.confidence || 0 }] };
+        /* ① 分割字形（同じ字形の二重検出）の統合 → ② 残った矩形で字形検証（1↔7） */
+        const keptBoxes = boxes.filter(b => !dropped.has(b));
+        let text = rep ? rep.text : null;
+        const geoText = fixSevenReadAsOne(canvas, keptBoxes, `[ocr]   "${region.name}"${label}`);
+        let geoFixed = false;
+        if (geoText != null) { text = geoText; geoFixed = true; }
+        if (text == null) return null;
+        const repRes = { ...boxRes, fullText: text, lines: [{ text, confidence: boxRes.confidence || 0 }] };
         const repOut = finishText(repRes, region, rule, active, single);
-        console.log(`[ocr]   "${region.name}"${label} 分割字形を統合 raw=${JSON.stringify(rep.text)} `
-          + `→ ${JSON.stringify(repOut.text)} valid=${repOut.constraintValid} `
+        console.log(`[ocr]   "${region.name}"${label} ${geoFixed ? '字形検証を反映' : '分割字形を統合'} `
+          + `raw=${JSON.stringify(text)} → ${JSON.stringify(repOut.text)} valid=${repOut.constraintValid} `
           + `lengthSuspicious=${repOut.lengthSuspicious} ambiguous=${repOut.ambiguous}`);
         return (repOut.constraintValid && !repOut.lengthSuspicious && !repOut.ambiguous)
-          ? { res: repRes, out: repOut } : null;
+          ? { res: repRes, out: repOut, geoFixed } : null;
       };
+      let mainGeoFixed = false;
       if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous || isVariableSingle)) {
         const fixed = await repairViaBoxes(inputCanvas, '');
-        if (fixed) { res = fixed.res; out = fixed.out; }
+        if (fixed) { res = fixed.res; out = fixed.out; mainGeoFixed = !!fixed.geoFixed; }
       }
       /* 可変長欄のセカンドオピニオン: 別の見え方に加工した画像（変種）で読み直し、
          2対1の多数決で確定する（方式の背景と実測はファイル先頭側の
@@ -1076,10 +1159,18 @@ const Recognizer = (() => {
          ・食い違えばグレー版(gray)で三者目を読み、多数派の値を採用
          ・三者三様なら本線の値のまま「要確認」フラグ
          変種の読みが本線と食い違った場合、その食い違いが分割字形（二重検出）の
-         せいである可能性があるので、比較の前に変種側も矩形修復を試みる。 */
+         せいである可能性があるので、比較の前に変種側も矩形修復を試みる。
+
+         字形検証（fixSevenReadAsOne）が本線の値を修正した場合は多数決を行わない。
+         この誤読はOCRがどの画像でも同じ間違いをする（誤りが相関する）ことが実測で
+         分かっており、画素という物理的証拠に基づく判定を、相関した多数決で
+         覆してしまっては本末転倒のため（変種側の読みも同じ"104"側に倒れ、
+         2対1で誤った値に戻してしまう）。 */
       let secondOpinionDiff = null;
       let secondOpinionNote = '';
-      if (isVariableSingle && inputSet) {
+      if (mainGeoFixed) {
+        secondOpinionNote = '字形検証で修正';
+      } else if (isVariableSingle && inputSet) {
         const eroCanvas = inputSet.erode();
         const eroRes = await OcrProcessor.recognize(eroCanvas, usePsm, onProg, useLang, useWl);
         let ero = { res: eroRes, out: finishText(eroRes, region, rule, active, single) };
