@@ -820,8 +820,12 @@
        ページ内の局所的な印刷ズレ（罫線幅の微差・紙送りの個体差等）の影響を受けやすく、
        matchTemplateは単一の剛体変換しか仮定しないため一致位置が「妥協点」に寄れる
        （＝スコア自体は悪くなくても位置精度が落ちる）。scaleEdge/weakMatchのスコア閾値
-       だけでは検出できないため、目印数からも独立して案内する。 */
-    const singleAnchor = (form.anchors || []).length <= 1;
+       だけでは検出できないため、目印数からも独立して案内する。
+       ※ form.anchors.length（登録数）ではなく matchQuality.n（今回実際に位置合わせへ
+       採用された点数）で判定する。登録数を見ていた旧実装では、目印を複数登録していても
+       スコア不足(<0.4)やRANSACの除外で実質1点しか使われなかった回（＝この警告が最も
+       必要な場面）を素通りしてしまっていた。 */
+    const singleAnchor = (matchQuality.n || 0) <= 1;
     const dropped = matchQuality.droppedOutliers || 0;
     const residualHigh = !!matchQuality.residualHigh;
     if (!(matchQuality.scaleEdge || matchQuality.weakMatch || singleAnchor || dropped || residualHigh)) return;

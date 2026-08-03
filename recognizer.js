@@ -1023,6 +1023,21 @@ const Recognizer = (() => {
       tpls.forEach(t => { const r = coarse.get(t.id); if (r && r.score > provBest) { provBest = r.score; provScale = r.scale || 1; } });
       const fine = await MatcherEngine.matchAll(rotated, tplList,
         { angleRange: 0, angleStep: 1, scaleFactors: fineScalesAround(provScale) });
+      /* 診断用ログ: 細探索(fine)は「全アンカー中の最良スコア」1つが決めたprovScale
+         の周辺(±9%)に全アンカー共有で限定される。もし個々のアンカーの粗探索(coarse)
+         自身のベストがprovScaleから離れた倍率にあり、かつそのスコアが低くない場合、
+         そのアンカーは「本来もっと良い一致先があったのに、他アンカーが決めた範囲しか
+         探せなかった」可能性がある（倍率0.774/0.799の誤検出調査で、スコアの低い
+         アンカーの検出倍率が共有provScaleの細探索候補値と小数点以下まで一致する
+         現象が見つかったため、この取り逃しが実際に起きているかを次回のログで
+         直接確認できるようにする）。 */
+      console.log(`[align-scale] 共有provScale=${provScale}（全アンカー中の最良スコア${provBest.toFixed(2)}から採用、細探索±9%はこれを中心に全アンカー共通）`);
+      tpls.forEach(t => {
+        const rc = coarse.get(t.id), rf = fine.get(t.id);
+        if (!rc) return;
+        console.log(`[align-scale]   "${t.a.name || t.id}" 粗探索(0.6〜2.0の全域)自身のベスト: スコア${rc.score.toFixed(2)} 倍率${rc.scale}`
+          + (rf ? ` / 共有provScale周辺の細探索ベスト: スコア${rf.score.toFixed(2)} 倍率${rf.scale}` : ''));
+      });
       tpls.forEach(t => {
         const rc = coarse.get(t.id), rf = fine.get(t.id);
         const r = (rf && (!rc || rf.score >= rc.score)) ? rf : rc;   // 粗・細で高スコア側を採用
