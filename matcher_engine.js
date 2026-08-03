@@ -100,24 +100,36 @@ const MatcherEngine = (() => {
   /**
    * 各テンプレートが「基準画像の中で一意か」を調べる（登録時の診断用）。
    * 位置合わせ用の目印に必要なのは同じページ内で紛らわしい相手がいないことなので、
-   * 最良ピークと、その周辺を除いた次点ピークの差（margin）を返す。
+   * 最良ピークと、その周辺を除いた次点ピークの差（margin）を返す。この判定は
+   * 登録スケール(1.0)のみで行う（既存動作。危険/警告バッジの根拠として使う）。
+   *
+   * opts.scales を渡すと、追加で「他のスケールでも基準画像内に強い一致がないか」
+   * を走査する（matcher.py scan_scales）。等倍では一意でも、他スケールでは
+   * 基準画像内の別の場所と酷似する目印を見逃さないための補助情報で、危険/安全の
+   * 自動判定はしない（生のスコア・位置をそのまま返し、判断は呼び出し側に委ねる。
+   * 理由は scan_scales のdocstring参照）。scales省略時は scan は空のまま。
    *
    * @param {HTMLCanvasElement|HTMLImageElement} refCanvas 基準画像
    * @param {Array<{id:string, imageElement:HTMLImageElement}>} templates
-   * @returns {Promise<Map<string, {
-   *   best:number, bestLoc:{x,y}, second:number, secondLoc:{x,y}, margin:number
-   * }>>}
+   * @param {{scales?: number[]}} [opts]
+   * @returns {Promise<{
+   *   results: Map<string, { best:number, bestLoc:{x,y}, second:number, secondLoc:{x,y}, margin:number }>,
+   *   scan: Map<string, Array<{ scale:number, best:number, bestLoc:{x,y} }>>
+   * }>}
    */
-  async function checkUniqueness(refCanvas, templates) {
+  async function checkUniqueness(refCanvas, templates, opts = {}) {
     const results = new Map();
-    if (!templates.length) return results;
+    const scan = new Map();
+    if (!templates.length) return { results, scan };
     const json = await postJSON('/api/anchor-uniqueness', {
       image: toDataURL(refCanvas),
       templates: templates.map(t => ({ id: t.id, image: toDataURL(t.imageElement) })),
+      scales: opts.scales && opts.scales.length ? opts.scales : undefined,
     });
     if (json.error) throw new Error(json.error);
     templates.forEach(t => { if (json.results[t.id]) results.set(t.id, json.results[t.id]); });
-    return results;
+    if (json.scan) templates.forEach(t => { if (json.scan[t.id]) scan.set(t.id, json.scan[t.id]); });
+    return { results, scan };
   }
 
   /* ── 結果可視化 ─────────────────────────────────────── */

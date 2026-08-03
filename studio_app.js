@@ -554,6 +554,13 @@
     if (ratio >= UNIQ_WARN_RATIO)   return { level: 'warn',   text: `紛らわしい ${pct}%` };
     return { level: null, text: '' };
   }
+  /* recognizer.js の LOCALIZE_SCALES と同じ値。一意性チェックの等倍判定
+     （uniquenessVerdict・danger/warnバッジ）とは別に、実際の認識(prepare)が
+     探索する全スケール範囲でも基準画像内に強い一致がないかを走査する
+     （matcher.py scan_scales参照）。等倍では一意でも他スケールでは基準画像内の
+     別の場所と酷似する目印が実在した（1個の目印だけで倍率が77%に誤検出された
+     実例）ため、参考情報として追加する。危険/安全の自動判定はしない。 */
+  const UNIQUENESS_SCAN_SCALES = [0.6, 0.71, 0.85, 1.0, 1.19, 1.42, 1.68, 2.0];
   async function checkAnchorUniqueness() {
     if (!S.anchors.length) return UI.toast('目印を1つ以上登録してから実行してください', 'warning');
     if (!S.refImg) return UI.toast('先に基準画像を読み込んでください', 'warning');
@@ -562,24 +569,34 @@
        ページ内のどこで一致したかは問わないため、「帳票判定のみ」の目印は対象外にする。 */
     const alignAnchors = S.anchors.filter(AnchorRoles.usedForAlign);
     if (!alignAnchors.length) return UI.toast('位置合わせに使う目印がありません（すべて「帳票判定のみ」です）', 'info', 5000);
-    UI.toast('ページ内での一意性を確認中…', 'info', 2500);
+    UI.toast('ページ内での一意性を確認中…（他倍率での走査も行うため通常より時間がかかります）', 'info', 3500);
     try {
       const templates = await Promise.all(alignAnchors.map(async a => ({
         id: a.id, imageElement: await dataURLtoImg(a.dataURL),
       })));
-      const results = await MatcherEngine.checkUniqueness(canvasFromImg(S.refImg), templates);
-      UI.renderAnchorUniqueness(results, uniquenessVerdict);
+      const { results, scan } = await MatcherEngine.checkUniqueness(canvasFromImg(S.refImg), templates,
+        { scales: UNIQUENESS_SCAN_SCALES });
+      UI.renderAnchorUniqueness(results, uniquenessVerdict, scan);
       let danger = 0, warn = 0;
       results.forEach(r => {
         const v = uniquenessVerdict(r);
         if (v.level === 'danger') danger++; else if (v.level === 'warn') warn++;
       });
+      /* 他スケールでの「注目に値する」一致（登録スケールから明確に離れており、
+         かつそれなりに強い相関）がある目印の数。danger/warnとは独立にカウントする
+         （等倍では一意=danger/warn無しでも、他スケールでの一致は起こりうるため）。 */
+      const scanHits = alignAnchors.filter(a => {
+        const s = scan.get(a.id);
+        return s && s.some(e => Math.abs(e.scale - 1) > 0.02 && e.best >= 0.5);
+      }).length;
       if (danger) {
         UI.toast(`⚠ ${danger} 件の目印がページ内の別の場所と酷似しています（一覧に表示）。位置合わせが別の場所に吸い寄せられる恐れがあります。枠や罫線だけでなく、文字を含む範囲へ描き直してください。`, 'warning', 15000);
       } else if (warn) {
         UI.toast(`${warn} 件の目印にやや紛らわしい相手がページ内にあります（一覧に表示）。文字を含めるとより安定します。`, 'warning', 9000);
+      } else if (scanHits) {
+        UI.toast(`ℹ️ 登録した倍率(100%)では一意ですが、${scanHits} 件の目印は他の倍率で基準画像内に気になる一致があります（一覧の「他倍率」チップにカーソルを合わせると詳細）。実際の帳票が登録時と違う倍率で来ると、その一致に吸い寄せられる可能性があります。`, 'info', 12000);
       } else {
-        UI.toast('すべての目印はページ内で十分に一意です', 'success', 4500);
+        UI.toast('すべての目印はページ内で十分に一意です（他倍率でも目立った一致はありません）', 'success', 4500);
       }
     } catch (e) { UI.toast('処理に失敗しました: ' + (e.message || e), 'error', 6000); }
   }

@@ -228,6 +228,72 @@ def self_uniqueness(full_rgba: np.ndarray, templates: list[dict[str, Any]]) -> d
     return out
 
 
+def scan_scales(full_rgba: np.ndarray, templates: list[dict[str, Any]],
+                 scale_factors: list[float]) -> dict[str, list[dict[str, Any]]]:
+    """各テンプレートについて、指定した各スケールで基準画像内のどこかに強い一致が
+    ないかを調べる（self_uniquenessとは別の、マルチスケール専用の補助関数）。
+
+    背景: self_uniqueness は登録スケール(1.0)でしか基準画像内を照合しないため、
+    「等倍では一意だが、他のスケールでは基準画像内の別の場所と酷似する」目印を
+    見逃す。実際に、等倍チェックで「一意」と判定された目印が、単体だけでの
+    実行時マッチングで77%スケールにて基準画像内の別の場所に高スコアで一致して
+    しまい、位置合わせが大きく破綻した実例がある（複数の目印が絡んだ多数決の
+    問題ではなく、1個の目印だけでも起きた）。
+
+    一方、サンドボックスでの合成テストにより、縮小方向のスケールでは画像補間の
+    影響で、紛らわしい相手が実在しないテンプレートでも弱い誤検知(corr≈0.5前後)
+    が起こりうることも分かっている。閾値だけで「危険/安全」を自動判定すると、
+    他の（問題ない）帳票にまで誤警告を広げる恐れがあるため、ここでは危険度の
+    判定は一切行わず、各スケールでの最良一致（スコアと位置）という生の数値だけを
+    返す。危険かどうかの最終判断は呼び出し側（UI経由で利用者）に委ねる。
+
+    self_uniqueness と違い次点(second)は求めない（「このスケールで基準画像の
+    どこかに強い一致があるか」だけが関心事で、次点の要否は等倍の一意性判定
+    （既存のself_uniqueness）が別途担っているため）。
+
+    戻り値: { id: [ {"scale","best","bestLoc"}, ... ] }  各テンプレートについて
+            scale_factors の順（＝呼び出し側の並び）そのまま。
+    """
+    full_gray_orig = _to_gray(full_rgba)
+    tpl_mats = []
+    for t in templates:
+        g = _to_gray(t['rgba'])
+        tpl_mats.append({'id': t['id'], 'mat': g, 'std': _std_dev_of(g)})
+
+    # スケールごとの探索画像を先に作る（match_all と同じ考え方。テンプレート固定・
+    # 基準画像側を 1/f 倍することで、実際の認識(prepare)と同じ向きの探索にする）。
+    prepared: list[tuple[float, np.ndarray]] = []
+    for f in scale_factors:
+        scaled = full_gray_orig if abs(f - 1) < 1e-6 else _resize_gray(full_gray_orig, 1.0 / f)
+        prepared.append((f, scaled))
+
+    def _one(f: float, full_gray: np.ndarray, tm: dict[str, Any]) -> dict[str, Any] | None:
+        tpl, th, tw = tm['mat'], tm['mat'].shape[0], tm['mat'].shape[1]
+        if th > full_gray.shape[0] or tw > full_gray.shape[1]:
+            return None
+        res = cv2.matchTemplate(full_gray, tpl, cv2.TM_CCOEFF_NORMED)
+        _, corr, _, loc = cv2.minMaxLoc(res)
+        x, y = loc
+        window_std = _std_dev_of(full_gray[y:y + th, x:x + tw])
+        reliability = min(_std_ramp(tm['std']), _std_ramp(window_std))
+        score = float(corr) * (STD_PENALTY_FLOOR + (1 - STD_PENALTY_FLOOR) * reliability)
+        return {'scale': f, 'best': score, 'bestLoc': {'x': js_round(x * f), 'y': js_round(y * f)}}
+
+    n_jobs = len(prepared) * len(tpl_mats)
+    n_workers = max(1, min(MAX_MATCH_WORKERS, n_jobs, os.cpu_count() or 4))
+    out: dict[str, list[dict[str, Any]]] = {tm['id']: [] for tm in tpl_mats}
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        jobs = [(tm['id'], pool.submit(_one, f, full_gray, tm))
+                for f, full_gray in prepared for tm in tpl_mats]
+        for tid, fut in jobs:
+            r = fut.result()
+            if r:
+                out[tid].append(r)
+    for tid in out:
+        out[tid].sort(key=lambda r: r['scale'])
+    return out
+
+
 def _build_angles(angle_range: float, angle_step: float) -> list[float]:
     if angle_range == 0 or angle_step == 0:
         return [0.0]

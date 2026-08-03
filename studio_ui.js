@@ -212,22 +212,45 @@ const StudioUI = (() => {
   /* 目印のページ内一意性チェック結果を各行にバッジ表示する。位置合わせは「同じページ内に
      紛らわしい相手がいないこと」が要件なので、次点ピークとの差(margin)が小さい目印を
      危険として示す。renderAnchorListは呼び直さない（結果が消えるため）。
-     @param {Map<string, {best,second,margin,bestLoc,secondLoc}>} results
-     @param {(r:object)=>{level:'danger'|'warn'|null, text:string}} classify  判定は呼び出し側 */
-  function renderAnchorUniqueness(results, classify) {
+     @param {Map<string, {best,second,margin,bestLoc,secondLoc}>} results  登録スケール
+     （等倍）での判定。danger/warnバッジの根拠（確実性が高い）。
+     @param {(r:object)=>{level:'danger'|'warn'|null, text:string}} classify  判定は呼び出し側
+     @param {Map<string, Array<{scale,best,bestLoc}>>} [scan]  他スケールでの参考情報
+     （危険/安全は自動判定しない。checkAnchorUniquenessのUNIQUENESS_SCAN_SCALES参照）。
+     省略時はこのチップを出さない（呼び出し側がscalesを渡さなかった場合の後方互換）。 */
+  function renderAnchorUniqueness(results, classify, scan) {
     const list = $('anchorList');
     list.querySelectorAll('.mini-item').forEach(item => {
       const old = item.querySelector('.anchor-unique-warn'); if (old) old.remove();
+      const oldScan = item.querySelector('.anchor-scale-scan'); if (oldScan) oldScan.remove();
       const r = results.get(item.dataset.anchorId);
-      if (!r) return;
-      const verdict = classify(r);
-      if (!verdict.level) return;
-      const badge = document.createElement('span');
-      badge.className = `anchor-unique-warn is-${verdict.level}`;
-      badge.title = `最良 ${Math.round(r.best * 100)}% / 次点 ${Math.round(r.second * 100)}%`
-        + `（次点の位置 ${r.secondLoc.x},${r.secondLoc.y}）`;
-      badge.innerHTML = `<i class="fas fa-clone"></i> ${esc(verdict.text)}`;
-      item.appendChild(badge);
+      if (r) {
+        const verdict = classify(r);
+        if (verdict.level) {
+          const badge = document.createElement('span');
+          badge.className = `anchor-unique-warn is-${verdict.level}`;
+          badge.title = `最良 ${Math.round(r.best * 100)}% / 次点 ${Math.round(r.second * 100)}%`
+            + `（次点の位置 ${r.secondLoc.x},${r.secondLoc.y}）`;
+          badge.innerHTML = `<i class="fas fa-clone"></i> ${esc(verdict.text)}`;
+          item.appendChild(badge);
+        }
+      }
+      /* 他スケールでの参考情報。登録スケール(100%)から明確に離れており(±2%超)、
+         かつそれなりの相関(50%以上)がある結果だけを「注目に値する」として拾う。
+         これは危険の断定ではなく単なる目安値のため、danger/warnより控えめな
+         中立色のチップにする（実測: サンドボックスの合成テストで、紛らわしい
+         相手が実在しないテンプレートでも縮小方向の一部スケールで50%前後の
+         弱い相関が出ることがあり、断定的な警告色にすると誤解を招くため）。 */
+      const scaleResults = scan && scan.get(item.dataset.anchorId);
+      const notable = scaleResults ? scaleResults.filter(s => Math.abs(s.scale - 1) > 0.02 && s.best >= 0.5) : [];
+      if (notable.length) {
+        const chip = document.createElement('span');
+        chip.className = 'anchor-scale-scan';
+        chip.title = '登録スケール(100%)以外での基準画像内の最良一致（参考値・自動判定なし）:\n'
+          + notable.map(s => `倍率${Math.round(s.scale * 100)}%: 最良${Math.round(s.best * 100)}%（座標 ${s.bestLoc.x},${s.bestLoc.y}）`).join('\n');
+        chip.innerHTML = `<i class="fas fa-arrows-left-right"></i> 他倍率でも一致あり`;
+        item.appendChild(chip);
+      }
     });
   }
 
