@@ -29,24 +29,6 @@ pip install -r requirements.txt
 
 これだけで動作します（コンパイラ等は不要です）。
 
-### 3. （任意）文字別の確信度をより精密にする
-
-OCR実行結果の「文字別の確信度」表示は、既定では単語単位の確信度を文字に
-割り当てた近似値になります。以下を追加でインストールすると、文字1つ1つの
-実際の確信度が使われるようになり、精度・速度とも向上します（Cコンパイラと
-Tesseractの開発ヘッダが必要なため、環境によっては失敗することがあります。
-失敗しても動作に問題はなく、既定の近似値表示になるだけです）。
-
-```bash
-pip install tesserocr
-```
-
-- Linux: あらかじめ `sudo apt install libtesseract-dev libleptonica-dev pkg-config` が必要です。
-- macOS: Homebrewで入れた `tesseract` に開発ヘッダが含まれるため、通常はそのまま `pip install tesserocr` で通ります。
-- Windows: 通常のpipでは入りにくいため、Anaconda/Minicondaをお使いの場合は
-  `conda install -c conda-forge tesserocr` を試してください。難しければ
-  インストールをスキップして構いません。
-
 ## 起動方法
 
 **Windows**: `run.bat` をダブルクリックしてください。依存パッケージの確認
