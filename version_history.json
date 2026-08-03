@@ -1,5 +1,11 @@
 [
   {
+    "version": "2026-08-03.9",
+    "date": "2026-08-03",
+    "summary": "ローカル起動時の「No module named 'applog'」エラーが誤ってpip installを案内していた問題を修正",
+    "detail": "報告: ローカルでrun_server.pyを起動すると「[エラー] 必要なパッケージが見つかりません: No module named 'applog'」「先に pip install -r requirements.txt を実行してください」と表示される。何か変更したか、との問い合わせ。\n\n調査: applog.pyはこのセッションの変更対象になっておらず、直前の変更（v.2026-08-03.7/.8のRANSAC修正）とも無関係。git log -- applog.py の最終更新はこのセッション開始より前のコミット(3057b6c)で、git status はクリーン、ローカルの作業コピーとpush先リモートブランチ(origin/claude/ocr-accuracy-704-dnd08q)のgit diffは差分ゼロ、app.py/matcher.py/ocr_server.py/health_monitor.py の import applog も全て正しいまま。つまりリポジトリ自体は（ローカル・リモートとも）applog.pyを正しく含んでおり、今回のエラーの原因ではないことを確認した。\n\nもう一つの気づき: run_server.pyの既存のエラーメッセージ自体に問題があった。ImportErrorを全て「外部パッケージ未インストール」として扱い、一律「pip install -r requirements.txt を実行してください」と案内していたが、applog は requirements.txt に載っていない（そもそも载せる必要がない）本ツール自身のファイルであり、pip installを実行しても絶対に解決しない。つまり、仮にユーザーの手元でapplog.pyが本当に見つからない状態（フォルダの一部だけダウンロード/コピーされた、ウイルス対策ソフトに隔離された、など）だったとしても、表示される対処法が的外れで、ユーザーを誤った方向（無意味なpip再実行の繰り返し）に誘導してしまう作りだった。\n\n対策: run_server.pyのImportErrorハンドラを拡張し、ModuleNotFoundErrorのe.name（見つからなかったモジュール名）が本ツール自身のトップレベルモジュール一覧（app/applog/ocr_server/matcher/imaging/health_monitor/processor_server/version_info）に含まれるかどうかで案内を分岐するようにした。含まれる場合は「本ツールを構成するファイルが見つかりません」「pip installでは解決しません」「配布元から取得し直してください」という、原因に即した案内を表示する。含まれない場合（flask/cv2/pytesseract等の真の外部パッケージ不足）は、従来通りpip installを案内する。\n\n検証: サンドボックスでapplog.pyを一時的に退避させてrun_server.pyを実行し、新しい案内文が正しく表示されることを確認。その後applog.pyを復元し、通常起動（Tesseractエンジン検出、サーバー起動）が問題なく動作することを確認。また、run_server.py内の_LOCAL_MODULESと実際のimport文（e.name）の対応関係を、モジュールを直接ロードして機械的に検証し、applog/app/ocr_server等は「本ツール自身のファイル」、cv2/flask/pytesseract等は「外部パッケージ」に正しく分類されることを確認した。\n\nユーザーへの案内: 今回の現象そのもの（applog.pyが手元に見当たらない）はリポジトリ側の問題ではなく、お使いの環境のフォルダにファイルが揃っていない状態と考えられる。プロジェクト一式を最新のブランチから取得し直す（git pull、またはzip等での再取得）ことで解消するはずで、再発した場合は新しいエラーメッセージが「pip installでは直らない」ことを明示するので、次回からは即座に区別できる。"
+  },
+  {
     "version": "2026-08-03.8",
     "date": "2026-08-03",
     "summary": "倍率0.774誤検出の修正が2点構成のアンカーには効いていなかった問題を追加修正",
