@@ -19,6 +19,9 @@ Pythonパッケージとは別に、OCRエンジン本体（Tesseract）が必�
 - **macOS**: `brew install tesseract tesseract-lang`
 - **Linux (Debian/Ubuntu)**: `sudo apt install tesseract-ocr tesseract-ocr-jpn`
 
+（Pythonを使わない人にこの手順だけ案内したい場合は、`tesseract-install/`
+フォルダを渡せばこの節と同じ内容が単独で伝わります）
+
 ### 2. Pythonパッケージをインストール
 
 Python 3.9以上が必要です。
@@ -107,8 +110,12 @@ Tesseract本体がインストールされていないか、PATHが通ってい�
 
 ## 開発メモ
 
-全ファイルこのフォルダ直下にフラットに置いています（サブフォルダなし）。
+全ファイルこのフォルダ直下にフラットに置いています（サブフォルダなし。
+唯一の例外は `tesseract-install/` — 非Pythonユーザーへの案内だけを
+切り出したフォルダ）。
 
+- `tesseract-install/` — 「セットアップ 1」と同じ内容を、Python環境を
+  持たない相手にも単独で渡せるようにした案内書。
 - `index.html` / `*.js` / `*.css` — 画面・設定・操作。帳票レイアウト等は
   これまで通りブラウザのIndexedDBに保存されます。
 - `app.py` / `imaging.py` / `matcher.py` / `processor_server.py` /
