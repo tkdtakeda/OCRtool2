@@ -959,6 +959,15 @@ const Recognizer = (() => {
        のどれなのかは、対応点そのものを見ないと切り分けられないため一覧で出す。
        「ずれ」= 採用した変換で基準座標を写した位置と、実際に一致した位置との差。
        正しく合っていれば全て数px以内に収まる。特定の1点だけ大きい＝その目印が犯人。 */
+    /* 採用点(kept)の中で、確定した変換に対する残差(dx,dyの絶対値)の最大値。
+       RANSAC(ransacInliers)はペア単位の残差で多数決を取るため、複数の目印が
+       「たまたま同じ間違った変換」を一貫して支持してしまうケース（帳票内の繰り返し
+       パターンで複数の目印が揃って別の場所へ誤マッチする等）を弾けないことがある。
+       この場合、除外0点・採用点数は正常でも、確定した変換に対する各点の当てはまりは
+       悪いままなので、それを別途チェックして matchQuality.residualHigh に反映する
+       （OUTLIER_TOL_PXは「正しく一致した点同士の残差は最大でも数十px」という実測に
+       基づく値なので、採用点がこれを超えるのはその前提が崩れているサイン）。 */
+    let maxKeptResidual = 0;
     if (allMatches.length) {
       console.log(`[align] 基準画像 ${form.referenceImage ? form.referenceImage.w + 'x' + form.referenceImage.h : '?'}`
         + ` → 入力 ${rotated.width}x${rotated.height}`
@@ -969,6 +978,7 @@ const Recognizer = (() => {
         const used = transform.kept.includes(p);
         const dx = p.inX - (transform.sx * p.refX + transform.tx);
         const dy = p.inY - (transform.sy * p.refY + transform.ty);
+        if (used) maxKeptResidual = Math.max(maxKeptResidual, Math.abs(dx), Math.abs(dy));
         console.log(`[align]   ${used ? '採用' : '除外'} "${p.name}" 基準(${Math.round(p.refX)},${Math.round(p.refY)})`
           + ` → 一致(${Math.round(p.inX)},${Math.round(p.inY)})`
           + ` ずれ(${Math.round(dx)},${Math.round(dy)}) スコア${p.score.toFixed(2)} 検出倍率${p.scale}`);
@@ -994,6 +1004,13 @@ const Recognizer = (() => {
       /* 誤マッチとして除外した目印の数。0でなければ、その目印は他の場所（似た四角など）
          と区別が付いていないため、利用者に作り直しを促す。 */
       droppedOutliers: transform.dropped || 0,
+      /* 採用点同士が確定した変換と矛盾している（=どれかが本来と別の場所に一致している
+         可能性が高い）ことを示すフラグ。droppedOutliers=0・scaleEdge=false・
+         weakMatch=falseの「一見正常」な表示でも、複数の目印が帳票内の似た構造
+         （繰り返す罫線パターン等）へ揃って誤マッチすると、RANSACの多数決では
+         誤マッチ側が「多数派」として採用されてしまうことがある。採用点数や検出倍率
+         だけでは分からないため、最終変換への当てはまりの悪さを別途チェックする。 */
+      residualHigh: maxKeptResidual > OUTLIER_TOL_PX,
     };
 
     /* ⑤ 罫線除去（登録された罫線除去パラメータを引き継ぎ） */

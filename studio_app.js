@@ -788,12 +788,25 @@
        だけでは検出できないため、目印数からも独立して案内する。 */
     const singleAnchor = (form.anchors || []).length <= 1;
     const dropped = matchQuality.droppedOutliers || 0;
-    if (!(matchQuality.scaleEdge || matchQuality.weakMatch || singleAnchor || dropped)) return;
+    const residualHigh = !!matchQuality.residualHigh;
+    if (!(matchQuality.scaleEdge || matchQuality.weakMatch || singleAnchor || dropped || residualHigh)) return;
     S.posWarnCounts[form.id] = (S.posWarnCounts[form.id] || 0) + 1;
     if (S.posWarnShown.has(form.id)) return;
     S.posWarnShown.add(form.id);
     const pct = Math.round((matchQuality.bestScale || 1) * 100);
     const scoreIssue = matchQuality.weakMatch || matchQuality.scaleEdge;
+    /* 採用点同士が確定した変換と矛盾している＝どれかの目印が本来と別の場所（似た罫線・
+       繰り返しパターン等）に一致している可能性が高い。「採用○点・除外0点」という
+       表示だけでは気づけない不整合のため、他の判定より先に案内する。 */
+    if (residualHigh) {
+      UI.toast(
+        `⚠ 「${form.name}」: 採用した目印${matchQuality.n}点の位置関係が、確定した倍率${pct}%と矛盾しています。`
+        + `いずれかの目印が本来と別の場所（似た罫線や繰り返しパターン等）に一致している可能性が高いです。`
+        + `診断ログの[align]行で「ずれ」の大きい目印を確認し、文字を含む範囲へ描き直すか、その目印を削除してください。`,
+        'warning', 18000
+      );
+      return;
+    }
     /* 誤マッチを除外できた場合は、位置合わせ自体は残りの目印で成立している。
        ただし原因（他と見分けの付かない目印）は残るので、作り直しを促す。 */
     if (dropped && !scoreIssue) {
