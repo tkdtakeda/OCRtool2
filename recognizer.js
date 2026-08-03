@@ -1012,31 +1012,41 @@ const Recognizer = (() => {
       const tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, imageElement: await dataURLtoImg(a.dataURL) })));
       const tplList = tpls.map(t => ({ id: t.id, imageElement: t.imageElement }));
       /* 粗→細のスケール探索で「拡大・縮小された帳票」を正しく捉える。
-         ① 粗く広い範囲(0.6〜2.0)でアンカーを発見し、最良スコアの倍率を暫定採用。
-         ② その暫定倍率の周辺(±6%)を細かく再探索し、位置精度を上げる。
+         ① 粗く広い範囲(0.6〜2.0)で各アンカーを個別に探索。
+         ② 各アンカー自身の暫定倍率(①の自己ベスト)の周辺(±9%)を、アンカーごとに
+            独立して細かく再探索し、位置精度を上げる。
          狭い固定範囲だと大きく拡大された帳票でアンカーを取り逃がすか倍率が範囲端に
          張り付き、離れたOCR欄ほどずれていた。細探索を角度固定・少数スケールで足すだけ
-         なので追加コストは小さい。 */
+         なので追加コストは小さい。
+         ※ 以前は②を「全アンカー中の最良スコア1つ」が決めた単一のprovScaleの周辺に
+         全アンカー共有で限定していたが、これは自身の粗探索ベストが他アンカーと
+         異なるアンカーを、その本来の近傍から一度も探せなくする副作用があった。
+         実測（倍率0.799の誤検出調査）で、スコアが最も高かった「宛先」の粗ベスト
+         (倍率0.85)が共有provScaleに採用され、「金額①」は自身の粗ベスト(倍率0.6)
+         とは無関係にその狭い範囲(0.85±9%)しか探せず、0.799止まりになっていたことを
+         [align-scale]ログで直接確認した。1回のmatchAll呼び出しで済ませるため、
+         各アンカーの細探索候補の和集合を渡す（各アンカーは返ってきた結果のうち
+         自分にとってベストなものを採用するので、アンカーごとに別々に呼び出すのと
+         数学的に同じ結果になる）。 */
       const coarse = await MatcherEngine.matchAll(rotated, tplList,
         { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES });
-      let provScale = 1, provBest = -Infinity;
-      tpls.forEach(t => { const r = coarse.get(t.id); if (r && r.score > provBest) { provBest = r.score; provScale = r.scale || 1; } });
+      const fineScaleUnion = new Set();
+      tpls.forEach(t => {
+        const rc = coarse.get(t.id);
+        fineScalesAround(rc ? (rc.scale || 1) : 1).forEach(s => fineScaleUnion.add(s));
+      });
       const fine = await MatcherEngine.matchAll(rotated, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: fineScalesAround(provScale) });
-      /* 診断用ログ: 細探索(fine)は「全アンカー中の最良スコア」1つが決めたprovScale
-         の周辺(±9%)に全アンカー共有で限定される。もし個々のアンカーの粗探索(coarse)
-         自身のベストがprovScaleから離れた倍率にあり、かつそのスコアが低くない場合、
-         そのアンカーは「本来もっと良い一致先があったのに、他アンカーが決めた範囲しか
-         探せなかった」可能性がある（倍率0.774/0.799の誤検出調査で、スコアの低い
-         アンカーの検出倍率が共有provScaleの細探索候補値と小数点以下まで一致する
-         現象が見つかったため、この取り逃しが実際に起きているかを次回のログで
-         直接確認できるようにする）。 */
-      console.log(`[align-scale] 共有provScale=${provScale}（全アンカー中の最良スコア${provBest.toFixed(2)}から採用、細探索±9%はこれを中心に全アンカー共通）`);
+        { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b) });
+      /* 診断用ログ: 各アンカーが自身の粗探索ベストの近傍をどれだけ細探索で改善できたか。
+         もし依然としてアンカー間で粗ベストの倍率が大きく食い違っているなら、
+         それはこの探索範囲の問題ではなく、そのアンカー自体の識別性・画像品質の
+         問題である可能性が高い（両方を切り分けるための情報として残す）。 */
+      console.log(`[align-scale] 各アンカーが自身の粗探索ベストを中心に独立して細探索（共有provScaleは廃止、細探索候補の和集合${fineScaleUnion.size}点）`);
       tpls.forEach(t => {
         const rc = coarse.get(t.id), rf = fine.get(t.id);
         if (!rc) return;
         console.log(`[align-scale]   "${t.a.name || t.id}" 粗探索(0.6〜2.0の全域)自身のベスト: スコア${rc.score.toFixed(2)} 倍率${rc.scale}`
-          + (rf ? ` / 共有provScale周辺の細探索ベスト: スコア${rf.score.toFixed(2)} 倍率${rf.scale}` : ''));
+          + (rf ? ` / 自身の近傍での細探索ベスト: スコア${rf.score.toFixed(2)} 倍率${rf.scale}` : ''));
       });
       tpls.forEach(t => {
         const rc = coarse.get(t.id), rf = fine.get(t.id);
