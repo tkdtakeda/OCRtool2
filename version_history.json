@@ -1,5 +1,11 @@
 [
   {
+    "version": "2026-08-03.14",
+    "date": "2026-08-03",
+    "summary": "一括OCR中にタブを離れると遅くなる原因（pdf.jsのrequestAnimationFrame依存）を特定・修正",
+    "detail": "報告: 前回の速度改善（v.2026-08-03.13）に続き、「タブを開いていないと速度が遅くなる」問題の解決を依頼された。\n\n調査: この現象自体は既存コードにも先行調査の痕跡があった（studio_app.jsのバッチ処理ループに、hidden中はPDFラスタライズだけが遅延しサーバー側は影響を受けないという実測コメントと、visibilitychangeを記録するログが既にあった）。今回はその原因を突き止めるため、この帳票OCRツールが読み込んでいるpdfjs-dist@3.11.174のソースコードを直接確認した。\n\n決定的な手がかり: pdf.js内部のInternalRenderTaskは `useRequestAnimationFrame: !intentPrint` という設定でページ描画の継続方法を決めている。intentを省略（既定値'display'）すると、描画処理を分割実行するたびに次のチャンクを `window.requestAnimationFrame` で予約する。requestAnimationFrameはタブが非表示（バックグラウンド）の間はブラウザに完全に停止される仕様のため、描画が複数チャンクに分かれる帳票（罫線・文字数が多いページ）では、タブを離れている間ラスタライズが実質停止する。intentに'print'を指定すると、この設定が反転し `Promise.resolve().then()` ベースの継続に切り替わり、可視性に依存しなくなる。\n\n本ツールのpdf_import.js（renderPageToCanvas / renderPreview）は、いずれもintentを指定せずpage.render()を呼んでおり、既定の'display'（＝rAF依存あり）のままだった。\n\n検証: サンドボックス内でpdfjs-dist@3.11.174（本ツールと同一バージョン、npm registry経由で取得。jsdelivr CDNは今回のサンドボックスのネットワークポリシー上ブロックされていたため代替経路で取得）を実際にブラウザ（Playwright/Chromium）で動かし、罫線・文字数を多くした合成PDF（実際の帳票を模したもの）に対して、①window.requestAnimationFrameの呼び出し回数、②描画結果のピクセル差、③描画時間、をintent省略時と'print'指定時で比較した。結果: 呼び出し回数は3回→0回（rAF依存が実際に消えることを確認）、ピクセル差は最大0・平均0.0000（全ピクセルで完全一致、画質への影響なし）、描画時間は406ms→422ms（可視状態では誤差の範囲で悪化なし）。\n\n対策: pdf_import.jsの2箇所のpage.render()呼び出し（実際のラスタライズ用renderPageToCanvasと、取り込みモーダルのプレビュー用renderPreview）に `intent: 'print'` を追加した。\n\n注意: 今回の検証は「rAFが実際に呼ばれなくなること」と「画質が変わらないこと」の確認が中心で、実際にタブを長時間バックグラウンドに置いた状態でのブラウザの間引き動作そのもの（Intensive Timer Throttling等）は、サンドボックス環境では再現が難しく直接の再現検証はできていない。ただしrAFがバックグラウンドタブで完全に停止することはブラウザの標準仕様であり、この依存を無くすことは対症療法ではなく原因そのものの除去にあたる。次回、一括OCR中にタブを離れて試していただき、[perf] rasterizeのタイミングが改善するか確認をお願いしたい。"
+  },
+  {
     "version": "2026-08-03.13",
     "date": "2026-08-03",
     "summary": "テンプレートマッチングの高速化: 探索画像を元より大きくしないよう変更（縮小方向の倍率で最大6.4倍高速）。採用角度のログも追加",

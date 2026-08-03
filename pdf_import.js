@@ -35,7 +35,17 @@ const PdfImport = (() => {
        （DevToolsの警告の直接の原因）。 */
     const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);   // 透過PDF対策
-    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    /* intent:'print' を指定する。pdf.js内部(InternalRenderTask)は
+       `useRequestAnimationFrame: !intentPrint` で描画の継続をスケジュールしており、
+       既定(intent省略='display')ではwindow.requestAnimationFrameで次のチャンクを
+       予約する。requestAnimationFrameはタブが非表示(バックグラウンド)の間は
+       ブラウザに完全に停止されるため、一括OCR中にタブを離れると、複数チャンクの
+       描画を要するページでラスタライズが止まってしまう（実測: 罫線・文字数が
+       多いテスト帳票でチャンク数=3、intent:'print'では0で、この依存自体が
+       消える）。'print'に切り替えるとPromiseベースの継続に変わり、この停止が
+       起きなくなる。実際の帳票を模した合成PDFで、両intentの出力が完全に
+       ピクセル一致（差分0）することを確認済みで、画質への影響はない。 */
+    await page.render({ canvasContext: ctx, viewport: vp, intent: 'print' }).promise;
     return c;
   }
 
@@ -189,7 +199,7 @@ const PdfImport = (() => {
       const vp = page.getViewport({ scale: previewScale });
       const c = $('pdfPreviewCanvas');
       c.width = Math.round(vp.width); c.height = Math.round(vp.height);
-      await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+      await page.render({ canvasContext: c.getContext('2d'), viewport: vp, intent: 'print' }).promise;   // renderPageToCanvas参照: rAF依存回避
       const out = page.getViewport({ scale: dpi / 72 });   // 1pt=1/72inch → scale=dpi/72
       $('pdfOutInfo').textContent = `読み込みサイズ: ${Math.round(out.width)} × ${Math.round(out.height)} px（${dpi} DPI）`;
     } catch (e) {
