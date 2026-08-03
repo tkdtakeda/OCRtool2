@@ -95,23 +95,60 @@ const Recognizer = (() => {
      支持点を数える際、各アンカーがテンプレート探索で独立に検出した倍率の中央値
      （medScale）と大きく食い違うペアの変換は候補から外す。これが無いと、絶対値としては
      一致点を稼げても sx が0.3倍等の非現実的な変換が「たまたま」複数点を説明してしまい、
-     誤って多数派に選ばれることがあった（実データで実際に発生を確認）。 */
+     誤って多数派に選ばれることがあった（実データで実際に発生を確認）。
+
+     ただし、この medScale 制約自体が仇になるケースが実機で見つかった: 3つの独立した
+     アンカーが、それぞれ単体のテンプレート探索でも一貫して間違った倍率（実測77%。
+     帳票内の別の場所に、たまたま揃って高いスコアで誤マッチした）を検出したため、
+     medScale 自体がその77%に汚染された。この状態では、アンカー同士の相対位置から
+     計算すると残差数px・角度差1°未満で無矛盾に説明できる「真に正しい変換」（実測で
+     ほぼ100%）が、「medScaleと食い違う」という理由だけで候補から弾かれ、逆に77%という
+     誤った変換の方が「多数決で勝つ」という転倒が起きていた。
+     対策として、medScale制約ありの結果と、値域チェック(0.4〜2.5)のみで制約なしの結果を
+     両方評価し、制約なしの方が同じかそれ以上の点数を、大幅に（半分未満に）小さい残差で
+     説明できる場合はそちらを採用する。「大幅に小さい」という条件が、SCALE_AGREE_TOL
+     本来の目的（非現実的な変換が偶然複数点を通ってしまうのを防ぐ）の代役を果たす
+     （非現実的な変換が実在の複数点を、制約ありの場合の半分未満の残差で説明できる
+     確率は低い）。
+     戻り値に scaleOverride を含めるのは、ここで見つけた「ペア自身が示す信頼できる
+     倍率」を estimateTransform 側の後続処理にも伝えるため。除外点が0（=全点が
+     inlierとして残る）だと estimateTransform は medScale を素通しで使い続けるが、
+     それは今回のように「全員が独立に同じ間違った倍率を検出した」ケースでは汚染
+     されたままの値であり、後段の位置回帰（axis関数）が正しい回帰結果を「medScaleと
+     食い違う」という理由で再び棄却してしまう（実機で確認済み）。scaleOverride を
+     渡せば、この転倒を防げる。 */
   function ransacInliers(pairs, medScale) {
-    let best = null, bestSupport = -1;
-    for (let i = 0; i < pairs.length; i++) {
-      for (let j = i + 1; j < pairs.length; j++) {
-        const tf = pairTransform(pairs[i], pairs[j], medScale);
-        if (!tf || tf.sx < 0.4 || tf.sx > 2.5 || tf.sy < 0.4 || tf.sy > 2.5) continue;
-        if (Math.abs(tf.sx - medScale) > SCALE_AGREE_TOL * medScale) continue;
-        if (Math.abs(tf.sy - medScale) > SCALE_AGREE_TOL * medScale) continue;
-        const inliers = pairs.filter(p => residual(p, tf) <= OUTLIER_TOL_PX);
-        const support = inliers.reduce((s, p) => s + (p.score || 0.5), 0);
-        if (inliers.length > (best ? best.length : 0) || (best && inliers.length === best.length && support > bestSupport)) {
-          best = inliers; bestSupport = support;
+    const evaluate = (constrainToMedScale) => {
+      let best = null, bestTf = null, bestSupport = -1;
+      for (let i = 0; i < pairs.length; i++) {
+        for (let j = i + 1; j < pairs.length; j++) {
+          const tf = pairTransform(pairs[i], pairs[j], medScale);
+          if (!tf || tf.sx < 0.4 || tf.sx > 2.5 || tf.sy < 0.4 || tf.sy > 2.5) continue;
+          if (constrainToMedScale) {
+            if (Math.abs(tf.sx - medScale) > SCALE_AGREE_TOL * medScale) continue;
+            if (Math.abs(tf.sy - medScale) > SCALE_AGREE_TOL * medScale) continue;
+          }
+          const inliers = pairs.filter(p => residual(p, tf) <= OUTLIER_TOL_PX);
+          const support = inliers.reduce((s, p) => s + (p.score || 0.5), 0);
+          if (inliers.length > (best ? best.length : 0) || (best && inliers.length === best.length && support > bestSupport)) {
+            best = inliers; bestTf = tf; bestSupport = support;
+          }
         }
       }
+      return best ? { inliers: best, tf: bestTf, maxResidual: Math.max(...best.map(p => residual(p, bestTf))) } : null;
+    };
+
+    const constrained = evaluate(true);
+    /* medScale汚染チェックはペア総当たりの多数決（3点以上）が前提のため、
+       2点以下では制約ありの結果をそのまま使う。 */
+    const fallback = pairs.length >= 3 ? evaluate(false) : null;
+    if (fallback && fallback.inliers.length >= 2
+        && (!constrained
+            || (fallback.inliers.length >= constrained.inliers.length
+                && fallback.maxResidual < constrained.maxResidual * 0.5))) {
+      return { points: fallback.inliers, scaleOverride: { sx: fallback.tf.sx, sy: fallback.tf.sy } };
     }
-    return (best && best.length >= 2) ? best : pairs;   // 有効なペアが無ければ従来通り全点使う
+    return { points: (constrained && constrained.inliers.length >= 2) ? constrained.inliers : pairs, scaleOverride: null };   // 有効なペアが無ければ従来通り全点使う
   }
 
   /* ── 幾何: 複数アンカーから軸ごとの拡大率＋平行移動を推定 ── */
@@ -148,10 +185,20 @@ const Recognizer = (() => {
        加重平均に混じるとその分だけ引きずられるため、推定前に取り除く必要がある。
        ペア総当たりは3点未満では機能しない（2点は常に一致するペアが1組しか無く、
        多数決にならない）ため、2点以下はそのまま使う。 */
-    const pairs = all.length >= 3 ? ransacInliers(all, medScaleAll) : all;
+    const ransac = all.length >= 3 ? ransacInliers(all, medScaleAll) : { points: all, scaleOverride: null };
+    const pairs = ransac.points;
     const dropped = all.length - pairs.length;
     const n = pairs.length;
-    const medScale = dropped ? median(pairs.map(p => p.scale || 1)) : medScaleAll;
+    /* medScale の決定: ransacInliers が「各アンカー個別のmedScale制約」をバイパスして
+       採用した場合（scaleOverride あり）は、その根拠になった信頼できる倍率をそのまま
+       引き継ぐ。そうしないと、除外点が0（=全点がinlierとして残る）のケースで下の
+       axis関数が medScaleAll（汚染されている可能性がある値）を素通しで使い続け、
+       ransacInliers がせっかく見つけた正しい変換を、位置回帰(sReg)が「medScaleと
+       食い違う」という理由で再び棄却してしまう（ransacInliersのコメント参照）。 */
+    const medScaleX = ransac.scaleOverride ? ransac.scaleOverride.sx
+                     : (dropped ? median(pairs.map(p => p.scale || 1)) : medScaleAll);
+    const medScaleY = ransac.scaleOverride ? ransac.scaleOverride.sy
+                     : (dropped ? median(pairs.map(p => p.scale || 1)) : medScaleAll);
     /* 加重は score をそのまま使う（呼び出し側は score>=0.4 のみを渡すため、常に正）。
        スコア差を過度に増幅しないよう線形のまま用いる。 */
     const weights = pairs.map(p => Math.max(1e-3, p.score || 0));
@@ -159,7 +206,7 @@ const Recognizer = (() => {
     /* 軸ごと: 広がりが十分なら加重位置回帰で連続倍率を精密化、狭ければ照合倍率を採用。
        平行移動は採用倍率 s を固定して t = 加重平均(in - s*ref)（＝回帰の切片と同値だが、
        倍率誤差から切り離した頑健な平行移動になる）。 */
-    const axis = (gr, gi) => {
+    const axis = (gr, gi, medScale) => {
       let mr = 0, mi = 0, lo = Infinity, hi = -Infinity;
       pairs.forEach((p, i) => { const r = gr(p); mr += weights[i] * r; mi += weights[i] * gi(p); if (r < lo) lo = r; if (r > hi) hi = r; });
       mr /= wSum; mi /= wSum;
@@ -176,8 +223,8 @@ const Recognizer = (() => {
       }
       return { s, t: mi - s * mr };
     };
-    const X = axis(p => p.refX, p => p.inX);
-    const Y = axis(p => p.refY, p => p.inY);
+    const X = axis(p => p.refX, p => p.inX, medScaleX);
+    const Y = axis(p => p.refY, p => p.inY, medScaleY);
     return { sx: X.s, sy: Y.s, tx: X.t, ty: Y.t, n, dropped, kept: pairs };
   }
 
