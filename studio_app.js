@@ -757,12 +757,29 @@
      まったく別の原因（位置合わせ自体は壊れていない）を、[align]のログだけからは
      見分けられない。診断ビューアの[align]セクションと合わせて見れば、「帳票の選択
      ミス」と「同じ帳票内でのアンカー誤マッチ」を切り分けられるようにする。 */
-  function logClassifyDecision(decision) {
+  function logClassifyDecision(decision, scores) {
     const best = decision.best;
     const runner = decision.runnerUp;
     console.log(`[classify] 判定=${decision.decision} 確信度=${Math.round((decision.confidence || 0) * 100)}% `
       + `採用="${best ? best.formName : 'なし'}"${best ? ` peak=${best.peak.toFixed(2)} agg=${best.agg.toFixed(2)}` : ''}`
       + (runner ? ` / 次点="${runner.formName}" agg=${runner.agg.toFixed(2)}` : ' / 次点なし'));
+    /* 採用された補正角度の分布を出す。帳票判定(classify)は「テンプレ数×角度数×
+       スケール数」回のテンプレートマッチングを行い、その大半を占める最大の処理時間
+       要因になっている（実測105回中105回、全体の約8割）。角度探索は範囲±2°/刻み1°で
+       5倍の乗数として効くため、もし実際に採用される角度が常に0°なら、範囲を狭める
+       だけで5倍近い高速化ができる。逆に0°以外が選ばれているならこの探索は必要で、
+       削ってはいけない。どちらなのかは実際に採用された角度を見ないと判断できない
+       ため、ここに残す（フラットベッドスキャナーなら0°が並ぶ想定）。 */
+    if (scores && scores.size) {
+      const tally = new Map();
+      scores.forEach(r => {
+        const a = r && typeof r.angle === 'number' ? r.angle : 0;
+        tally.set(a, (tally.get(a) || 0) + 1);
+      });
+      const parts = [...tally.entries()].sort((x, y) => x[0] - y[0]).map(([a, n]) => `${a}°×${n}`);
+      console.log(`[classify] 採用された補正角度の内訳: ${parts.join(' ')}`
+        + `（すべて0°なら角度探索の範囲を狭めて高速化できる余地あり）`);
+    }
   }
 
   async function runRecognize() {
@@ -775,7 +792,7 @@
     await new Promise(r => setTimeout(r, 30));
     try {
       const { decision, scores } = await Recognizer.classify(S.recogCanvas, S.forms, classifyOpts());
-      logClassifyDecision(decision);
+      logClassifyDecision(decision, scores);
       S.lastClassify = { decision, scores };
       UI.setPipeline('decide', ['match']);
       UI.renderDecision(decision, S.forms, {});
@@ -1430,7 +1447,7 @@
     const t0 = performance.now();
     try {
       const { decision, scores } = await Recognizer.classify(canvas, S.forms, classifyOpts());
-      logClassifyDecision(decision);
+      logClassifyDecision(decision, scores);
       const t1 = performance.now();
       const candId = decision.best && decision.best.formId;
       const useId = forcedFormId || candId;
