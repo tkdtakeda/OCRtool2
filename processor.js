@@ -93,11 +93,20 @@ const LineRemovalProcessor = (() => {
    * 4 ステップの処理をサーバーへ依頼し、キャンバスの配列で受け取る。
    * @param {HTMLCanvasElement} srcCanvas  入力キャンバス
    * @param {object} p                     parameters
+   * @param {string} [preEncoded]  srcCanvas を既にPNG化済みなら、そのdataURL。
+   *   canvas→PNG圧縮はブラウザ側で重いため、同じ絵を既に送っている呼び出し元
+   *   （認識パイプラインは照合2回でも同じ画像を使う）が使い回せるようにする。
    * @returns {Promise<{ mats: HTMLCanvasElement[], error: string|null }>}
    */
-  async function process(srcCanvas, p) {
+  async function process(srcCanvas, p, preEncoded) {
     try {
-      const json = await postJSON('/api/line-removal', { image: toDataURL(srcCanvas), params: p });
+      const t0 = performance.now();
+      const image = preEncoded || toDataURL(srcCanvas);
+      const tEnc = performance.now();
+      const json = await postJSON('/api/line-removal', { image, params: p });
+      const tEnd = performance.now();
+      console.log(`[perf]   line-removal encode=${(tEnc - t0).toFixed(0)}ms roundTrip=${(tEnd - tEnc).toFixed(0)}ms`
+        + `${preEncoded ? ' (画像は再利用)' : ''}`);
       if (json.error) return { mats: [], error: json.error };
       const mats = await Promise.all(json.images.map(dataURLToCanvas));
       return { mats, error: null };

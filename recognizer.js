@@ -28,7 +28,10 @@ const Recognizer = (() => {
      速度にもプラス（照合回数はテンプレート数に正比例する）。 */
   async function buildAnchorTemplates(forms) {
     const anchors = forms.flatMap(form => (form.anchors || []).filter(AnchorRoles.usedForClassify));
-    return Promise.all(anchors.map(async a => ({ id: a.id, imageElement: await dataURLtoImg(a.dataURL) })));
+    /* dataURL も一緒に渡す。matcher側はこれをそのまま送れるため、
+       imageElementからPNGを再圧縮し直す無駄が無くなる（imageElementは
+       サイズ取得など他の用途で引き続き必要なので残す）。 */
+    return Promise.all(anchors.map(async a => ({ id: a.id, dataURL: a.dataURL, imageElement: await dataURLtoImg(a.dataURL) })));
   }
 
   /** 中央値（外れ値に強い代表値） */
@@ -1075,14 +1078,68 @@ const Recognizer = (() => {
   const fineScalesAround = s => [0.91, 0.94, 0.97, 1.0, 1.03, 1.06, 1.09]
     .map(k => Math.max(0.4, Math.min(2.5, Math.round(s * k * 1000) / 1000)));
 
+  /* ── 帳票判定の段階的な角度探索 ───────────────────────────
+     判定は「テンプレート数 × 角度数 × スケール数」の掛け算で効き、実測では
+     1ページ7.5秒のうち2.3秒（105回の照合＝7テンプレ×5角度×3スケール）を
+     占める最大の工程だった。一方、フラットベッドスキャナー運用では実測ログの
+     採用角度が一貫して0°で、±1°・±2°の探索は毎回ほぼ空振りしている。
+
+     そこで「まず0°だけ照合し、確信を持って採用できたらそこで止める。
+     できなければ残りの角度も照合して併合する」という2段階にする。
+     matchAllは全 角度×スケール の中の最大スコアを返すので、角度集合を分割して
+     呼び出し、スコアの大きい方で併合した結果は、一度に全角度を探索したのと
+     数学的に完全に同じになる（matcher.match_allのdocstring参照）。つまり
+     打ち切らなかった場合の精度・結果は現状と1ビットも変わらず、二度手間にも
+     ならない。近似が入るのは「打ち切ったとき」だけなので、その条件を
+     既定のしきい値よりかなり厳しく取る（下記）。 */
+  /* 0°だけで打ち切ってよい確信度・1位2位差。voting.jsの既定（採用は確信度0.70・
+     差0.06から）よりはっきり厳しくし、少しでも曖昧なら全角度を探索させる。
+     実測の正常ケース（確信度100%・差0.46）は余裕で通り、傾いたページは
+     0°でのスコアが落ちるため自然に全角度探索へ回る。 */
+  const CLASSIFY_FAST_CONF_MIN   = 0.90;
+  const CLASSIFY_FAST_MARGIN_MIN = 0.20;
+
+  /** 2つの照合結果を「スコアの高い方」で併合する（角度集合を分割したぶんを統合）。 */
+  function mergeScores(a, b) {
+    const out = new Map(a);
+    b.forEach((r, id) => { const cur = out.get(id); if (!cur || r.score > cur.score) out.set(id, r); });
+    return out;
+  }
+
   async function classify(sourceCanvas, forms, opts = {}) {
     const angleRange = opts.angleRange ?? 2;
     const angleStep  = opts.angleStep  ?? 1;
     const scaleFactors = opts.scaleFactors || CLASSIFY_SCALES;
     const tpls   = await buildAnchorTemplates(forms);
-    const scores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angleRange, angleStep, scaleFactors });
-    const decision = FormVoting.decide(forms, scores, opts.voting || {});
-    return { decision, scores };
+    /* 判定対象の画像も1度だけPNG化して、2段階になっても再圧縮しない。 */
+    const imageDataURL = sourceCanvas.toDataURL('image/png');
+    const allAngles = [];
+    for (let a = -angleRange; a <= angleRange + 1e-9; a += Math.max(0.1, angleStep)) {
+      allAngles.push(Math.round(a * 1000) / 1000);
+    }
+    const hasZero = allAngles.some(a => Math.abs(a) < 1e-9);
+    const rest = allAngles.filter(a => Math.abs(a) >= 1e-9);
+    /* 0°が探索対象に無い設定（角度をずらして探す特殊な使い方）なら段階分けの
+       意味が無いので従来どおり一括で探索する。 */
+    if (!hasZero || !rest.length) {
+      const scores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angleRange, angleStep, scaleFactors, imageDataURL });
+      return { decision: FormVoting.decide(forms, scores, opts.voting || {}), scores };
+    }
+
+    const fastScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: [0], scaleFactors, imageDataURL });
+    const fastDecision = FormVoting.decide(forms, fastScores, opts.voting || {});
+    if (fastDecision.decision === 'accepted'
+        && fastDecision.confidence >= CLASSIFY_FAST_CONF_MIN
+        && fastDecision.margin >= CLASSIFY_FAST_MARGIN_MIN) {
+      console.log(`[classify] 0°のみで確定（確信度${Math.round(fastDecision.confidence * 100)}% 1位2位差${fastDecision.margin.toFixed(2)}）`
+        + ` → 残り${rest.length}角度(${rest.join('°,')}°)の照合を省略`);
+      return { decision: fastDecision, scores: fastScores };
+    }
+    console.log(`[classify] 0°では確定できず（判定=${fastDecision.decision} 確信度${Math.round(fastDecision.confidence * 100)}%`
+      + ` 1位2位差${fastDecision.margin.toFixed(2)}）→ 残り${rest.length}角度(${rest.join('°,')}°)も照合して併合`);
+    const restScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: rest, scaleFactors, imageDataURL });
+    const scores = mergeScores(fastScores, restScores);
+    return { decision: FormVoting.decide(forms, scores, opts.voting || {}), scores };
   }
 
   /**
@@ -1119,9 +1176,19 @@ const Recognizer = (() => {
     stage('原点の確定', 0.25);
     const anchors = (form.anchors || []).filter(AnchorRoles.usedForAlign);
     const allMatches = [];
+    /* 傾き補正後の画像のPNG（照合2回＋罫線除去で共用）。アンカーが無い等で
+       ローカライズを飛ばした場合は null のままで、罫線除去側が自前で用意する。 */
+    let rotatedDataURL = null;
     try {
-      const tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, imageElement: await dataURLtoImg(a.dataURL) })));
-      const tplList = tpls.map(t => ({ id: t.id, imageElement: t.imageElement }));
+      const tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, dataURL: a.dataURL, imageElement: await dataURLtoImg(a.dataURL) })));
+      const tplList = tpls.map(t => ({ id: t.id, dataURL: t.dataURL, imageElement: t.imageElement }));
+      /* 傾き補正後の画像は、この下の粗探索・細探索・（呼び出し元での）罫線除去で
+         まったく同じものを使う。canvas→PNG圧縮はブラウザ側で重く、実測では
+         サーバーの実処理の外側に1ページあたり約1.8秒（全体の24%）が消えていた。
+         ここで1度だけ用意して使い回す。 */
+      const tEnc0 = performance.now();
+      rotatedDataURL = rotated.toDataURL('image/png');
+      console.log(`[perf]   傾き補正後の画像をPNG化(この後3回分を1回で共用): ${(performance.now() - tEnc0).toFixed(0)}ms`);
       /* 粗→細のスケール探索で「拡大・縮小された帳票」を正しく捉える。
          ① 粗く広い範囲(0.6〜2.0)で各アンカーを個別に探索。
          ② 各アンカー自身の暫定倍率(①の自己ベスト)の周辺(±9%)を、アンカーごとに
@@ -1140,14 +1207,14 @@ const Recognizer = (() => {
          自分にとってベストなものを採用するので、アンカーごとに別々に呼び出すのと
          数学的に同じ結果になる）。 */
       const coarse = await MatcherEngine.matchAll(rotated, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES });
+        { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES, imageDataURL: rotatedDataURL });
       const fineScaleUnion = new Set();
       tpls.forEach(t => {
         const rc = coarse.get(t.id);
         fineScalesAround(rc ? (rc.scale || 1) : 1).forEach(s => fineScaleUnion.add(s));
       });
       const fine = await MatcherEngine.matchAll(rotated, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b) });
+        { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b), imageDataURL: rotatedDataURL });
       /* 診断用ログ: 各アンカーが自身の粗探索ベストの近傍をどれだけ細探索で改善できたか。
          もし依然としてアンカー間で粗ベストの倍率が大きく食い違っているなら、
          それはこの探索範囲の問題ではなく、そのアンカー自体の識別性・画像品質の
@@ -1245,7 +1312,7 @@ const Recognizer = (() => {
     /* ⑤ 罫線除去（登録された罫線除去パラメータを引き継ぎ） */
     stage('罫線除去', 0.45);
     const params = form.lineRemoval || LineRemovalProcessor.defaultParams();
-    const proc   = await LineRemovalProcessor.process(rotated, params);
+    const proc   = await LineRemovalProcessor.process(rotated, params, rotatedDataURL);
     const tLineRemoval = performance.now();
     console.log(`[perf]   prepare: rotate=${(tRotate - tPrepStart).toFixed(0)}ms localize(anchor${anchors.length})=${(tLocalize - tRotate).toFixed(0)}ms lineRemoval=${(tLineRemoval - tLocalize).toFixed(0)}ms`);
     if (proc.error) {

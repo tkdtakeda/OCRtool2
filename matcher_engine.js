@@ -79,13 +79,28 @@ const MatcherEngine = (() => {
     templates.forEach(t => results.set(t.id, { score: -Infinity, angle: 0, scale: 1, loc: { x: 0, y: 0 } }));
     if (!templates.length) return results;
 
-    const templatePayload = templates.map(t => ({ id: t.id, image: toDataURL(t.imageElement) }));
+    /* テンプレートは登録時のdataURLをそのまま送れる場合はそれを使う。
+       imageElementから作り直すと <img>→canvas→PNG圧縮→base64 を毎回やり直す
+       ことになり、同じ絵を何度も再圧縮するだけの純粋な無駄になる
+       （呼び出しのたびに全テンプレートぶん発生していた）。 */
+    const t0 = performance.now();
+    const templatePayload = templates.map(t => ({ id: t.id, image: t.dataURL || toDataURL(t.imageElement) }));
+    /* フル画像も、呼び出し側が「同じ絵を複数回照合する」と分かっている場合は
+       エンコード済みのものを渡せる（prepareの粗探索・細探索・罫線除去で同一）。 */
+    const image = opts.imageDataURL || toDataURL(fullCanvas);
+    const tEnc = performance.now();
 
     const json = await postJSON('/api/match', {
-      image: toDataURL(fullCanvas),
+      image,
       templates: templatePayload,
       angleRange, angleStep, scaleFactors,
+      ...(Array.isArray(opts.angles) && opts.angles.length ? { angles: opts.angles } : {}),
     });
+    const tEnd = performance.now();
+    /* 画像の用意(PNG圧縮)と往復のどちらに時間が掛かっているかを分けて出す。
+       サーバー側の[perf]は実処理だけを測るため、両者の差＝この行でしか見えない。 */
+    console.log(`[perf]   match encode=${(tEnc - t0).toFixed(0)}ms roundTrip=${(tEnd - tEnc).toFixed(0)}ms`
+      + ` (templates=${templates.length}${opts.imageDataURL ? ', 画像は再利用' : ''})`);
     if (json.error) throw new Error(json.error);
 
     templates.forEach(t => {

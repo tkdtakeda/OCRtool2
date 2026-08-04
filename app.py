@@ -154,9 +154,12 @@ def create_app() -> Flask:
             angle_range = body.get('angleRange', 2)
             angle_step = body.get('angleStep', 1)
             scale_factors = body.get('scaleFactors') or [1]
+            # 明示的な角度列（段階的な角度探索用。match_all のdocstring参照）
+            angles = body.get('angles') or None
             results = matcher.match_all(
                 full_rgba, templates,
                 angle_range=angle_range, angle_step=angle_step, scale_factors=scale_factors,
+                angles=angles,
             )
             tpl_dims = [(t['rgba'].shape[1], t['rgba'].shape[0]) for t in templates]
             max_tpl = max((w * h, f'{w}x{h}') for w, h in tpl_dims)[1] if tpl_dims else '-'
@@ -167,7 +170,8 @@ def create_app() -> Flask:
             calib_txt = f', calibration={calib:.0f}ms' if calib is not None else ''
             applog.log(f'[perf] /api/match {(time.perf_counter() - t0) * 1000:.0f}ms '
                   f'(templates={len(templates)}, angleRange={angle_range}, angleStep={angle_step}, '
-                  f'scales={len(scale_factors)}, image={full_rgba.shape[1]}x{full_rgba.shape[0]}, '
+                  f'scales={len(scale_factors)}, angles={len(angles) if angles else "range"}, '
+                  f'image={full_rgba.shape[1]}x{full_rgba.shape[0]}, '
                   f'maxTemplate={max_tpl}, cpuCount={os.cpu_count()}, cvThreads={cv2.getNumThreads()}'
                   f'{calib_txt}{_load_hint()})')
             return jsonify({'results': results, 'error': None})
