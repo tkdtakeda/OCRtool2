@@ -1108,41 +1108,6 @@ const Recognizer = (() => {
     return { dataURL: canvas.toDataURL('image/png'), id: `img${++imageRefSeq}-${Date.now()}`, send: true };
   }
 
-  /* 位置合わせで「等倍近傍だけでは足りず、0.6〜2.0の粗探索も要る」と判断する条件。
-     等倍近傍の探索で十分に強い一致が2点以上あり、かつその倍率が窓の端に張り付いて
-     いなければ、真の倍率はこの窓の内側にあると見てよい（端に張り付く＝もっと外に
-     良い倍率がある可能性が残る、というのは既存の matchQuality.scaleEdge と同じ考え方）。
-     2点以上を要求するのは、estimateTransform が倍率と平行移動を安定して決めるのに
-     最低2点必要なため（1点では縦横比を決められず検出倍率をそのまま使う）。
-     しきい値0.75は、実測30ページで等倍近傍の一致が 0.86〜1.00（十分強い）だったのに対し、
-     倍率が本当に外れていた実機ケース（0.799の帳票）では等倍近傍のスコアが0.43〜0.60まで
-     落ちていたことから、その中間に置いた。
-
-     ★スコアと端だけでは足りない: 帳票は罫線や升目の繰り返しが多いため、倍率が本当は
-     窓の外にあっても、窓の内側の別の倍率で「そこそこ高い」偽の一致が出ることがある。
-     実際、入力を0.8倍に縮小した検証で、真の倍率0.85/0.71（スコア0.96/0.99）に対し
-     等倍近傍だけの探索が 0.894@0.94・0.967@1.06 という高スコアを返し、スコアと端の
-     条件だけでは「窓の内側で確定」と誤判定した（＝粗探索を省いて位置合わせを壊す）。
-     このとき決め手になるのが倍率の一致で、偽の一致はアンカーごとにばらばらの倍率
-     （0.94 と 1.06 で12%差）を示したのに対し、実測30ページの正しい一致は全アンカーが
-     揃って同じ倍率（0.97 または 1.00）を示していた。紙全体は同じ倍率で写るのだから、
-     アンカー間で倍率が食い違う時点でその推定は信用できない。よって「強い一致が2点以上
-     あり、それらの倍率が完全に一致し、かつ窓の端でない」場合にだけ粗探索を省く。 */
-  const LOCALIZE_NEAR_SCORE_MIN = 0.75;
-  function localizeNeedsWideSearch(near, tpls) {
-    const win = fineScalesAround(1);
-    const edges = [win[0], win[win.length - 1]];
-    const scales = [];
-    for (const t of tpls) {
-      const r = near.get(t.id);
-      if (!r || r.score < LOCALIZE_NEAR_SCORE_MIN) continue;
-      if (edges.includes(r.scale)) return true;   // 窓の端＝外にもっと良い倍率がある恐れ
-      scales.push(r.scale);
-    }
-    if (scales.length < 2) return true;
-    return scales.some(s => s !== scales[0]);     // 倍率が食い違う＝偽の一致の疑い
-  }
-
   /** 2つの照合結果を「スコアの高い方」で併合する（角度集合を分割したぶんを統合）。 */
   function mergeScores(a, b) {
     const out = new Map(a);
@@ -1251,36 +1216,23 @@ const Recognizer = (() => {
          各アンカーの細探索候補の和集合を渡す（各アンカーは返ってきた結果のうち
          自分にとってベストなものを採用するので、アンカーごとに別々に呼び出すのと
          数学的に同じ結果になる）。 */
-      /* ★まず等倍近傍(1.0±9%)だけを試す。実測30ページで真の倍率は 0.97 または 1.00 の
-         いずれかで、全件がこの窓の内側に収まっていた。にもかかわらず毎回 0.6〜2.0 の
-         粗探索(8点)を先に走らせており、しかも粗の当てがアンカーごとに散らばる帳票では
-         細探索の候補和集合が7点→14点に倍増して、位置合わせが二重に重くなっていた
-         （実測 scales=8 が427〜737ms、scales=14 が818〜1002ms）。
-         ここでも match_all が全候補中の最大を返す性質を使う。倍率集合を分割して
-         呼び出し、スコアの大きい方で併合すれば一度に探索したのと同じ結果になるので、
-         打ち切らなかった場合の精度は現状と変わらず、二度手間にもならない。 */
-      const near = await MatcherEngine.matchAll(rotated, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: fineScalesAround(1), image: rotatedRef });
-      let coarse = near, fine = near;
-      if (localizeNeedsWideSearch(near, tpls)) {
-        console.log(`[align-scale] 等倍近傍(${fineScalesAround(1).join(',')})では確度不足 → 0.6〜2.0の粗探索も実施して併合`);
-        const wide = await MatcherEngine.matchAll(rotated, tplList,
-          { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES, image: rotatedRef });
-        coarse = mergeScores(near, wide);
-        const fineScaleUnion = new Set();
-        tpls.forEach(t => {
-          const rc = coarse.get(t.id);
-          fineScalesAround(rc ? (rc.scale || 1) : 1).forEach(s => fineScaleUnion.add(s));
-        });
-        /* 既に調べた倍率は省く（等倍近傍は上で済んでいる）。残りが無ければ再照合しない。 */
-        const todo = Array.from(fineScaleUnion).filter(s => !fineScalesAround(1).includes(s)).sort((a, b) => a - b);
-        fine = todo.length
-          ? mergeScores(coarse, await MatcherEngine.matchAll(rotated, tplList,
-              { angleRange: 0, angleStep: 1, scaleFactors: todo, image: rotatedRef }))
-          : coarse;
-      } else {
-        console.log(`[align-scale] 等倍近傍(${fineScalesAround(1).join(',')})で確度十分 → 0.6〜2.0の粗探索を省略`);
-      }
+      /* ※ v.2026-08-04.6 で「まず等倍近傍だけ試し、確度が十分なら粗探索を省く」
+         段階化を入れたが、実機70ページで位置合わせが総崩れ（不一致3件・該当なし17件）
+         になったため撤回した。直接の原因は下の診断ログが参照する fineScaleUnion を
+         if ブロック内で宣言してしまったスコープの誤りで、全ページで例外→この関数を
+         囲む catch が恒等変換へフォールバックしていた（ログから [align] 行が丸ごと
+         消えていたのが動かぬ証拠）。段階化そのものの是非は未検証のまま残るため、
+         100%正解が確認できているこの粗→細の手順へ戻す。速度は角度探索の2段階化と
+         画像キャッシュで確保できており、ここは精度を優先する。 */
+      const coarse = await MatcherEngine.matchAll(rotated, tplList,
+        { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES, image: rotatedRef });
+      const fineScaleUnion = new Set();
+      tpls.forEach(t => {
+        const rc = coarse.get(t.id);
+        fineScalesAround(rc ? (rc.scale || 1) : 1).forEach(s => fineScaleUnion.add(s));
+      });
+      const fine = await MatcherEngine.matchAll(rotated, tplList,
+        { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b), image: rotatedRef });
       /* 診断用ログ: 各アンカーが自身の粗探索ベストの近傍をどれだけ細探索で改善できたか。
          もし依然としてアンカー間で粗ベストの倍率が大きく食い違っているなら、
          それはこの探索範囲の問題ではなく、そのアンカー自体の識別性・画像品質の
@@ -1305,7 +1257,19 @@ const Recognizer = (() => {
         });
       });
       allMatches.sort((a, b) => b.score - a.score);
-    } catch (_) { /* 失敗時は恒等変換 */ }
+    } catch (e) {
+      /* 失敗時は恒等変換（＝位置合わせ無し）で先へ進む。ただし黙って落ちてはいけない。
+         v.2026-08-04.6 で、この catch が実装ミス（ブロックスコープ外の変数を参照した
+         ReferenceError）を丸ごと飲み込み、全ページが恒等変換のままOCRされて位置が
+         総崩れになった（不一致3件・該当なし17件）。処理は続けても、原因が分かる形で
+         必ず記録する。恒等変換で進むと切り出しが帳票の実際のズレぶん外れるため、
+         「速いのに結果だけおかしい」という最も気付きにくい壊れ方をする。 */
+      console.error(`[align] 位置合わせに失敗したため恒等変換（補正なし）で続行します: ${e && e.stack ? e.stack : e}`);
+    }
+    if (!allMatches.length) {
+      console.warn('[align] 目印の一致が1件も得られませんでした。OCR領域は基準座標のまま切り出されるため、'
+        + '帳票のズレぶん位置がずれます（上のエラー、または目印の登録内容を確認してください）');
+    }
     /* 信頼できる一致(>=0.4)で相似変換を推定。無ければ最良1点で best-effort */
     const good = allMatches.filter(p => p.score >= 0.4);
     let transform;
