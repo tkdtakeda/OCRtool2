@@ -2198,6 +2198,10 @@
     }
     recRebuildOcrSide('');
     recFill('recExtKey', []); recFill('recExtVal', ['(なし)']);
+    /* 比較データはモーダルを開くたびに空から始まるので、①は開いた状態に戻す
+       （読み込みが済んだ時点で recCollapseStep1 が畳む）。 */
+    if ($('recStep1')) $('recStep1').open = true;
+    if ($('recStep1Ttl')) $('recStep1Ttl').textContent = '① 比較データを読み込む（貼り付け / ファイル）';
     if (S.recLastSettings) {
       $('recNumeric').checked = !!S.recLastSettings.numeric;
       $('recAutoBlank').checked = !!S.recLastSettings.autoRemoveBlankRows;
@@ -2283,6 +2287,15 @@
     renderRecPreview(header, data);
     $('recPreviewInfo').textContent = `${data.length} 行 × ${header.length} 列を読み込みました`;
     $('recPreviewExpand').disabled = false;
+    recCollapseStep1(data.length, header.length);
+  }
+  /* 読み込みが済んだら①を畳み、②③をスクロール無しで扱えるようにする。
+     畳んだままでも中身が分かるよう、見出しに件数を出す（再度開けば貼り付け欄・
+     プレビューはそのまま残っている）。 */
+  function recCollapseStep1(rows, cols) {
+    const d = $('recStep1'), t = $('recStep1Ttl');
+    if (t) t.textContent = `① 比較データ（${rows} 行 × ${cols} 列 読み込み済み・クリックで開く）`;
+    if (d) d.open = false;
   }
   /* 外部側キー/値は、設定カードのドロップダウンだけでなく、この列見出しの
      🔑/＝ボタンをクリックしても選べるようにする（テーブルを見ながら直感的に選べるように）。 */

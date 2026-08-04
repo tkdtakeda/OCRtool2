@@ -783,7 +783,10 @@
         </label>
         <span class="hint-text rec-form-hint">複数の帳票の認識結果が履歴にあるため、OCR側の項目を絞り込めます。</span>
       </div>
-      <div class="rec-step-ttl">① 比較データを読み込む（貼り付け / ファイル）</div>
+      <!-- ①は読み込みが済めば用済みなので、折りたたんで②以降をスクロール無しで扱えるようにする。
+           読み込み後は summary に件数を出すため、開かなくても中身が分かる。 -->
+      <details id="recStep1" class="rec-step1" open>
+        <summary class="rec-step-ttl"><span id="recStep1Ttl">① 比較データを読み込む（貼り付け / ファイル）</span></summary>
       <div class="rec-input-row">
         <textarea id="recPaste" class="rec-paste" placeholder="ここに Ctrl+V で貼り付け（Excel/CSV/テキスト）、または右の「ファイル選択」／ここへドロップ" spellcheck="false"></textarea>
         <div class="rec-input-side">
@@ -810,6 +813,7 @@
         <button type="button" id="recPreviewExpand" class="btn btn-outline btn-sm" disabled><i class="fas fa-expand"></i> テーブルで確認・整形</button>
       </div>
       <div id="recPreview" class="rec-preview"></div>
+      </details>
 
       <div class="rec-step-ttl">② 照合の設定</div>
       <div class="preset-bar">
