@@ -709,6 +709,15 @@ const Recognizer = (() => {
      生データだと "591,800" と "591,800," のような表記ゆれで誤検知するが、
      最終値ではどちらも "591800" に落ち着くため。 */
 
+  /** sub が sup から文字を取り除くだけで作れるか（＝部分列か）。
+      再読取りの生データが「元の読みから余分な文字を落としただけ」なのか、
+      「別の文字として読み直した」のかを見分けるのに使う（RETRY_PSMSの解説参照）。 */
+  function isSubsequenceOf(sub, sup) {
+    let i = 0;
+    for (const c of sup) if (i < sub.length && sub[i] === c) i++;
+    return i === sub.length;
+  }
+
   /** 数値配列の中央値。 */
   function medianOf(nums) {
     if (!nums.length) return null;
@@ -1464,15 +1473,48 @@ const Recognizer = (() => {
          どちらが正しいか決められないので、確信を持てないまま片方を採用せず
          読み直しに回す。
          1回目が全て満たせばそのまま採用するので、これまで正しく読めていた欄の結果は
-         変わらない。追加のOCRは疑わしい欄にだけ発生する。 */
+         変わらない。追加のOCRは疑わしい欄にだけ発生する。
+
+         ただし「制約に合格した＝正しい」ではない点に注意が必要で、実機で次の
+         転倒が起きた（注文番号 正解"A94813"）:
+           psm6  raw="A948138" → "A94813" ambiguous=true   ← 正解
+           psm7  raw="A948138" → "A94813" ambiguous=true   ← 正解（独立に一致）
+           psm8  raw="AQ4813"  → "AQ4813" ambiguous=false  ← 誤り。だが合格
+         psm8は"9"を"Q"と読み違えた結果ちょうど6桁になり、抽出（どの1文字を
+         落とすか）が不要になったためambiguousが立たず、「唯一の合格者」として
+         正解を上書きしてしまった。桁数がたまたま揃った誤読は、合否だけでは
+         正しい読みと区別できない。
+
+         そこで、合格した再読取りを採用する前に「元の読みと矛盾していないか」を
+         見る。この読み直しが本来救おうとしているのは、上のコメントにあるとおり
+         「汚れや字間を余分な1文字として拾ってしまう」失敗であり、その場合の
+         再読取りの生データは元の生データから文字を落としただけ＝部分列になる
+         （AL24521→AL2451、JIL3331→JL3331）。逆に、元の生データに一度も現れて
+         いない文字を持ち込む再読取り（A948138に無い"Q"）は、切り出し方ではなく
+         字形の解釈そのものが違っており、本来の救済対象ではない。
+         よって、元の読みが他のPSMにも裏付けられている（同じ値が2回以上出た）
+         場合に限り、部分列になっていない再読取りは採用しない。裏付けが無ければ
+         比較対象が無いので従来どおり合格者を採用する（既存の救済は維持される）。 */
       if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous)) {
+        const baseText = out.text;
+        const baseRaw = String(out.raw || '').replace(/\s/g, '');
+        let support = 1;   // 元の読みと同じ値が出た回数（元の読み自身を1と数える）
         for (const altPsm of RETRY_PSMS) {
           if (altPsm === usePsm) continue;
           const altRes = await OcrProcessor.recognize(inputCanvas, altPsm, onProg, useLang, useWl);
           const altOut = finishText(altRes, region, rule, active, single);
           console.log(`[ocr]   "${region.name}" psm=${altPsm}(再読取) raw=${JSON.stringify(altOut.raw)} `
             + `→ ${JSON.stringify(altOut.text)} valid=${altOut.constraintValid} lengthSuspicious=${altOut.lengthSuspicious} ambiguous=${altOut.ambiguous}`);
-          if (altOut.constraintValid && !altOut.lengthSuspicious && !altOut.ambiguous) { res = altRes; out = altOut; readPsm = altPsm; break; }
+          if (altOut.text === baseText) { support++; continue; }   // 元の読みの裏付けが増えただけ
+          if (altOut.constraintValid && !altOut.lengthSuspicious && !altOut.ambiguous) {
+            const altRaw = String(altOut.raw || '').replace(/\s/g, '');
+            const segmentationOnly = isSubsequenceOf(altRaw, baseRaw);
+            if (segmentationOnly || support < 2) { res = altRes; out = altOut; readPsm = altPsm; break; }
+            console.log(`[ocr]   "${region.name}" psm=${altPsm}(再読取)は不採用: `
+              + `元の読み${JSON.stringify(baseText)}が${support}回一致で裏付けられている一方、`
+              + `${JSON.stringify(altRaw)}は元の生データ${JSON.stringify(baseRaw)}に無い文字を含む`
+              + `（切り出し方の違いではなく字形の解釈違い）ため信用しない`);
+          }
         }
       }
       const { text, raw, constraintValid, lengthSuspicious, ambiguous } = out;
