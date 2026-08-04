@@ -8,7 +8,8 @@ tesserocr（Tesseractのネイティブ C++ API を直接叩く。文字単位�
 requirements.txt には pytesseract のみを必須として書き、tesserocr は任意の
 追加インストールという扱いにする（tesserocrはCコンパイラ＋Tesseractの
 開発ヘッダが必要で、必須にすると環境によっては requirements.txt の
-インストール自体が失敗しうるため）。README参照。
+インストール自体が失敗しうるため。動作検証も取れていないため、README.mdでは
+案内していない）。
 
 Responsibility: OCR処理ロジックのみ。Flask には触れない。ocr.jsの契約と
 同じく、例外は投げずに { ..., error: string } を返す。

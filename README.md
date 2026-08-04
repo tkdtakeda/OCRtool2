@@ -16,8 +16,16 @@ Pythonパッケージとは別に、OCRエンジン本体（Tesseract）が必�
 
 - **Windows**: [UB-Mannheim版インストーラー](https://github.com/UB-Mannheim/tesseract/wiki) を使用。
   インストール時に「Additional language data」から **Japanese** をチェックしてください。
+  最近のインストーラーはPATHを自動設定しないため、インストール後に
+  インストール先フォルダ（既定 `C:\Program Files\Tesseract-OCR`）を
+  環境変数PATHへ手動で追加してください（詳細手順は `tesseract-install/`
+  参照）。これを忘れると起動時に「Tesseractを初期化できませんでした」に
+  なります。
 - **macOS**: `brew install tesseract tesseract-lang`
 - **Linux (Debian/Ubuntu)**: `sudo apt install tesseract-ocr tesseract-ocr-jpn`
+
+（Pythonを使わない人にこの手順だけ案内したい場合は、`tesseract-install/`
+フォルダを渡せばこの節と同じ内容が単独で伝わります）
 
 ### 2. Pythonパッケージをインストール
 
@@ -28,24 +36,6 @@ pip install -r requirements.txt
 ```
 
 これだけで動作します（コンパイラ等は不要です）。
-
-### 3. （任意）文字別の確信度をより精密にする
-
-OCR実行結果の「文字別の確信度」表示は、既定では単語単位の確信度を文字に
-割り当てた近似値になります。以下を追加でインストールすると、文字1つ1つの
-実際の確信度が使われるようになり、精度・速度とも向上します（Cコンパイラと
-Tesseractの開発ヘッダが必要なため、環境によっては失敗することがあります。
-失敗しても動作に問題はなく、既定の近似値表示になるだけです）。
-
-```bash
-pip install tesserocr
-```
-
-- Linux: あらかじめ `sudo apt install libtesseract-dev libleptonica-dev pkg-config` が必要です。
-- macOS: Homebrewで入れた `tesseract` に開発ヘッダが含まれるため、通常はそのまま `pip install tesserocr` で通ります。
-- Windows: 通常のpipでは入りにくいため、Anaconda/Minicondaをお使いの場合は
-  `conda install -c conda-forge tesserocr` を試してください。難しければ
-  インストールをスキップして構いません。
 
 ## 起動方法
 
@@ -125,8 +115,12 @@ Tesseract本体がインストールされていないか、PATHが通ってい�
 
 ## 開発メモ
 
-全ファイルこのフォルダ直下にフラットに置いています（サブフォルダなし）。
+全ファイルこのフォルダ直下にフラットに置いています（サブフォルダなし。
+唯一の例外は `tesseract-install/` — 非Pythonユーザーへの案内だけを
+切り出したフォルダ）。
 
+- `tesseract-install/` — 「セットアップ 1」と同じ内容を、Python環境を
+  持たない相手にも単独で渡せるようにした案内書。
 - `index.html` / `*.js` / `*.css` — 画面・設定・操作。帳票レイアウト等は
   これまで通りブラウザのIndexedDBに保存されます。
 - `app.py` / `imaging.py` / `matcher.py` / `processor_server.py` /
