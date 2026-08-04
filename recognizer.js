@@ -650,6 +650,44 @@ const Recognizer = (() => {
      1.6を採用する。 */
   const GLYPH_MERGED_WIDTH_RATIO = 1.6;
 
+  /* ── まとまりが「本当に1つの字形か」の検算（固定長・可変長の共通ガード）──
+     v.2026-07-29.11 には「複数の本物の字形を巻き込んで消す事故」を防ぐための
+     クラスタ幅ガード（字形1つ分の1.8倍超なら畳まない）があったが、
+     v.2026-07-29.12 で判定方式を「矩形の重なり」から「字送りの規則性」へ
+     作り替えた際に失われた。その結果、実機で注文番号"A94813"が"A94818"に
+     化ける事故が起きたため、2つの独立した根拠で作り直す。
+
+     実測値（すべて実機ログの矩形データ。ref=単独検出された字形の幅の中央値）:
+                                             広がり/ref   断片間の隙間
+       畳んでよい（1つの字形の二重検出）:
+         "7104"→"704"      7+1                1.10倍        -6px
+         "AB0750" 0の2分割  O+Q                1.54倍        -8px
+         "AB0746" 0の3分割  0+O+Q              1.67倍     -11,-9px
+         "AA1227" 1の3分割  L+1+L              1.68倍      -6, 0px
+         "AB0684" 0の3分割  O+Q+O              1.86倍     -12, 0px
+       畳んではいけない（別々の本物の字形）:
+         "A94813"→"A94818" 1[233-245]+3[257-272]  1.86倍     +12px ★
+         "5,002,800"→"500280" 0[292-314]+0[294-344] 2.26倍    -20px ★
+
+     ここから分かるのは、「広がり」だけでは A94813(1.86) と AB0684(1.86) を
+     区別できないということ。両者を分けるのは隙間の符号である:
+       ① 同じインクを重複して指した断片は、必ず重なるか接する（隙間 ≦ 0px）。
+          実測でも畳んでよい5件はすべて -12〜0px に収まっている。
+       ② 逆に断片同士のあいだに白い隙間が空いている（A94813 の +12px）なら、
+          それは物理的に別々のインク＝別々の字形である動かぬ証拠になる。
+     そこで判定を2本立てにする:
+       ・隙間ガード: 白い隙間が字形幅の25%を超えたら畳まない（①②より。
+         インクのかすれで断片が数px途切れる可能性は残すため0ではなく25%）。
+       ・広がりガード: 隙間が無く（＝重なって）いても、まとまりが2文字分
+         （≒2.0倍。v.2026-07-29.11の「本当に隣り合う2文字は2倍前後」という
+         実測と一致）まで広がっているなら畳まない。"5,002,800" の 2.26倍は
+         これで捕まる。
+     2本立てにしたことで、畳んでよい実測（最大1.86倍・隙間0px）と、畳んでは
+     いけない実測（1.86倍だが隙間+12px／隙間は無いが2.26倍）が、どちらの軸でも
+     十分な余裕をもって分離される。 */
+  const GLYPH_CLUSTER_SPAN_MAX_RATIO = 2.0;
+  const GLYPH_CLUSTER_GAP_MAX_RATIO  = 0.25;
+
   /* ── 可変長欄（金額欄等）のセカンドオピニオン ─────────────
      可変長欄は桁数という検算材料が無いため、字形が丸ごと別の文字として
      誤分類された場合（実機で "704" が "104" と読まれ、7の矩形が1個だけ・
@@ -711,7 +749,7 @@ const Recognizer = (() => {
      @param {Array}  charBoxes   文字単位の外接矩形
      @param {number} expectedLen 期待される桁数（固定長ルールのみ。0/未指定なら可変長として扱う）
      @returns {{ text:string, dropped:Array }|null} 修復できない場合は null。 */
-  function repairSplitGlyphs(text, charBoxes, expectedLen) {
+  function repairSplitGlyphs(text, charBoxes, expectedLen, logPrefix = '[ocr]') {
     const L = expectedLen | 0;
     if (!Array.isArray(charBoxes) || charBoxes.length < 2) return null;
     if (L && charBoxes.length <= L) return null;   // 桁数既知で余分が無ければ何もしない
@@ -725,6 +763,7 @@ const Recognizer = (() => {
 
     const groups = L ? groupByExpectedLen(items, gaps, L) : groupByNaturalGaps(items, gaps);
     if (!groups || !groups.some(g => g.length > 1)) return null;
+    if (clusterTooWide(groups, logPrefix)) return null;
 
     /* まとまりの中でどれを残すかは、桁数が既知かどうかで信頼できる根拠が違う。
        桁数既知（固定長）なら「等間隔に並ぶはずの位置」を他の桁から当てはめられる
@@ -740,6 +779,38 @@ const Recognizer = (() => {
       text: charBoxes.filter((_, i) => !drop.has(i)).map(b => b.text).join(''),
       dropped: charBoxes.filter((_, i) => drop.has(i)),
     };
+  }
+  /* まとまりが本当に「1つの字形の断片」かを検算する（固定長・可変長の共通ガード）。
+     1つでも怪しいまとまりがあれば、その中から代表1つを選ぶ操作自体が本物の字形を
+     消す危険があるため、修復全体を諦める（安全側に倒す）。判断材料は必ず診断ログへ
+     出す。実機で誤判定が起きたとき、矩形の羅列だけでは「なぜ畳んだ／畳まなかったか」
+     が追えず、原因究明のたびに実データの提供をお願いすることになるため
+     （しきい値の根拠となる実測値との突き合わせをログだけで行えるようにする）。 */
+  function clusterTooWide(groups, logPrefix) {
+    const widthOf = p => p.b.x1 - p.b.x0;
+    const soloWidths = groups.filter(g => g.length === 1).map(g => widthOf(g[0]));
+    const ref = medianOf(soloWidths.length ? soloWidths : groups.flat().map(widthOf));
+    if (!ref) return false;
+    let reject = false;
+    for (const g of groups) {
+      if (g.length < 2) continue;
+      const span = Math.max(...g.map(p => p.b.x1)) - Math.min(...g.map(p => p.b.x0));
+      const ratio = span / ref;
+      /* 断片同士の白い隙間。同じ字形の二重検出なら重なるか接する（≦0）のが実測。
+         正の隙間が空いている＝物理的に別々のインク＝別々の字形の証拠。 */
+      const sorted = [...g].sort((a, b) => a.b.x0 - b.b.x0);
+      const holes = sorted.slice(1).map((p, k) => p.b.x0 - sorted[k].b.x1);
+      const maxHole = Math.max(...holes);
+      const wide = ratio >= GLYPH_CLUSTER_SPAN_MAX_RATIO;
+      const apart = maxHole > GLYPH_CLUSTER_GAP_MAX_RATIO * ref;
+      if (wide || apart) reject = true;
+      console.log(`${logPrefix} まとまり[${g.map(p => p.b.text).join('+')}] `
+        + `広がり${span}px = 字形1つ分(${Math.round(ref)}px)の${ratio.toFixed(2)}倍 `
+        + `断片間の隙間[${holes.join(',')}]px`
+        + (apart ? ` → 隙間が字形幅の${GLYPH_CLUSTER_GAP_MAX_RATIO * 100}%(${Math.round(GLYPH_CLUSTER_GAP_MAX_RATIO * ref)}px)超。別々の字形と判断し修復を中止` : '')
+        + (wide ? ` → ${GLYPH_CLUSTER_SPAN_MAX_RATIO}倍以上に広がっている。別々の字形と判断し修復を中止` : ''));
+    }
+    return reject;
   }
   /* 固定長ルール向け: 断片を含まないまとまりだけから「等間隔に並ぶはずの位置」
      （中心 ≒ 切片 + ピッチ×番号）を当てはめる。左端のゴミを巻き込んで太った
@@ -1294,7 +1365,8 @@ const Recognizer = (() => {
         const boxes = boxRes.charBoxes;
         if (!Array.isArray(boxes) || !boxes.length) return null;
         const expectedLen = (norm && !norm.variable) ? norm.len : 0;
-        const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes, expectedLen);
+        const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes, expectedLen,
+          `[ocr]   "${region.name}"${label}`);
         const dropped = new Set((rep ? rep.dropped : []));
         console.log(`[ocr]   "${region.name}"${label} 文字矩形: `
           + boxes.map(b => `${b.text}[${b.x0}-${b.x1}]${dropped.has(b) ? '←除外' : ''}`).join(' '));
