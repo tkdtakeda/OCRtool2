@@ -777,6 +777,15 @@
       <button class="modal-close" id="reconcileClose"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="modal-bdy">
+      <!-- 実施タイミングの絞り込み。同じ帳票を何度もOCRすると履歴が積み上がり、
+           70件のつもりが140件(70件×2回)出て今回分が分からなくなるため、
+           既定は「最新の実施」だけを対象にする（2回以上ある場合のみ表示）。 -->
+      <div class="rec-form-row hidden" id="recRunRow">
+        <label class="rec-form-lbl"><i class="fas fa-clock-rotate-left"></i> 実施タイミング
+          <select id="recRunFilter" class="pselect"></select>
+        </label>
+        <span class="hint-text rec-form-hint">同じ帳票を複数回OCRした履歴があります。既定は最新の実施だけを照合します。</span>
+      </div>
       <div class="rec-form-row hidden" id="recFormRow">
         <label class="rec-form-lbl"><i class="fas fa-file-invoice"></i> 対象の帳票
           <select id="recFormFilter" class="pselect"></select>

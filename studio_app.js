@@ -1350,6 +1350,10 @@
       formId: form.id, formName: form.name,
       page: page || 1,
       createdAt: Date.now(),
+      /* この結果がどの「実施」に属するか（照合画面での絞り込み用）。
+         単発OCRは実施IDを持たないので、照合側は createdAt の間隔で束ねる。 */
+      runId: (S.ocrRun && S.ocrRun.id) || '',
+      runStartedAt: (S.ocrRun && S.ocrRun.startedAt) || 0,
       sourceThumb: thumbURL(srcCanvas, 90),
       decision: manual ? 'review' : dec.decision,
       confidence: dec.confidence,
@@ -1495,9 +1499,22 @@
 
   /* 指定範囲のページを順に一括OCR（pageSource = { pages:[n…], total, getPage(n), done() }）。
      大量ページでも 1枚ずつ描画→OCR→破棄するためメモリは一定。中止可能。 */
+  /* ── 実施タイミング（OCRの実行単位）─────────────────────
+     照合画面で「今回OCRした分」だけを見たいという要望への対応。認識結果には
+     createdAt しか無く、同じ帳票を作業日をまたいで何度もOCRすると履歴が積み上がり、
+     70件のつもりが140件（70件×2回）出て、どこまでが今回か分からなくなっていた。
+     一括OCRを開始した時点で1つのIDを振り、そのバッチで保存される全ページに
+     同じIDを持たせて「1回の実施」を識別できるようにする。 */
+  function beginOcrRun() {
+    S.ocrRun = { id: uid(), startedAt: Date.now() };
+    return S.ocrRun;
+  }
+
   async function runBatchPdf(src, opts) {
     if (!S.serverReady) { src.done && src.done(); return UI.toast('サーバーに接続中です', 'warning'); }
     if (!S.forms.length) { src.done && src.done(); return UI.toast('先に帳票を登録してください', 'warning'); }
+    /* 「続きから」の再開は同じ実施の続きなので、実行IDは引き継ぐ */
+    if (!(opts && opts.resuming) || !S.ocrRun) beginOcrRun();
     const posWarnBefore = { ...S.posWarnCounts };   // このバッチ中に増えた件数だけをサマリで報告するため
     const resuming = !!(opts && opts.resuming);
     const priorResults = resuming ? (S.batchResults || []) : [];
@@ -2134,8 +2151,65 @@
     rows.forEach(r => { const id = r.formId || ''; if (!seen.has(id)) seen.set(id, { id, name: r.formName || '(不明な帳票)', count: 0 }); seen.get(id).count++; });
     return [...seen.values()];
   }
+  /* 認識結果を「実施タイミング」ごとに束ねる。
+     runId を持つ結果（一括OCR）はそのIDで束ねる。持たない古い結果や単発OCRは、
+     createdAt の間隔で切る（1回の一括OCRはページ間が数秒〜十数秒なのに対し、
+     別の実施との間は分〜日単位で空く。その中間として3分を境目にする）。
+     戻り値は新しい実施が先頭。 */
+  const REC_RUN_GAP_MS = 3 * 60 * 1000;
+  function recRunList(rows) {
+    const sorted = [...rows].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    const runs = [];
+    let cur = null;
+    for (const r of sorted) {
+      const rid = r.runId || '';
+      const t = r.createdAt || 0;
+      const sameRun = cur && (rid
+        ? cur.runId === rid
+        : (!cur.runId && Math.abs(cur.oldest - t) <= REC_RUN_GAP_MS));
+      if (!sameRun) { cur = { runId: rid, newest: t, oldest: t, rows: [] }; runs.push(cur); }
+      cur.rows.push(r);
+      cur.oldest = Math.min(cur.oldest || t, t);
+      cur.newest = Math.max(cur.newest || t, t);
+    }
+    return runs;
+  }
+  /* 実施タイミングの選択肢を作り直す。1件しか無ければ行ごと隠す（従来の見た目のまま）。 */
+  function recRebuildRunFilter() {
+    const runs = recRunList(S.rec.allRows || []);
+    S.rec.runs = runs;
+    const row = $('recRunRow'), sel = $('recRunFilter');
+    if (!row || !sel) return;
+    if (runs.length <= 1) { row.classList.add('hidden'); S.rec.runKey = ''; return; }
+    row.classList.remove('hidden');
+    sel.innerHTML = '';
+    runs.forEach((run, i) => {
+      const o = document.createElement('option');
+      o.value = String(i);
+      const when = new Date(run.newest).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      o.textContent = `${when}（${run.rows.length}件）${i === 0 ? ' ← 最新' : ''}`;
+      sel.appendChild(o);
+    });
+    const allOpt = document.createElement('option');
+    allOpt.value = '';
+    allOpt.textContent = `すべての実施（${(S.rec.allRows || []).length}件）`;
+    sel.appendChild(allOpt);
+    /* 既定は最新の実施。「70件のつもりが過去の分まで出た」という取り違えを防ぐため、
+       黙って全件を対象にはしない（全件を見たい場合は明示的に選ぶ）。 */
+    sel.value = '0';
+    S.rec.runKey = '0';
+  }
+  /* 実施の絞り込みを適用した行を返す（未選択＝すべて）。 */
+  function recRowsForRun() {
+    const all = S.rec.allRows || [];
+    const key = S.rec.runKey;
+    if (key === '' || key == null) return all;
+    const run = (S.rec.runs || [])[Number(key)];
+    return run ? run.rows : all;
+  }
   function recRebuildOcrSide(formId) {
-    const rows = formId ? S.rec.allRows.filter(r => (r.formId || '') === formId) : S.rec.allRows;
+    const base = recRowsForRun();
+    const rows = formId ? base.filter(r => (r.formId || '') === formId) : base;
     const cols = [];
     /* 複数帳票をまたいだ照合キーの統一のため、帳票固有の項目名(name)ではなく
        帳票編集で設定できる共通名(globalName)を列のキーにする
@@ -2178,14 +2252,16 @@
     let rows = [];
     try { rows = await FormDB.getAllResults(100000); } catch (_) {}
     if (!rows.length) return UI.toast('照合する認識結果がありません（先にOCRを実行）', 'warning');
-    const forms = recFormList(rows);
     S.rec = { allRows: rows, ext: null, result: null };
+    recRebuildRunFilter();            // 実施タイミングを先に決める（既定=最新の実施）
+    /* 帳票の選択肢は、選ばれている実施の中身から作る（件数もその実施の件数になる） */
+    const forms = recFormList(recRowsForRun());
     const row = $('recFormRow'), sel = $('recFormFilter');
     if (forms.length > 1) {
       row.classList.remove('hidden');
       sel.innerHTML = '';
       forms.forEach(f => { const o = document.createElement('option'); o.value = f.id; o.textContent = `${f.name}（${f.count}件）`; sel.appendChild(o); });
-      const allOpt = document.createElement('option'); allOpt.value = ''; allOpt.textContent = `すべての帳票（${rows.length}件・共通名(任意)を設定した項目はまとめて照合できます）`;
+      const allOpt = document.createElement('option'); allOpt.value = ''; allOpt.textContent = `すべての帳票（${recRowsForRun().length}件・共通名(任意)を設定した項目はまとめて照合できます）`;
       sel.appendChild(allOpt);
       /* 既定は「すべての帳票」。以前は最新の結果が属する帳票だけに絞っていたが、
          帳票を編集・再保存するとformIdが変わり別集計になることがあり、30件OCRした
@@ -2775,6 +2851,21 @@
     /* 照合（OCR結果 × 外部データ） */
     $('btnReconcile').addEventListener('click', openReconcile);
     $('recFormFilter').addEventListener('change', e => recRebuildOcrSide(e.target.value));
+    /* 実施タイミングを変えたら、帳票の選択肢（件数）とOCR側を作り直す。
+       選ばれていた帳票がその実施に無ければ「すべての帳票」に戻す。 */
+    $('recRunFilter').addEventListener('change', e => {
+      S.rec.runKey = e.target.value;
+      const forms = recFormList(recRowsForRun());
+      const sel = $('recFormFilter'), prev = sel.value;
+      sel.innerHTML = '';
+      forms.forEach(f => { const o = document.createElement('option'); o.value = f.id; o.textContent = `${f.name}（${f.count}件）`; sel.appendChild(o); });
+      const allOpt = document.createElement('option'); allOpt.value = '';
+      allOpt.textContent = `すべての帳票（${recRowsForRun().length}件・共通名(任意)を設定した項目はまとめて照合できます）`;
+      sel.appendChild(allOpt);
+      $('recFormRow').classList.toggle('hidden', forms.length <= 1);
+      sel.value = forms.some(f => f.id === prev) ? prev : '';
+      recRebuildOcrSide(sel.value);
+    });
     $('recOcrKey').addEventListener('change', updateRecOcrSamples);
     $('recOcrVal').addEventListener('change', updateRecOcrSamples);
     $('btnRecApplyPreset').addEventListener('click', applyRecPreset);
