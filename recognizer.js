@@ -1099,6 +1099,15 @@ const Recognizer = (() => {
   const CLASSIFY_FAST_CONF_MIN   = 0.90;
   const CLASSIFY_FAST_MARGIN_MIN = 0.20;
 
+  /* 同じ画像を複数のAPIへ送るための参照。初回だけ本体を送り、以降はidだけで
+     サーバー側が保持している画像を参照する（app.py の _resolve_image）。
+     実測で、往復時間のうちサーバー実処理を除いた大半が本文転送だった
+     （1651x2336で1回あたり約800ms）。1ページで最大5回送っていたものが1回になる。 */
+  let imageRefSeq = 0;
+  function newImageRef(canvas) {
+    return { dataURL: canvas.toDataURL('image/png'), id: `img${++imageRefSeq}-${Date.now()}`, send: true };
+  }
+
   /** 2つの照合結果を「スコアの高い方」で併合する（角度集合を分割したぶんを統合）。 */
   function mergeScores(a, b) {
     const out = new Map(a);
@@ -1111,8 +1120,8 @@ const Recognizer = (() => {
     const angleStep  = opts.angleStep  ?? 1;
     const scaleFactors = opts.scaleFactors || CLASSIFY_SCALES;
     const tpls   = await buildAnchorTemplates(forms);
-    /* 判定対象の画像も1度だけPNG化して、2段階になっても再圧縮しない。 */
-    const imageDataURL = sourceCanvas.toDataURL('image/png');
+    /* 判定対象の画像は1度だけPNG化・1度だけ送信し、2段階目はid参照で済ませる。 */
+    const imageRef = newImageRef(sourceCanvas);
     const allAngles = [];
     for (let a = -angleRange; a <= angleRange + 1e-9; a += Math.max(0.1, angleStep)) {
       allAngles.push(Math.round(a * 1000) / 1000);
@@ -1122,11 +1131,11 @@ const Recognizer = (() => {
     /* 0°が探索対象に無い設定（角度をずらして探す特殊な使い方）なら段階分けの
        意味が無いので従来どおり一括で探索する。 */
     if (!hasZero || !rest.length) {
-      const scores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angleRange, angleStep, scaleFactors, imageDataURL });
+      const scores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angleRange, angleStep, scaleFactors, image: imageRef });
       return { decision: FormVoting.decide(forms, scores, opts.voting || {}), scores };
     }
 
-    const fastScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: [0], scaleFactors, imageDataURL });
+    const fastScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: [0], scaleFactors, image: imageRef });
     const fastDecision = FormVoting.decide(forms, fastScores, opts.voting || {});
     if (fastDecision.decision === 'accepted'
         && fastDecision.confidence >= CLASSIFY_FAST_CONF_MIN
@@ -1137,7 +1146,7 @@ const Recognizer = (() => {
     }
     console.log(`[classify] 0°では確定できず（判定=${fastDecision.decision} 確信度${Math.round(fastDecision.confidence * 100)}%`
       + ` 1位2位差${fastDecision.margin.toFixed(2)}）→ 残り${rest.length}角度(${rest.join('°,')}°)も照合して併合`);
-    const restScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: rest, scaleFactors, imageDataURL });
+    const restScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: rest, scaleFactors, image: imageRef });
     const scores = mergeScores(fastScores, restScores);
     return { decision: FormVoting.decide(forms, scores, opts.voting || {}), scores };
   }
@@ -1176,9 +1185,10 @@ const Recognizer = (() => {
     stage('原点の確定', 0.25);
     const anchors = (form.anchors || []).filter(AnchorRoles.usedForAlign);
     const allMatches = [];
-    /* 傾き補正後の画像のPNG（照合2回＋罫線除去で共用）。アンカーが無い等で
-       ローカライズを飛ばした場合は null のままで、罫線除去側が自前で用意する。 */
-    let rotatedDataURL = null;
+    /* 傾き補正後の画像の参照（照合2回＋罫線除去で共用。本体の送信は初回のみ）。
+       アンカーが無い等でローカライズを飛ばした場合は null のままで、
+       罫線除去側が自前で用意する。 */
+    let rotatedRef = null;
     try {
       const tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, dataURL: a.dataURL, imageElement: await dataURLtoImg(a.dataURL) })));
       const tplList = tpls.map(t => ({ id: t.id, dataURL: t.dataURL, imageElement: t.imageElement }));
@@ -1187,8 +1197,8 @@ const Recognizer = (() => {
          サーバーの実処理の外側に1ページあたり約1.8秒（全体の24%）が消えていた。
          ここで1度だけ用意して使い回す。 */
       const tEnc0 = performance.now();
-      rotatedDataURL = rotated.toDataURL('image/png');
-      console.log(`[perf]   傾き補正後の画像をPNG化(この後3回分を1回で共用): ${(performance.now() - tEnc0).toFixed(0)}ms`);
+      rotatedRef = newImageRef(rotated);
+      console.log(`[perf]   傾き補正後の画像をPNG化(この後3回分を1回で共用・送信も1回): ${(performance.now() - tEnc0).toFixed(0)}ms`);
       /* 粗→細のスケール探索で「拡大・縮小された帳票」を正しく捉える。
          ① 粗く広い範囲(0.6〜2.0)で各アンカーを個別に探索。
          ② 各アンカー自身の暫定倍率(①の自己ベスト)の周辺(±9%)を、アンカーごとに
@@ -1207,14 +1217,14 @@ const Recognizer = (() => {
          自分にとってベストなものを採用するので、アンカーごとに別々に呼び出すのと
          数学的に同じ結果になる）。 */
       const coarse = await MatcherEngine.matchAll(rotated, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES, imageDataURL: rotatedDataURL });
+        { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES, image: rotatedRef });
       const fineScaleUnion = new Set();
       tpls.forEach(t => {
         const rc = coarse.get(t.id);
         fineScalesAround(rc ? (rc.scale || 1) : 1).forEach(s => fineScaleUnion.add(s));
       });
       const fine = await MatcherEngine.matchAll(rotated, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b), imageDataURL: rotatedDataURL });
+        { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b), image: rotatedRef });
       /* 診断用ログ: 各アンカーが自身の粗探索ベストの近傍をどれだけ細探索で改善できたか。
          もし依然としてアンカー間で粗ベストの倍率が大きく食い違っているなら、
          それはこの探索範囲の問題ではなく、そのアンカー自体の識別性・画像品質の
@@ -1312,17 +1322,21 @@ const Recognizer = (() => {
     /* ⑤ 罫線除去（登録された罫線除去パラメータを引き継ぎ） */
     stage('罫線除去', 0.45);
     const params = form.lineRemoval || LineRemovalProcessor.defaultParams();
-    const proc   = await LineRemovalProcessor.process(rotated, params, rotatedDataURL);
+    /* 認識では最終結果の1枚しか使わない（残り3枚は表示用で、受け取っても
+       cleanupMats に渡して捨てているだけだった）ので onlyFinal で省く。 */
+    const proc   = await LineRemovalProcessor.process(rotated, params, rotatedRef, true);
     const tLineRemoval = performance.now();
     console.log(`[perf]   prepare: rotate=${(tRotate - tPrepStart).toFixed(0)}ms localize(anchor${anchors.length})=${(tLocalize - tRotate).toFixed(0)}ms lineRemoval=${(tLineRemoval - tLocalize).toFixed(0)}ms`);
-    if (proc.error) {
+    if (proc.error || !proc.mats.length) {
       LineRemovalProcessor.cleanupMats(proc.mats);
-      return { angle, transform, anchorPoints, resultCanvas: null, previewMats: [], error: proc.error, matchQuality };
+      return { angle, transform, anchorPoints, resultCanvas: null, previewMats: [],
+               error: proc.error || '罫線除去の結果画像を受け取れませんでした', matchQuality };
     }
-    /* mats[3] = 罫線除去結果（サーバーから受け取り済みのcanvas）。OCR 入力用に
-       独立キャンバスへ描画 */
+    /* 罫線除去結果（サーバーから受け取り済みのcanvas）。OCR 入力用に独立キャンバスへ描画。
+       ※ 末尾で参照すること。onlyFinal を付けた認識時は1枚だけ返るため添字3では取れない
+         （process のJSDoc参照。最終結果が常に末尾なのは両方の場合で共通）。 */
     const resultCanvas = document.createElement('canvas');
-    const resMat = proc.mats[3];
+    const resMat = proc.mats[proc.mats.length - 1];
     resultCanvas.width  = resMat.width;
     resultCanvas.height = resMat.height;
     /* このcanvasはOCR領域ごとに何度も切り出し(drawImage)で読み出される最重要の

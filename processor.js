@@ -93,20 +93,36 @@ const LineRemovalProcessor = (() => {
    * 4 ステップの処理をサーバーへ依頼し、キャンバスの配列で受け取る。
    * @param {HTMLCanvasElement} srcCanvas  入力キャンバス
    * @param {object} p                     parameters
-   * @param {string} [preEncoded]  srcCanvas を既にPNG化済みなら、そのdataURL。
-   *   canvas→PNG圧縮はブラウザ側で重いため、同じ絵を既に送っている呼び出し元
-   *   （認識パイプラインは照合2回でも同じ画像を使う）が使い回せるようにする。
+   * @param {{dataURL:string, id:string, send:boolean}} [imageRef]  同じ画像を複数の
+   *   APIへ送る呼び出し元（認識パイプラインは照合2回＋罫線除去で同一画像）向け。
+   *   初回だけ本体を送り、以降は id だけでサーバー側の保持画像を参照する。
+   * @param {boolean} [onlyFinal]  最終結果の1枚だけを受け取る（表示用の3枚を省く）。
    * @returns {Promise<{ mats: HTMLCanvasElement[], error: string|null }>}
+   *   mats の最後の要素が常に最終結果（onlyFinal の有無で長さが変わるため、
+   *   添字ではなく末尾で参照すること）。
    */
-  async function process(srcCanvas, p, preEncoded) {
+  async function process(srcCanvas, p, imageRef, onlyFinal) {
     try {
       const t0 = performance.now();
-      const image = preEncoded || toDataURL(srcCanvas);
+      const image = imageRef ? imageRef.dataURL : toDataURL(srcCanvas);
       const tEnc = performance.now();
-      const json = await postJSON('/api/line-removal', { image, params: p });
+      const body = {
+        params: p,
+        ...(onlyFinal ? { onlyFinal: true } : {}),
+        ...(imageRef ? { imageId: imageRef.id } : {}),
+        ...(!imageRef || imageRef.send !== false ? { image } : {}),
+      };
+      let json = await postJSON('/api/line-removal', body);
+      let resent = false;
+      if (json.error === 'IMAGE_CACHE_MISS') {
+        resent = true;
+        json = await postJSON('/api/line-removal', { ...body, image });
+      }
       const tEnd = performance.now();
+      if (imageRef && !json.error) imageRef.send = false;
       console.log(`[perf]   line-removal encode=${(tEnc - t0).toFixed(0)}ms roundTrip=${(tEnd - tEnc).toFixed(0)}ms`
-        + `${preEncoded ? ' (画像は再利用)' : ''}`);
+        + `${imageRef ? (body.image ? ' (画像を送信)' : ' (画像はサーバー側を参照)') : ''}`
+        + `${onlyFinal ? ' 最終1枚のみ受信' : ''}${resent ? '/キャッシュ切れのため再送' : ''}`);
       if (json.error) return { mats: [], error: json.error };
       const mats = await Promise.all(json.images.map(dataURLToCanvas));
       return { mats, error: null };

@@ -85,22 +85,35 @@ const MatcherEngine = (() => {
        （呼び出しのたびに全テンプレートぶん発生していた）。 */
     const t0 = performance.now();
     const templatePayload = templates.map(t => ({ id: t.id, image: t.dataURL || toDataURL(t.imageElement) }));
-    /* フル画像も、呼び出し側が「同じ絵を複数回照合する」と分かっている場合は
-       エンコード済みのものを渡せる（prepareの粗探索・細探索・罫線除去で同一）。 */
-    const image = opts.imageDataURL || toDataURL(fullCanvas);
+    /* フル画像は、呼び出し側が「同じ絵を複数回照合する」と分かっている場合、
+       ImageRef({dataURL,id,send}) を渡せば初回だけ本体を送り、2回目以降は id
+       だけで参照できる（サーバー側がidで覚えている。app.py の _resolve_image）。 */
+    const ref = opts.image || null;
+    const image = ref ? ref.dataURL : toDataURL(fullCanvas);
     const tEnc = performance.now();
 
-    const json = await postJSON('/api/match', {
-      image,
+    const body = {
       templates: templatePayload,
       angleRange, angleStep, scaleFactors,
       ...(Array.isArray(opts.angles) && opts.angles.length ? { angles: opts.angles } : {}),
-    });
+      ...(ref ? { imageId: ref.id } : {}),
+      ...(!ref || ref.send !== false ? { image } : {}),
+    };
+    let json = await postJSON('/api/match', body);
+    /* サーバーが画像を保持していなければ（再起動・押し出し）本体付きで送り直す。 */
+    let resent = false;
+    if (json.error === 'IMAGE_CACHE_MISS') {
+      resent = true;
+      json = await postJSON('/api/match', { ...body, image });
+    }
     const tEnd = performance.now();
+    if (ref && !json.error) ref.send = false;   // 以降は id 参照でよい
     /* 画像の用意(PNG圧縮)と往復のどちらに時間が掛かっているかを分けて出す。
        サーバー側の[perf]は実処理だけを測るため、両者の差＝この行でしか見えない。 */
     console.log(`[perf]   match encode=${(tEnc - t0).toFixed(0)}ms roundTrip=${(tEnd - tEnc).toFixed(0)}ms`
-      + ` (templates=${templates.length}${opts.imageDataURL ? ', 画像は再利用' : ''})`);
+      + ` (templates=${templates.length}`
+      + `${ref ? (body.image ? ', 画像を送信' : ', 画像はサーバー側を参照') : ''}`
+      + `${resent ? '/キャッシュ切れのため再送' : ''})`);
     if (json.error) throw new Error(json.error);
 
     templates.forEach(t => {
