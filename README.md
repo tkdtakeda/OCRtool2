@@ -16,6 +16,11 @@ Pythonパッケージとは別に、OCRエンジン本体（Tesseract）が必�
 
 - **Windows**: [UB-Mannheim版インストーラー](https://github.com/UB-Mannheim/tesseract/wiki) を使用。
   インストール時に「Additional language data」から **Japanese** をチェックしてください。
+  最近のインストーラーはPATHを自動設定しないため、インストール後に
+  インストール先フォルダ（既定 `C:\Program Files\Tesseract-OCR`）を
+  環境変数PATHへ手動で追加してください（詳細手順は `tesseract-install/`
+  参照）。これを忘れると起動時に「Tesseractを初期化できませんでした」に
+  なります。
 - **macOS**: `brew install tesseract tesseract-lang`
 - **Linux (Debian/Ubuntu)**: `sudo apt install tesseract-ocr tesseract-ocr-jpn`
 
