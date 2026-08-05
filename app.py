@@ -54,7 +54,12 @@ _VERSIONED_ASSET_RE = re.compile(r'(src|href)="([A-Za-z0-9_.\-]+\.(?:js|css))"')
 # サーバー再起動やLRU押し出しで取りこぼした場合は 'IMAGE_CACHE_MISS' を返し、
 # クライアント側が本体付きで自動的に送り直すため、取り違え・不整合は起きない。
 _IMG_CACHE: OrderedDict[str, object] = OrderedDict()
-_IMG_CACHE_MAX = 4          # 1ページで同時に必要なのは「元画像」と「傾き補正後」の2枚
+# 1ページで同時に必要なのは「元画像」と「傾き補正後」の2枚。一括OCRは2ページを
+# 重ねて走らせる（studio_app.js の BATCH_PIPELINE_DEPTH）ため必要数は4枚だが、
+# 2ページ分のリクエストが交互に届くと、まだ使う画像がLRUで押し出されて
+# IMAGE_CACHE_MISS（＝フル画像の再送）を誘発しうる。押し出し余裕を見て倍の8枚とする。
+# 1枚あたり 1651x2336 のRGBAで約15MBなので、8枚でも約120MB。
+_IMG_CACHE_MAX = 8
 _IMG_CACHE_LOCK = threading.Lock()
 
 

@@ -1595,7 +1595,18 @@
     document.addEventListener('visibilitychange', onVisChange);
     UI.setBatchBgWarn(review, document.hidden);   // 開始時点で既にhiddenの場合も反映
 
+    /* 何ページを同時に走らせるか（パイプラインの深さ）。
+       実測（診断ログのserialSum/wall）では、テンプレート照合の区間は既に12コア中
+       11.1コアを使い切っている一方、OCR（pytesseractは1呼び出し=1プロセス=1コア）と
+       罫線除去では11コアが遊び、PDFのラスタライズ中はサーバーが完全に遊休になる。
+       1ページ9025msのうち約2100msがこの「ほぼ遊休」の区間だった。
+       ページを2枚重ねると、あるページのOCR・罫線除去・ラスタライズの裏で
+       別ページの照合が回るため、その遊休が埋まる。
+       深さは2で十分で、3以上にしても照合が詰まっているぶん頭打ちになる一方、
+       中止時に捨てる仕事と画像キャッシュの消費だけが増える。 */
+    const BATCH_PIPELINE_DEPTH = 2;
     let cur = ocrAt(0);                          // 先頭ページのOCRを先行開始
+    let next = BATCH_PIPELINE_DEPTH > 1 ? ocrAt(1) : null;   // ★1ページ目の完了を待たずに2ページ目も開始
     try {
       for (let idx = 0; idx < pages.length; idx++) {
         if (!cur || S.batchCancel) { if (S.batchCancel) cancelled = true; break; }
@@ -1611,7 +1622,11 @@
              放置した際に毎ページこの遅延を踏んで極端に遅くなる原因になり得るため。 */
         }
         const r = await cur.promise;
-        const nextEntry = ocrAt(idx + 1);        // ★先読み: 確認している間に次ページを裏でOCR
+        /* 在庫を1つ繰り上げ、さらに先のページを先行開始する。
+           BATCH_PIPELINE_DEPTH=1 のときは従来どおり「1つ先だけ先読み」（＝確認・保存の
+           あいだに次ページを裏でOCR）になり、挙動は完全に元のままになる。 */
+        if (BATCH_PIPELINE_DEPTH > 1) { cur = next; next = ocrAt(idx + BATCH_PIPELINE_DEPTH); }
+        else { cur = ocrAt(idx + 1); }
         /* review: OCR結果を1ページずつ写真と見比べ→修正→確認してから保存。
            「残りは信頼して照合へ」(Shift+Enter)が押された後は、このスキップ判定により
            以降のページはOCR結果をそのまま採用し、確認カルーセルは出さない。 */
@@ -1621,7 +1636,6 @@
         }
         await persistBatchRecord(r);
         results.push(r);
-        cur = nextEntry;
       }
     } finally {
       document.removeEventListener('visibilitychange', onVisChange);
