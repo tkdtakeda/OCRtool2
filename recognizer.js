@@ -1603,6 +1603,14 @@ const Recognizer = (() => {
         const baseText = out.text;
         const baseRaw = String(out.raw || '').replace(/\s/g, '');
         let support = 1;   // 元の読みと同じ値が出た回数（元の読み自身を1と数える）
+        /* 却下した対抗馬側の生データが、別のPSMからも同じ値で出た回数。
+           元の読みの裏付け(support)と同数以上に達したら、対抗馬も互角に
+           裏付けられている「真の同点」であり、対抗馬側が劣っていたかのような
+           表示は誤りになる（実例: "AB0774" が psm8・13 の2回で一致していたのに
+           対し、元の読み"AB0777"もpsm6・7の2回のみで、優劣を判定できる根拠が
+           無かった）。採否の判定自体は変えず（対抗馬が実際に元の読みを上回る
+           証拠は無いため）、診断ログにだけ同点である旨を明示する。 */
+        const altTextSupport = new Map();
         for (const altPsm of RETRY_PSMS) {
           if (altPsm === usePsm) continue;
           const altRes = await OcrProcessor.recognize(inputCanvas, altPsm, onProg, useLang, useWl);
@@ -1614,10 +1622,15 @@ const Recognizer = (() => {
             const altRaw = String(altOut.raw || '').replace(/\s/g, '');
             const segmentationOnly = isSubsequenceOf(altRaw, baseRaw);
             if (segmentationOnly || support < 2) { res = altRes; out = altOut; readPsm = altPsm; break; }
+            const altSupport = (altTextSupport.get(altOut.text) || 0) + 1;
+            altTextSupport.set(altOut.text, altSupport);
+            const tieNote = altSupport >= support
+              ? `（${JSON.stringify(altOut.text)}も${altSupport}回一致しており、優劣を判定できない同点）`
+              : '';
             console.log(`[ocr]   "${region.name}" psm=${altPsm}(再読取)は不採用: `
               + `元の読み${JSON.stringify(baseText)}が${support}回一致で裏付けられている一方、`
               + `${JSON.stringify(altRaw)}は元の生データ${JSON.stringify(baseRaw)}に無い文字を含む`
-              + `（切り出し方の違いではなく字形の解釈違い）ため信用しない`);
+              + `（切り出し方の違いではなく字形の解釈違い）ため信用しない${tieNote}`);
           }
         }
       }
