@@ -1161,6 +1161,19 @@ const Recognizer = (() => {
     return { dataURL: canvas.toDataURL('image/png'), id: `img${++imageRefSeq}-${Date.now()}`, send: true };
   }
 
+  /** 与えられた倍率の並びについて、隣り合う2つの「幾何平均」を返す（＝隙間の中央）。
+      倍率のずれは比で効く（1.0→1.06 と 1.06→1.12 が同じ重さ）ため、算術平均ではなく
+      幾何平均で割る。既定の [0.85, 1.0, 1.15] なら [0.922, 1.072] になり、
+      最大の取りこぼし幅が約15%から約7%へ半減する。
+      利用者が設定で倍率の並びを変えても、その並びの隙間を自動で埋められる
+      （narrowプリセットのように1点だけなら隙間が無く、空配列を返して何もしない）。 */
+  function geometricMidpoints(scales) {
+    const s = [...new Set(scales)].filter(v => v > 0).sort((a, b) => a - b);
+    const out = [];
+    for (let i = 0; i + 1 < s.length; i++) out.push(Math.round(Math.sqrt(s[i] * s[i + 1]) * 1000) / 1000);
+    return out;
+  }
+
   /** 2つの照合結果を「スコアの高い方」で併合する（角度集合を分割したぶんを統合）。 */
   function mergeScores(a, b) {
     const out = new Map(a);
@@ -1229,10 +1242,40 @@ const Recognizer = (() => {
         + ` → 残り${rest.length}角度(${rest.join('°,')}°)の照合を省略`);
       return { decision: fastDecision, scores: fastScores };
     }
-    console.log(`[classify] 0°では確定できず（判定=${fastDecision.decision} 確信度${Math.round(fastDecision.confidence * 100)}%`
-      + ` 1位2位差${fastDecision.margin.toFixed(2)}）→ 残り${rest.length}角度(${rest.join('°,')}°)も照合して併合`);
+    /* 0°で確定できない原因は、傾きではなく「倍率の取りこぼし」であることが多い。
+       判定用の倍率は粗い3点（既定 0.85 / 1.0 / 1.15）しか見ておらず、1.0と1.15の
+       あいだには15%の隙間がある。実測（2026/8/5の50ページ）では、位置合わせが
+       倍率1.06と判定したページが12件あり、そのすべてで判定用スコアのpeakが
+       0.43〜0.47まで落ちて確定できていなかった（倍率1.00のページ8件はpeak
+       0.83〜0.97で全件確定）。同じ帳票・同じアンカーでも、倍率が6%ずれるだけで
+       スコアはほぼ半減する（位置合わせのログでも、倍率1.0付近で0.43だったものが
+       1.06では0.78まで上がっていた）。
+       そこで角度を増やす前に、まず倍率の隙間を0°だけで埋めて確定を試みる。
+       角度を4つ増やすより候補数がずっと少なく、外しても損失が小さい。 */
+    const gapScales = geometricMidpoints(scaleFactors);
+    let baseScores = fastScores;
+    if (gapScales.length) {
+      console.log(`[classify] 0°では確定できず（判定=${fastDecision.decision} 確信度${Math.round(fastDecision.confidence * 100)}%`
+        + ` 1位2位差${fastDecision.margin.toFixed(2)}）→ 先に倍率の隙間(${gapScales.join(', ')})を0°で埋めて再判定`);
+      const gapScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: [0], scaleFactors: gapScales, image: imageRef });
+      baseScores = mergeScores(fastScores, gapScores);
+      const gapDecision = FormVoting.decide(forms, baseScores, opts.voting || {});
+      if (gapDecision.decision === 'accepted'
+          && gapDecision.confidence >= CLASSIFY_FAST_CONF_MIN
+          && gapDecision.margin >= CLASSIFY_FAST_MARGIN_MIN) {
+        console.log(`[classify] 倍率の隙間を埋めて0°のみで確定（確信度${Math.round(gapDecision.confidence * 100)}%`
+          + ` 1位2位差${gapDecision.margin.toFixed(2)}）→ 残り${rest.length}角度(${rest.join('°,')}°)の照合を省略`);
+        return { decision: gapDecision, scores: baseScores };
+      }
+      console.log(`[classify] 倍率の隙間を埋めても確定できず（判定=${gapDecision.decision}`
+        + ` 確信度${Math.round(gapDecision.confidence * 100)}% 1位2位差${gapDecision.margin.toFixed(2)}）`
+        + `→ 残り${rest.length}角度(${rest.join('°,')}°)も照合して併合`);
+    } else {
+      console.log(`[classify] 0°では確定できず（判定=${fastDecision.decision} 確信度${Math.round(fastDecision.confidence * 100)}%`
+        + ` 1位2位差${fastDecision.margin.toFixed(2)}）→ 残り${rest.length}角度(${rest.join('°,')}°)も照合して併合`);
+    }
     const restScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: rest, scaleFactors, image: imageRef });
-    const scores = mergeScores(fastScores, restScores);
+    const scores = mergeScores(baseScores, restScores);
     return { decision: FormVoting.decide(forms, scores, opts.voting || {}), scores };
   }
 
