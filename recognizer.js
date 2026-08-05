@@ -1161,6 +1161,43 @@ const Recognizer = (() => {
     return { dataURL: canvas.toDataURL('image/png'), id: `img${++imageRefSeq}-${Date.now()}`, send: true };
   }
 
+  /* ── 用紙の倍率のヒント（位置合わせ → 次ページの判定へ） ─────────
+     判定用の倍率は粗いグリッドしか見ないが、アンカーは倍率に極めて敏感である。
+     実測（2026/8/6の670ページ）では、正しい倍率が0.97のページで、3%しか違わない
+     1.0で照合するとスコアが0.55、正しい0.97なら0.89だった。グリッドを多少細かく
+     しても（v.2026-08-05.8で隙間を埋めた結果は確信度39%→44%）到底届かない。
+     一方、正しい倍率は毎ページ位置合わせが既に見つけている。そこで、位置合わせが
+     確定させた倍率を帳票ごとに覚えておき、次のページの判定で候補に加える。
+
+     これは「前のページと同じ帳票だろう」と決め打つ類の推測ではない。増やすのは
+     探索する倍率の候補が1つだけで、何も決定しない。照合は候補の中の最大を返し、
+     併合も最大を取るため、ヒントが外れてもスコアが上がらないだけで、従来どおり
+     隙間埋め→全角度探索へ落ちる。探索空間が広がるだけなので精度が下がることは
+     原理的に無い（縦横比フィルタや隙間埋めと同じ「上位集合」の理屈）。
+     ヒントは段階1（0°×粗グリッド）に混ぜる。当たれば1回目の照合でそのまま
+     確定でき、往復を増やさずに済むため。 */
+  const lastFormScale = new Map();
+  /* 既にグリッドにある倍率とこれだけ近ければ、候補に足しても意味が無いので省く。 */
+  const SCALE_HINT_DUP_TOL = 0.01;
+
+  /** 位置合わせが確定させた倍率を帳票ごとに記録する（信頼できる一致のときだけ）。 */
+  function recordFormScale(formId, scale) {
+    if (!formId || !(scale > 0)) return;
+    lastFormScale.set(formId, Math.round(scale * 1000) / 1000);
+  }
+
+  /** 候補帳票について覚えている倍率のうち、グリッドに無いものを返す。 */
+  function scaleHintsFor(forms, gridScales) {
+    const hints = [];
+    for (const f of forms) {
+      const s = lastFormScale.get(f && f.id);
+      if (!(s > 0)) continue;
+      const covered = [...gridScales, ...hints].some(g => Math.abs(g - s) / s <= SCALE_HINT_DUP_TOL);
+      if (!covered) hints.push(s);
+    }
+    return hints;
+  }
+
   /** 与えられた倍率の並びについて、隣り合う2つの「幾何平均」を返す（＝隙間の中央）。
       倍率のずれは比で効く（1.0→1.06 と 1.06→1.12 が同じ重さ）ため、算術平均ではなく
       幾何平均で割る。既定の [0.85, 1.0, 1.15] なら [0.922, 1.072] になり、
@@ -1233,7 +1270,14 @@ const Recognizer = (() => {
       return { decision: FormVoting.decide(forms, scores, opts.voting || {}), scores };
     }
 
-    const fastScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: [0], scaleFactors, image: imageRef });
+    /* 直近に位置合わせが確定させた倍率を1回目の照合に混ぜる（lastFormScale参照）。
+       当たれば1回目でそのまま確定でき、往復も角度探索も増やさずに済む。 */
+    const hints = scaleHintsFor(forms, scaleFactors);
+    const fastScales = hints.length ? scaleFactors.concat(hints) : scaleFactors;
+    if (hints.length) {
+      console.log(`[classify] 直近の位置合わせが確定させた用紙の倍率(${hints.join(', ')})も1回目の照合に加えます`);
+    }
+    const fastScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: [0], scaleFactors: fastScales, image: imageRef });
     const fastDecision = FormVoting.decide(forms, fastScores, opts.voting || {});
     if (fastDecision.decision === 'accepted'
         && fastDecision.confidence >= CLASSIFY_FAST_CONF_MIN
@@ -1466,6 +1510,13 @@ const Recognizer = (() => {
          だけでは分からないため、最終変換への当てはまりの悪さを別途チェックする。 */
       residualHigh: maxKeptResidual > OUTLIER_TOL_PX,
     };
+    /* 確定した用紙の倍率を覚えておき、次ページの帳票判定のヒントに使う
+       （lastFormScale の解説を参照）。信頼できる一致が2点以上あり、探索範囲の端に
+       張り付いてもいない＝倍率そのものが信用できるときだけ記録する。
+       代表値は中央値（1点だけ別の場所へ誤マッチしていても引きずられないように）。 */
+    if (transform.kept.length >= 2 && !matchQuality.weakMatch && !matchQuality.scaleEdge) {
+      recordFormScale(form && form.id, median(usedMatches.map(p => p.scale)));
+    }
 
     /* ⑤ 罫線除去（登録された罫線除去パラメータを引き継ぎ） */
     stage('罫線除去', 0.45);
