@@ -21,7 +21,35 @@ const PdfImport = (() => {
   let doc = null, numPages = 0, curPage = 1, dpi = DEFAULT_DPI, fileName = '', onCanvasCb = null, onBatchCb = null, allowBatch = false, busy = false;
   let getFormsFn = null;          // 帳票一覧の取得関数（一括の帳票割り当て用）
   let getReviewDefaultFn = null;  // 一括カルーセル確認の初期ON/OFFを供給（OCR画面のトグルに同期）
-  let assigns = [];               // 一括OCRの割り当て [{ from, to, formId }]
+  let assigns = [];               // 一括OCRの割り当て [{ spec, formId }]（specは "1-3,5,8-10" 形式）
+
+  /* ページ指定文字列（"1-3,5,8-10"）を昇順・重複なしのページ番号配列にする。
+     起点と終点を別の入力欄に分けていた頃は、1ページだけ・飛び飛びのページを
+     指定するのに「範囲を追加」を何度も押す必要があり手間だったため、印刷ダイアログ等で
+     一般的なこの書き方を1つの欄で受け取れるようにした。
+     区切りは半角/全角のカンマ・読点・空白、範囲は半角/全角ハイフンや波ダッシュを
+     許容する（日本語入力のままでも、資料からコピーした表記のままでも通るように）。
+     解釈できなかったトークンは捨てずに invalid へ積んで呼び出し側が利用者に知らせる
+     （黙って一部だけOCRされるのが一番困るため）。 */
+  function parsePageSpec(spec, maxPage) {
+    const pages = [], seen = new Set(), invalid = [];
+    /* 全角数字は半角へ寄せる（日本語入力のまま打っても通るように）。 */
+    const norm = String(spec == null ? '' : spec).replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+    const tokens = norm.split(/[,、，\s]+/).filter(t => t);
+    for (const t of tokens) {
+      const m = /^(\d+)(?:\s*[-–—‐〜~ー]\s*(\d+))?$/.exec(t);
+      if (!m) { invalid.push(t); continue; }
+      let a = parseInt(m[1], 10);
+      let b = m[2] === undefined ? a : parseInt(m[2], 10);
+      if (!a || !b) { invalid.push(t); continue; }
+      if (a > b) { const w = a; a = b; b = w; }      // "10-3" のような逆順も受け付ける
+      if (a > maxPage) { invalid.push(t); continue; }   // 全体がページ数の外
+      a = Math.max(1, a); b = Math.min(maxPage, b);
+      for (let n = a; n <= b; n++) if (!seen.has(n)) { seen.add(n); pages.push(n); }
+    }
+    pages.sort((x, y) => x - y);
+    return { pages, invalid };
+  }
 
   /* 指定ページを現在のDPIでキャンバスへラスタライズ */
   async function renderPageToCanvas(pdfDoc, n, useDpi) {
@@ -100,7 +128,7 @@ const PdfImport = (() => {
       doc = await window.pdfjsLib.getDocument({ data: buf, cMapUrl: CMAP_URL, cMapPacked: true }).promise;
       numPages = doc.numPages; curPage = 1; fileName = file.name || 'PDF';
       dpi = clampDpi(parseInt(localStorage.getItem(LS_KEY), 10) || DEFAULT_DPI);
-      assigns = [{ from: 1, to: numPages, formId: '' }];   // 既定=全ページ・自動判定
+      assigns = [{ spec: `1-${numPages}`, formId: '' }];   // 既定=全ページ・自動判定
       const rv = $('pdfBatchReview'); if (rv) rv.checked = !!(getReviewDefaultFn && getReviewDefaultFn());
       $('pdfModal').classList.remove('hidden');
       renderControls();
@@ -150,20 +178,18 @@ const PdfImport = (() => {
     const pages = [];
     const formFor = {};
     assigns.forEach(a => {
-      const from = Math.max(1, Math.min(numPages, a.from));
-      const to = Math.max(1, Math.min(numPages, a.to));
-      for (let n = Math.min(from, to); n <= Math.max(from, to); n++) {
+      parsePageSpec(a.spec, numPages).pages.forEach(n => {
         if (!(n in formFor)) pages.push(n);
         formFor[n] = a.formId || '';   // 後勝ち
-      }
+      });
     });
     pages.sort((x, y) => x - y);
     return { pages, formFor };
   }
   /* 範囲行の増減を伴わない変更（ページ数の反映）だけを行う軽量版。
-     pa-from/pa-toの変更時にrenderAssigns()（行DOMの全作り直し）を呼ぶと、
-     Tabキーでの次要素への移動中にブラウザがフォーカス先として狙っていた
-     要素そのものが消え、移動先を見失って先頭要素に戻ってしまう
+     ページ指定欄の変更時にrenderAssigns()（行DOMの全作り直し）を呼ぶと、
+     入力中のフォーカスやカーソル位置が失われ、Tabキーでの次要素への移動中にも
+     移動先を見失って先頭要素に戻ってしまう
      （値を直してTabで次の項目へ、という一番よくある操作が壊れていた）。
      行を増減しない限りDOM構造は変わらないため、ボタン表示の更新だけで足りる。 */
   function updateBatchButton() {
@@ -179,22 +205,39 @@ const PdfImport = (() => {
     const wrap = $('pdfAssignRows'); wrap.innerHTML = '';
     assigns.forEach((a, i) => {
       const row = document.createElement('div'); row.className = 'pdf-assign-row';
-      row.innerHTML = `ページ <input type="number" class="pdf-range-input pa-from" min="1" max="${numPages}" value="${a.from}">`
-        + ` – <input type="number" class="pdf-range-input pa-to" min="1" max="${numPages}" value="${a.to}">`
+      row.innerHTML = `ページ <input type="text" class="pdf-range-input pdf-range-input--spec pa-spec" `
+        + `inputmode="numeric" placeholder="例: 1-3,5,8-10" value="${escAttr(a.spec)}">`
         + ` → <select class="pselect pa-form">${formOptionsHTML(a.formId)}</select>`
+        + ` <span class="pa-note"></span>`
         + ` <button type="button" class="pa-del" title="この範囲を削除"${assigns.length <= 1 ? ' disabled' : ''}><i class="fas fa-xmark"></i></button>`;
-      row.querySelector('.pa-from').addEventListener('change', e => { a.from = parseInt(e.target.value, 10) || 1; updateBatchButton(); });
-      row.querySelector('.pa-to').addEventListener('change', e => { a.to = parseInt(e.target.value, 10) || numPages; updateBatchButton(); });
+      const note = row.querySelector('.pa-note');
+      /* 入力のたびに解釈結果（何ページになるか・解釈できない指定は何か）を出す。
+         打ち間違いに気付かないまま一括OCRを始めてしまうのを防ぐのが狙い。 */
+      row.querySelector('.pa-spec').addEventListener('input', e => {
+        a.spec = e.target.value; updateRowNote(a, note); updateBatchButton();
+      });
       row.querySelector('.pa-form').addEventListener('change', e => { a.formId = e.target.value; });
       row.querySelector('.pa-del').addEventListener('click', () => { assigns.splice(i, 1); renderAssigns(); });
       wrap.appendChild(row);
+      updateRowNote(a, note);
     });
     updateBatchButton();
   }
+  /* 1行ぶんの解釈結果を行末に表示する */
+  function updateRowNote(a, el) {
+    const { pages, invalid } = parsePageSpec(a.spec, numPages);
+    el.className = 'pa-note' + (invalid.length ? ' pa-note--err' : '');
+    el.textContent = invalid.length ? `解釈できない指定: ${invalid.join(' ')}`
+      : (pages.length ? `${pages.length}ページ` : 'ページ未指定');
+  }
+  function escAttr(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  }
   function addAssign() {
     const last = assigns[assigns.length - 1];
-    const from = last ? Math.min(numPages, last.to + 1) : 1;
-    assigns.push({ from, to: numPages, formId: last ? last.formId : '' });
+    const lastPages = last ? parsePageSpec(last.spec, numPages).pages : [];
+    const from = lastPages.length ? Math.min(numPages, lastPages[lastPages.length - 1] + 1) : 1;
+    assigns.push({ spec: from <= numPages ? `${from}-${numPages}` : '', formId: last ? last.formId : '' });
     renderAssigns();
   }
 
