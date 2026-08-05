@@ -1457,7 +1457,25 @@
     const thumb = thumbURL(canvas, 120);
     const t0 = performance.now();
     try {
-      const { decision, scores } = await Recognizer.classify(canvas, S.forms, classifyOpts());
+      /* 帳票が指定されている場合、他の帳票の目印まで照合する意味は無い。
+         判定結果は下の useId で捨てられ、実際に使うのは
+         「その帳票の目印のうち最も一致したものの角度と位置」だけだからである
+         （bestAnchorFor はその帳票のアンカーしか参照せず、prepare は角度しか使わない）。
+         目印ごとの照合は互いに独立しているため、対象を1帳票に絞っても
+         得られる目印・角度・位置は全帳票を照合した場合と完全に同じになる。
+         一方コストはテンプレート数に比例するので、判定用アンカーが全帳票で7個・
+         対象帳票に2個なら照合回数はおよそ7分の2まで減る。
+         なお0°打ち切りの判定（CLASSIFY_FAST_CONF_MIN）は、確信度が
+         1位2位差ではなく peak（最も一致した目印のスコア）に支配されるため、
+         対象を絞っても発火する/しないは変わらない（実測: No.3は70%→71%で
+         どちらも発火せず全角度探索のまま、No.2は95%→95%でどちらも0°で確定）。 */
+      const forcedForm = forcedFormId ? S.forms.find(f => f.id === forcedFormId) : null;
+      const classifyForms = forcedForm ? [forcedForm] : S.forms;
+      if (forcedForm) {
+        console.log(`[classify] 帳票が「${forcedForm.name}」に指定されているため、`
+          + `この帳票の目印だけを照合します（全${S.forms.length}帳票ぶんの照合は不要）`);
+      }
+      const { decision, scores } = await Recognizer.classify(canvas, classifyForms, classifyOpts());
       logClassifyDecision(decision, scores);
       const t1 = performance.now();
       const candId = decision.best && decision.best.formId;
