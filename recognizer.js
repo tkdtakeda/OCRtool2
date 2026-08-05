@@ -1168,10 +1168,42 @@ const Recognizer = (() => {
     return out;
   }
 
+  /* 用紙の縦横比がこれ以上違う帳票は、同じ紙ではありえないとみなして照合しない。
+     ±25%は「向きの違い」だけを弾き、紙の規格違い（A4縦1.414 / レター縦1.294 /
+     リーガル縦1.647）や、登録時と読み込み時の余白・DPIの差は弾かない値。
+     実測でも、同じ帳票の基準画像0.694に対し実際の入力は0.708（2.0%差）で、
+     この程度のずれは日常的に起こる。一方、縦長の帳票(1.415)と横長の帳票(0.708)は
+     ちょうど2.00倍＝100%差あり、許容を±15%〜±40%のどこに置いても判定は変わらない。 */
+  const CLASSIFY_ASPECT_TOL = 0.25;
+
+  /** 入力ページと用紙の縦横比が近い帳票だけに絞る（判定の前処理）。
+      「どれが正解か」を決めるのではなく「形が違うので絶対に正解ではないもの」を
+      external な情報（用紙の形）だけで外す仕組みなので、帳票が増えても破綻しない。
+      同じ向きの帳票同士は絞り込めず全て残るため、そこは従来どおり目印の照合で決まる。
+      寸法が記録されていない帳票、および1つも該当しない場合は安全側に倒して全件残す。 */
+  function filterFormsByAspect(forms, canvas) {
+    const aspect = canvas.height / canvas.width;
+    if (!aspect || !isFinite(aspect) || forms.length < 2) return forms;
+    const ratioOf = f => (f.referenceImage && f.referenceImage.w && f.referenceImage.h)
+      ? f.referenceImage.h / f.referenceImage.w : null;
+    const keep = forms.filter(f => {
+      const r = ratioOf(f);
+      return r === null || Math.abs(r - aspect) / aspect <= CLASSIFY_ASPECT_TOL;
+    });
+    if (!keep.length || keep.length === forms.length) return forms;
+    const dropped = forms.filter(f => !keep.includes(f));
+    console.log(`[classify] 用紙の縦横比が違うため照合対象から除外: `
+      + dropped.map(f => `"${f.name}"(縦横比${ratioOf(f).toFixed(3)})`).join(' ')
+      + ` ／ 入力ページは${canvas.width}x${canvas.height}(縦横比${aspect.toFixed(3)})`
+      + ` → 残り${keep.length}帳票（${keep.map(f => `"${f.name}"`).join(' ')}）を照合`);
+    return keep;
+  }
+
   async function classify(sourceCanvas, forms, opts = {}) {
     const angleRange = opts.angleRange ?? 2;
     const angleStep  = opts.angleStep  ?? 1;
     const scaleFactors = opts.scaleFactors || CLASSIFY_SCALES;
+    forms = filterFormsByAspect(forms, sourceCanvas);
     const tpls   = await buildAnchorTemplates(forms);
     /* 判定対象の画像は1度だけPNG化・1度だけ送信し、2段階目はid参照で済ませる。 */
     const imageRef = newImageRef(sourceCanvas);
