@@ -1545,8 +1545,11 @@ const Recognizer = (() => {
             console.log(`[ocr]   "${region.name}" 本線を維持: グレー版が本線と一致`
               + `（痩せ版=${JSON.stringify(ero.out.text)}は少数派として棄却）`);
           } else {
-            /* 三者三様 → どれも信用できない。本線の値のまま要確認 */
-            secondOpinionDiff = ero.out.text;
+            /* 三者三様 → どれも信用できない。本線の値のまま要確認。
+               診断ログの「別解釈」にはグレー版を優先して載せる（二値化を経ない分、
+               罫線除去や二値化しきい値が招いた欠けの影響を受けにくく、痩せ版が
+               空になりがちな場面でも実際の読み筋が入っていることが多いため）。 */
+            secondOpinionDiff = gray.out.text || ero.out.text;
             console.log(`[ocr]   "${region.name}" セカンドオピニオン三者三様: `
               + `本線=${JSON.stringify(out.text)} / 痩せ版=${JSON.stringify(ero.out.text)}`
               + ` / グレー版=${JSON.stringify(gray.out.text)}`
