@@ -1128,6 +1128,11 @@ const Recognizer = (() => {
   const LOCALIZE_SCALES = [0.6, 0.71, 0.85, 1.0, 1.19, 1.42, 1.68, 2.0];
   /* このスコア以上の一致を「信頼できる対応点」として相似変換の推定に使う。 */
   const LOCALIZE_GOOD_SCORE = 0.4;
+  /* 「直近に確定した倍率の近傍だけ」で済ませてよいと判断する最低スコア（全アンカー）。
+     実測では、当たりのとき最小スコアは0.73〜1.00、倍率が大きく外れると0.08〜0.20まで
+     落ちる。0.5はその谷の真ん中で、どちらからも十分に離れている。
+     下回っても粗探索へ落ちるだけで結果は変わらない（遅くなるだけ）。 */
+  const LOCALIZE_PROBE_MIN_SCORE = 0.5;
   /* 暫定倍率の周辺を細かく探索（±9%を3%刻み）。粗ステップの隙間を埋め、単一アンカー
      でも位置精度を確保する。複数アンカーがあれば相対位置でさらに精密化される。 */
   const fineScalesAround = s => [0.91, 0.94, 0.97, 1.0, 1.03, 1.06, 1.09]
@@ -1514,35 +1519,89 @@ const Recognizer = (() => {
          自分にとってベストなものを採用するので、アンカーごとに別々に呼び出すのと
          数学的に同じ結果になる）。 */
       /* ※ v.2026-08-04.6 で「まず等倍近傍だけ試し、確度が十分なら粗探索を省く」
-         段階化を入れたが、実機70ページで位置合わせが総崩れ（不一致3件・該当なし17件）
-         になったため撤回した。直接の原因は下の診断ログが参照する fineScaleUnion を
-         if ブロック内で宣言してしまったスコープの誤りで、全ページで例外→この関数を
-         囲む catch が恒等変換へフォールバックしていた（ログから [align] 行が丸ごと
-         消えていたのが動かぬ証拠）。段階化そのものの是非は未検証のまま残るため、
-         100%正解が確認できているこの粗→細の手順へ戻す。速度は角度探索の2段階化と
-         画像キャッシュで確保できており、ここは精度を優先する。 */
-      const coarse = await MatcherEngine.matchAll(canvas, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES, image: ref });
-      const fineScaleUnion = new Set();
+         段階化を入れて実機70ページで総崩れ（不一致3件・該当なし17件）した前科がある。
+         直接の原因は診断ログが参照する fineScaleUnion を if ブロック内で宣言した
+         スコープの誤りで、全ページで例外→この関数を囲む catch が恒等変換へ
+         フォールバックしていた（ログから [align] 行が丸ごと消えていたのが証拠）。
+         段階化そのものは無罪だったが、同じ轍を踏まないよう、この関数で使う変数は
+         すべてここで宣言し、ブロック内で宣言し直さない。 */
+      let coarse = null, fine = null, fineScaleUnion = new Set(), probeNote = '';
+
+      /* ── 段階0: 直近に確定した倍率の近傍だけを先に試す ───────────────
+         実測（2026/8/6の670ページ）では、19ページすべてで検出倍率が0.97（1ページのみ
+         0.94）だった。にもかかわらず毎ページ 0.6〜2.0 の全域を粗探索しており、位置合わせ
+         は1ページ平均2457msでページ内の最大費目になっていた。用紙の倍率はページごとに
+         変わるものではないので、前のページで確定した倍率の近傍から試すのが理にかなう。
+
+         当たり外れの見分け方は実測で決めた。記憶した倍率0.97の窓
+         [0.883,0.912,0.941,0.97,0.999,1.028,1.057] で照合すると、
+           実倍率0.97 → 最小スコア0.730・全アンカーが窓の内側  （当たり）
+           実倍率1.00 → 最小スコア1.000・内側                  （当たり）
+           実倍率1.06 → 最小スコア0.692・全アンカーが窓の端    （外れ）
+           実倍率1.12 → 最小スコア0.132・端                    （外れ）
+           実倍率1.30 → 最小スコア0.084・端                    （外れ）
+         注目すべきは実倍率1.06で、最小スコア0.692は当たりの0.730とほとんど差が無い。
+         スコアだけでは見分けられず、「最良が窓の端に来ているか」が決め手になる。端に
+         あるということは、本当の最適値が窓の外にあるという意味だからである。
+         逆に1.30や0.80では一部のアンカーがまぐれで内側に入るため、端の判定だけでも
+         足りない。そこで両方を課す。
+
+         外したときは従来どおり粗→細を実行するだけで、結果は変わらない（遅くなるだけ）。
+         また、記憶する倍率は「窓の内側で確定した」ものに限られるため、少しずつ間違った
+         方向へ流れていくことは無い。真の倍率が窓から出ればスコアが落ちて粗探索へ戻り、
+         そこで取り直される。 */
+      const hintScale = lastFormScale.get(form && form.id);
+      if (hintScale > 0) {
+        const probeScales = fineScalesAround(hintScale);
+        const probe = await MatcherEngine.matchAll(canvas, tplList,
+          { angleRange: 0, angleStep: 1, scaleFactors: probeScales, image: ref });
+        const lo = probeScales[0], hi = probeScales[probeScales.length - 1];
+        let worst = Infinity, atEdge = null;
+        for (const t of tpls) {
+          const r = probe.get(t.id);
+          if (!r) { worst = 0; break; }
+          worst = Math.min(worst, r.score);
+          if (r.scale <= lo || r.scale >= hi) atEdge = t.a.name || t.id;
+        }
+        if (worst >= LOCALIZE_PROBE_MIN_SCORE && !atEdge) {
+          fine = probe;
+          fineScaleUnion = new Set(probeScales);
+          console.log(`[align-scale] 直近に確定した倍率${hintScale}の近傍(${probeScales.join(', ')})だけで`
+            + `全アンカーが一致しました（最小スコア${worst.toFixed(2)}・いずれも窓の端ではない）`
+            + ` → 0.6〜2.0の粗探索を省略`);
+        } else {
+          probeNote = atEdge
+            ? `最良倍率が窓の端（"${atEdge}"）＝真の倍率が窓の外にある`
+            : `最小スコア${worst.toFixed(2)}が${LOCALIZE_PROBE_MIN_SCORE}未満`;
+          console.log(`[align-scale] 直近に確定した倍率${hintScale}の近傍では決まりませんでした`
+            + `（${probeNote}）→ 0.6〜2.0の粗探索から探し直します`);
+        }
+      }
+
+      if (!fine) {
+        coarse = await MatcherEngine.matchAll(canvas, tplList,
+          { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES, image: ref });
+        tpls.forEach(t => {
+          const rc = coarse.get(t.id);
+          fineScalesAround(rc ? (rc.scale || 1) : 1).forEach(s => fineScaleUnion.add(s));
+        });
+        fine = await MatcherEngine.matchAll(canvas, tplList,
+          { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b), image: ref });
+        /* 診断用ログ: 各アンカーが自身の粗探索ベストの近傍をどれだけ細探索で改善できたか。
+           もし依然としてアンカー間で粗ベストの倍率が大きく食い違っているなら、
+           それはこの探索範囲の問題ではなく、そのアンカー自体の識別性・画像品質の
+           問題である可能性が高い（両方を切り分けるための情報として残す）。 */
+        console.log(`[align-scale] 各アンカーが自身の粗探索ベストを中心に独立して細探索（共有provScaleは廃止、細探索候補の和集合${fineScaleUnion.size}点）`);
+        tpls.forEach(t => {
+          const rc = coarse.get(t.id), rf = fine.get(t.id);
+          if (!rc) return;
+          console.log(`[align-scale]   "${t.a.name || t.id}" 粗探索(0.6〜2.0の全域)自身のベスト: スコア${rc.score.toFixed(2)} 倍率${rc.scale}`
+            + (rf ? ` / 自身の近傍での細探索ベスト: スコア${rf.score.toFixed(2)} 倍率${rf.scale}` : ''));
+        });
+      }
+
       tpls.forEach(t => {
-        const rc = coarse.get(t.id);
-        fineScalesAround(rc ? (rc.scale || 1) : 1).forEach(s => fineScaleUnion.add(s));
-      });
-      const fine = await MatcherEngine.matchAll(canvas, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b), image: ref });
-      /* 診断用ログ: 各アンカーが自身の粗探索ベストの近傍をどれだけ細探索で改善できたか。
-         もし依然としてアンカー間で粗ベストの倍率が大きく食い違っているなら、
-         それはこの探索範囲の問題ではなく、そのアンカー自体の識別性・画像品質の
-         問題である可能性が高い（両方を切り分けるための情報として残す）。 */
-      console.log(`[align-scale] 各アンカーが自身の粗探索ベストを中心に独立して細探索（共有provScaleは廃止、細探索候補の和集合${fineScaleUnion.size}点）`);
-      tpls.forEach(t => {
-        const rc = coarse.get(t.id), rf = fine.get(t.id);
-        if (!rc) return;
-        console.log(`[align-scale]   "${t.a.name || t.id}" 粗探索(0.6〜2.0の全域)自身のベスト: スコア${rc.score.toFixed(2)} 倍率${rc.scale}`
-          + (rf ? ` / 自身の近傍での細探索ベスト: スコア${rf.score.toFixed(2)} 倍率${rf.scale}` : ''));
-      });
-      tpls.forEach(t => {
-        const rc = coarse.get(t.id), rf = fine.get(t.id);
+        const rc = coarse && coarse.get(t.id), rf = fine.get(t.id);
         const r = (rf && (!rc || rf.score >= rc.score)) ? rf : rc;   // 粗・細で高スコア側を採用
         if (!r) return;
         const f = r.scale || 1;
