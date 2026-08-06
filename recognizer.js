@@ -28,7 +28,10 @@ const Recognizer = (() => {
      速度にもプラス（照合回数はテンプレート数に正比例する）。 */
   async function buildAnchorTemplates(forms) {
     const anchors = forms.flatMap(form => (form.anchors || []).filter(AnchorRoles.usedForClassify));
-    return Promise.all(anchors.map(async a => ({ id: a.id, imageElement: await dataURLtoImg(a.dataURL) })));
+    /* dataURL も一緒に渡す。matcher側はこれをそのまま送れるため、
+       imageElementからPNGを再圧縮し直す無駄が無くなる（imageElementは
+       サイズ取得など他の用途で引き続き必要なので残す）。 */
+    return Promise.all(anchors.map(async a => ({ id: a.id, dataURL: a.dataURL, imageElement: await dataURLtoImg(a.dataURL) })));
   }
 
   /** 中央値（外れ値に強い代表値） */
@@ -626,10 +629,81 @@ const Recognizer = (() => {
      ＝信用できないので修復しない。 */
   const GLYPH_SLOT_TOLERANCE = 0.4;
 
+  /* 広がりガード（GLYPH_CLUSTER_SPAN_MAX_RATIO）が発火したまとまりを、それでも
+     修復してよいと判断するために使う厳格な許容量（通常の1/4）。
+     広がりガードは「2文字ぶんに広がっている＝本物が2つでは？」という疑いだが、
+     固定長欄には可変長欄に無い独立した検算（等間隔の当てはめ）がある。
+     偽の矩形が1つ紛れ込んだだけなら、残る候補は他の桁から引いた等間隔の線上に
+     ほぼ完全に乗る（実測 "A93227": ズレ0.95px＝ピッチ50.8pxの1.9%）。逆に
+     本物2文字なら、片方は必ず隣の桁位置にあるためこの厳しさでは通らない。
+     実測の1.9%に対し5倍の余裕を見て0.1（ピッチの10%）とする。 */
+  const GLYPH_SLOT_TOLERANCE_STRICT = 0.1;
+
   /* pickByWidthで、幅の自然さの決着に必要な上位2候補の差（中央値に対する比）。
      これ未満の差では「どちらが本物か幅からは決められない」とみなし、その
      まとまりの修復自体を諦める（誤った方を自信満々に確定させるより安全）。 */
   const GLYPH_WIDTH_MARGIN = 0.15;
+
+  /* pickByWidthで、まとまり中の最も太い矩形がこの倍率（中央値に対する比）以上
+     なら、そのまとまりは「1つの字形の二重検出（本物+ゴースト）」ではなく
+     「字画が接触した2文字以上を1つの矩形として検出した」ものとみなし、1文字に
+     絞り込まずまとまりごと修復を諦める。
+     根拠: 二重検出のゴーストは本物の字形の一部（破片）にしかならないため、
+     GLYPH_OVERLAP_MERGE_RATIO導入の実測（"7104"→"704"、7104_boxes: 7幅22px+
+     1(ゴースト)幅12px、基準幅25px）でもゴーストは基準幅を上回らなかった。
+     一方、実機で報告された金額欄「5,002,800」の誤読は、末尾の0が2つ接触し、
+     基準幅23pxに対し幅22px（正常）と幅50px（基準の約2.2倍）の矩形が重なって
+     検出されていた。幅50pxの矩形は2文字ぶんのインクを1つにまとめただけで
+     ゴーストではないため、中央値に近い22px側だけを残す従来の判定では、
+     除外してはいけない本物の桁を消してしまう（"5,002,800"→"500,280"）。
+     字形検証(SEVEN_WIDTH_MAX_RATIO=1.3)でも「基準幅の1.3倍を超える矩形は
+     隣接字形の混入で信用できない」とみなしており、本物の字形1つが基準幅の
+     1.6倍に達することは通常無い。2文字ぶん(≈2.0倍)との間に十分な余裕を
+     残しつつ、正常な字形の太り（太字・にじみ等）を誤って弾かない値として
+     1.6を採用する。 */
+  const GLYPH_MERGED_WIDTH_RATIO = 1.6;
+
+  /* ── まとまりが「本当に1つの字形か」の検算（固定長・可変長の共通ガード）──
+     v.2026-07-29.11 には「複数の本物の字形を巻き込んで消す事故」を防ぐための
+     クラスタ幅ガード（字形1つ分の1.8倍超なら畳まない）があったが、
+     v.2026-07-29.12 で判定方式を「矩形の重なり」から「字送りの規則性」へ
+     作り替えた際に失われた。その結果、実機で注文番号"A94813"が"A94818"に
+     化ける事故が起きたため、2つの独立した根拠で作り直す。
+
+     実測値（すべて実機ログの矩形データ。ref=単独検出された字形の幅の中央値）:
+                                             広がり/ref   断片間の隙間
+       畳んでよい（1つの字形の二重検出）:
+         "7104"→"704"      7+1                1.10倍        -6px
+         "AB0750" 0の2分割  O+Q                1.54倍        -8px
+         "AB0746" 0の3分割  0+O+Q              1.67倍     -11,-9px
+         "AA1227" 1の3分割  L+1+L              1.68倍      -6, 0px
+         "AB0684" 0の3分割  O+Q+O              1.86倍     -12, 0px
+       畳んではいけない（別々の本物の字形）:
+         "A94813"→"A94818" 1[233-245]+3[257-272]  1.86倍     +12px ★
+         "5,002,800"→"500280" 0[292-314]+0[294-344] 2.26倍    -20px ★
+
+     ここから分かるのは、「広がり」だけでは A94813(1.86) と AB0684(1.86) を
+     区別できないということ。両者を分けるのは隙間の符号である:
+       ① 同じインクを重複して指した断片は、必ず重なるか接する（隙間 ≦ 0px）。
+          実測でも畳んでよい5件はすべて -12〜0px に収まっている。
+       ② 逆に断片同士のあいだに白い隙間が空いている（A94813 の +12px）なら、
+          それは物理的に別々のインク＝別々の字形である動かぬ証拠になる。
+     そこで判定を2本立てにする:
+       ・隙間ガード: 白い隙間が字形幅の35%を超えたら畳まない（①②より。
+         インクのかすれで断片が数px途切れる可能性は残すため0にはしない）。
+       ・広がりガード: 隙間が無く（＝重なって）いても、まとまりが2文字分
+         （≒2.0倍。v.2026-07-29.11の「本当に隣り合う2文字は2倍前後」という
+         実測と一致）まで広がっているなら、それだけでは畳まない。
+         "5,002,800" の 2.26倍はこれで捕まる。
+
+     隙間ガードを当初の25%から35%へ広げた理由（v.2026-08-05.3）:
+     実データ11件で 25%〜50% のどこに置いても判定結果は全件同一だったが、
+     25%だと "A93227"（隙間5px・字形幅20px＝ちょうど25%）が余裕ゼロの
+     きわどい通過になり、同種の誤読でも隙間が1px広いだけで直らなくなる。
+     安全域の中央に寄せた35%なら、畳んでよい "A93227"（実測25%）と畳んでは
+     いけない "A94813"（実測57%）の双方に十分な余裕が取れる。 */
+  const GLYPH_CLUSTER_SPAN_MAX_RATIO = 2.0;
+  const GLYPH_CLUSTER_GAP_MAX_RATIO  = 0.35;
 
   /* ── 可変長欄（金額欄等）のセカンドオピニオン ─────────────
      可変長欄は桁数という検算材料が無いため、字形が丸ごと別の文字として
@@ -651,6 +725,26 @@ const Recognizer = (() => {
      比較は生データではなく「正規化・制約適用後の最終値」同士で行う。
      生データだと "591,800" と "591,800," のような表記ゆれで誤検知するが、
      最終値ではどちらも "591800" に落ち着くため。 */
+
+  /** sub が sup から文字を取り除くだけで作れるか（＝部分列か）。
+      再読取りの生データが「元の読みから余分な文字を落としただけ」なのか、
+      「別の文字として読み直した」のかを見分けるのに使う（RETRY_PSMSの解説参照）。 */
+  function isSubsequenceOf(sub, sup) {
+    let i = 0;
+    for (const c of sup) if (i < sub.length && sub[i] === c) i++;
+    return i === sub.length;
+  }
+
+  /** 痩せ版の読みが「別の意見」ではなく「読めなかった」と言えるか。
+      痩せ版は本線の二値化画像をさらに1px痩せさせたものなので、本線と同じくらいの
+      桁数が返っていれば対等な意見として扱えるが、空や極端に短い場合は画線が
+      消し飛んで読み取り自体が失敗している（実測: 本線"35197"5桁に対し痩せ版は
+      ""や"4"、本線"2935900"7桁に対し"07"）。対等な意見だった実測例
+      （本線"54890"に対し痩せ版"04890"、本線"166320"に対し"136420"）とは
+      桁数で明確に分かれるため、本線の半分未満を「読めなかった」とみなす。 */
+  function eroAbstained(eroText, mainText) {
+    return String(eroText || '').length * 2 < String(mainText || '').length;
+  }
 
   /** 数値配列の中央値。 */
   function medianOf(nums) {
@@ -692,7 +786,7 @@ const Recognizer = (() => {
      @param {Array}  charBoxes   文字単位の外接矩形
      @param {number} expectedLen 期待される桁数（固定長ルールのみ。0/未指定なら可変長として扱う）
      @returns {{ text:string, dropped:Array }|null} 修復できない場合は null。 */
-  function repairSplitGlyphs(text, charBoxes, expectedLen) {
+  function repairSplitGlyphs(text, charBoxes, expectedLen, logPrefix = '[ocr]') {
     const L = expectedLen | 0;
     if (!Array.isArray(charBoxes) || charBoxes.length < 2) return null;
     if (L && charBoxes.length <= L) return null;   // 桁数既知で余分が無ければ何もしない
@@ -707,6 +801,15 @@ const Recognizer = (() => {
     const groups = L ? groupByExpectedLen(items, gaps, L) : groupByNaturalGaps(items, gaps);
     if (!groups || !groups.some(g => g.length > 1)) return null;
 
+    /* 隙間ガードは「物理的に離れている＝別々のインク」という直接証拠なので、
+       どちらのパスでも無条件に効かせる（実例 "A94813" の 1と3 は隙間+12px）。
+       広がりガードは「2文字ぶんに広がっている」という状況証拠にとどまるため、
+       独立した検算を持たない可変長だけ即中止とし、固定長は等間隔の当てはめに
+       厳格な許容量で通るかどうかで最終判断する（GLYPH_SLOT_TOLERANCE_STRICT）。 */
+    const guard = clusterGuard(groups, logPrefix);
+    if (guard.gapReject) return null;
+    if (guard.spanReject && !L) return null;
+
     /* まとまりの中でどれを残すかは、桁数が既知かどうかで信頼できる根拠が違う。
        桁数既知（固定長）なら「等間隔に並ぶはずの位置」を他の桁から当てはめられる
        （4〜5桁分の参照点があり、内挿で済むことが多い）。桁数不明（可変長）だと
@@ -715,17 +818,64 @@ const Recognizer = (() => {
        落とす誤判定をテストで確認した）。そのため可変長では位置の当てはめを
        使わず、より単純で外挿に頼らない「幅の自然さ」だけで決める
        （pickByWidth）。 */
-    const drop = L ? pickByPositionFit(groups) : pickByWidth(groups);
+    const drop = L
+      ? pickByPositionFit(groups, guard.spanReject ? GLYPH_SLOT_TOLERANCE_STRICT : GLYPH_SLOT_TOLERANCE)
+      : pickByWidth(groups);
+    if (guard.spanReject) {
+      console.log(`${logPrefix} 広がりは字形1つ分の${GLYPH_CLUSTER_SPAN_MAX_RATIO}倍以上だが隙間は無い`
+        + `（＝偽の矩形が1つ紛れ込んだ疑い）。等間隔の当てはめで検算した結果、`
+        + `${drop && drop.size ? '想定位置にほぼ完全に乗ったため修復を続行' : '想定位置に乗らなかったため修復を中止'}`);
+    }
     if (!drop || !drop.size) return null;
     return {
       text: charBoxes.filter((_, i) => !drop.has(i)).map(b => b.text).join(''),
       dropped: charBoxes.filter((_, i) => drop.has(i)),
     };
   }
+  /* まとまりが本当に「1つの字形の断片」かを検算する（固定長・可変長の共通ガード）。
+     2つの判断材料を別々に返す。呼び出し側で扱いが違うため（repairSplitGlyphs参照）:
+       gapReject … 断片間に白い隙間がある＝物理的に別々のインクという直接証拠。
+                   どちらのパスでも即中止してよい。
+       spanReject… まとまりが字形2つぶんに広がっている。「本物が2つでは？」という
+                   状況証拠だが、「本物1つ＋偽の矩形1つ」でも同じ広がりになるため
+                   これだけでは決められない（実例 "A93227" の 1と7 は2.20倍だが
+                   本物は7だけ、"5,002,800" の 0と0 は2.26倍で両方とも本物）。
+                   区別できる材料を持つ固定長では即中止にしない。
+     判断材料は必ず診断ログへ出す。実機で誤判定が起きたとき、矩形の羅列だけでは
+     「なぜ畳んだ／畳まなかったか」が追えず、原因究明のたびに実データの提供を
+     お願いすることになるため（しきい値の根拠となる実測値との突き合わせを
+     ログだけで行えるようにする）。 */
+  function clusterGuard(groups, logPrefix) {
+    const widthOf = p => p.b.x1 - p.b.x0;
+    const soloWidths = groups.filter(g => g.length === 1).map(g => widthOf(g[0]));
+    const ref = medianOf(soloWidths.length ? soloWidths : groups.flat().map(widthOf));
+    const out = { gapReject: false, spanReject: false };
+    if (!ref) return out;
+    for (const g of groups) {
+      if (g.length < 2) continue;
+      const span = Math.max(...g.map(p => p.b.x1)) - Math.min(...g.map(p => p.b.x0));
+      const ratio = span / ref;
+      /* 断片同士の白い隙間。同じ字形の二重検出なら重なるか接する（≦0）のが実測。
+         正の隙間が空いている＝物理的に別々のインク＝別々の字形の証拠。 */
+      const sorted = [...g].sort((a, b) => a.b.x0 - b.b.x0);
+      const holes = sorted.slice(1).map((p, k) => p.b.x0 - sorted[k].b.x1);
+      const maxHole = Math.max(...holes);
+      const wide = ratio >= GLYPH_CLUSTER_SPAN_MAX_RATIO;
+      const apart = maxHole > GLYPH_CLUSTER_GAP_MAX_RATIO * ref;
+      if (wide) out.spanReject = true;
+      if (apart) out.gapReject = true;
+      console.log(`${logPrefix} まとまり[${g.map(p => p.b.text).join('+')}] `
+        + `広がり${span}px = 字形1つ分(${Math.round(ref)}px)の${ratio.toFixed(2)}倍 `
+        + `断片間の隙間[${holes.join(',')}]px`
+        + (apart ? ` → 隙間が字形幅の${GLYPH_CLUSTER_GAP_MAX_RATIO * 100}%(${Math.round(GLYPH_CLUSTER_GAP_MAX_RATIO * ref)}px)超。別々の字形と判断し修復を中止` : '')
+        + (wide ? ` → ${GLYPH_CLUSTER_SPAN_MAX_RATIO}倍以上に広がっている` : ''));
+    }
+    return out;
+  }
   /* 固定長ルール向け: 断片を含まないまとまりだけから「等間隔に並ぶはずの位置」
      （中心 ≒ 切片 + ピッチ×番号）を当てはめる。左端のゴミを巻き込んで太った
      矩形など外れ値があっても効くよう、全ペアの傾きと切片の中央値で求める。 */
-  function pickByPositionFit(groups) {
+  function pickByPositionFit(groups, tolerance = GLYPH_SLOT_TOLERANCE) {
     const solo = groups.map((g, gi) => ({ gi, c: g[0].c, single: g.length === 1 })).filter(s => s.single);
     if (solo.length < 2) return null;
     const slopes = [];
@@ -744,7 +894,7 @@ const Recognizer = (() => {
       const want = base + fitPitch * gi;
       const ranked = g.map(p => ({ p, off: Math.abs(p.c - want) })).sort((a, b) => a.off - b.off);
       /* 当てはめた位置から遠すぎる＝そもそも規則性の推定が怪しい。 */
-      if (ranked[0].off > GLYPH_SLOT_TOLERANCE * fitPitch) return null;
+      if (ranked[0].off > tolerance * fitPitch) return null;
       for (const r of ranked.slice(1)) drop.add(r.p.i);
     }
     return drop;
@@ -764,6 +914,10 @@ const Recognizer = (() => {
     const drop = new Set();
     for (const g of groups) {
       if (g.length < 2) continue;
+      /* まとまり中に基準幅よりずっと太い矩形がある＝複数の本物の字形が接触して
+         1つの矩形にまとまった疑いが強く、1文字への絞り込み自体が信頼できない
+         （GLYPH_MERGED_WIDTH_RATIO参照）。 */
+      if (Math.max(...g.map(widthOf)) >= GLYPH_MERGED_WIDTH_RATIO * median) return null;
       const ranked = g.map(p => ({ p, dev: Math.abs(widthOf(p) - median) })).sort((a, b) => a.dev - b.dev);
       if (ranked[1].dev - ranked[0].dev < GLYPH_WIDTH_MARGIN * median) return null;
       for (const r of ranked.slice(1)) drop.add(r.p.i);
@@ -772,8 +926,13 @@ const Recognizer = (() => {
   }
   /* 固定長ルール向け: ピッチを「大きい方から桁数-1個」の間隔の中央値で見積もり
      （小さい間隔＝断片同士なので混ぜると過小評価される）、ピッチの半分未満の
-     間隔をひとかたまりにする。まとまりの数が桁数と一致しない場合は別の要因
-     （前後の本物のゴミ等）が混ざっているとみなし null を返す。 */
+     間隔をひとかたまりにする。
+     まとまりの数が桁数より少ない場合は併合しすぎ（本物を巻き込んでいる）なので
+     null を返す。多い場合は、値の前後に本物のゴミが付いているだけのことがあり
+     （実例 "CABOT774": 先頭のCが領域外の要素、Tは7の断片）、その状態でも
+     断片の統合自体は正しく行える。多いぶんは既存の前後除去（extractStr）が
+     落とすため、ここで一律に諦めると中間の断片を直す手段が無くなる
+     （前後除去は連続した窓しか選べず、中間の1文字を落とせない）。 */
   function groupByExpectedLen(items, gaps, L) {
     if (gaps.length < L - 1) return null;
     const pitch = medianOf([...gaps].sort((a, b) => b - a).slice(0, L - 1));
@@ -783,7 +942,7 @@ const Recognizer = (() => {
       if (items[k].c - items[k - 1].c < GLYPH_MERGE_PITCH_RATIO * pitch) groups[groups.length - 1].push(items[k]);
       else groups.push([items[k]]);
     }
-    return groups.length === L ? groups : null;
+    return groups.length >= L ? groups : null;
   }
   /* 隣接する矩形が物理的に重なっている（同じ横位置を取り合っている）とみなす
      重なり率（狭い方の幅に対する比）。2文字が印字上・本当に重なることは
@@ -967,18 +1126,265 @@ const Recognizer = (() => {
      真の倍率は後段の細探索(fineScalesAround)と、複数アンカーの相対位置
      (estimateTransform) で詰める。 */
   const LOCALIZE_SCALES = [0.6, 0.71, 0.85, 1.0, 1.19, 1.42, 1.68, 2.0];
+  /* このスコア以上の一致を「信頼できる対応点」として相似変換の推定に使う。 */
+  const LOCALIZE_GOOD_SCORE = 0.4;
+  /* 「直近に確定した倍率の近傍だけ」で済ませてよいと判断する最低スコア（全アンカー）。
+     実測では、当たりのとき最小スコアは0.73〜1.00、倍率が大きく外れると0.08〜0.20まで
+     落ちる。0.5はその谷の真ん中で、どちらからも十分に離れている。
+     下回っても粗探索へ落ちるだけで結果は変わらない（遅くなるだけ）。 */
+  const LOCALIZE_PROBE_MIN_SCORE = 0.5;
   /* 暫定倍率の周辺を細かく探索（±9%を3%刻み）。粗ステップの隙間を埋め、単一アンカー
      でも位置精度を確保する。複数アンカーがあれば相対位置でさらに精密化される。 */
   const fineScalesAround = s => [0.91, 0.94, 0.97, 1.0, 1.03, 1.06, 1.09]
     .map(k => Math.max(0.4, Math.min(2.5, Math.round(s * k * 1000) / 1000)));
 
+  /* ── 帳票判定の段階的な角度探索 ───────────────────────────
+     判定は「テンプレート数 × 角度数 × スケール数」の掛け算で効き、実測では
+     1ページ7.5秒のうち2.3秒（105回の照合＝7テンプレ×5角度×3スケール）を
+     占める最大の工程だった。一方、フラットベッドスキャナー運用では実測ログの
+     採用角度が一貫して0°で、±1°・±2°の探索は毎回ほぼ空振りしている。
+
+     そこで「まず0°だけ照合し、確信を持って採用できたらそこで止める。
+     できなければ残りの角度も照合して併合する」という2段階にする。
+     matchAllは全 角度×スケール の中の最大スコアを返すので、角度集合を分割して
+     呼び出し、スコアの大きい方で併合した結果は、一度に全角度を探索したのと
+     数学的に完全に同じになる（matcher.match_allのdocstring参照）。つまり
+     打ち切らなかった場合の精度・結果は現状と1ビットも変わらず、二度手間にも
+     ならない。近似が入るのは「打ち切ったとき」だけなので、その条件を
+     既定のしきい値よりかなり厳しく取る（下記）。 */
+  /* 0°だけで打ち切ってよい確信度・1位2位差。voting.jsの既定（採用は確信度0.70・
+     差0.06から）よりはっきり厳しくし、少しでも曖昧なら全角度を探索させる。
+     実測の正常ケース（確信度100%・差0.46）は余裕で通り、傾いたページは
+     0°でのスコアが落ちるため自然に全角度探索へ回る。 */
+  const CLASSIFY_FAST_CONF_MIN   = 0.90;
+  const CLASSIFY_FAST_MARGIN_MIN = 0.20;
+
+  /* 角度探索を「必要になってから」に遅らせる。
+     ±2°の角度探索（残り4角度＝照合60回）はサーバー実処理の24%（実測1181ms/ページ）を
+     占めるが、2026/8/6の670ページで実際に0°以外が選ばれたのは1ページだけだった。
+     そこで、帳票がすでに確定していれば角度は0°と仮置きして先へ進め、位置合わせが
+     成立しなかったときに初めて角度探索を実行する（prepare の resolveAngle）。
+
+     安全性の根拠は2つある。
+     ① 打ち切るのは判定が accepted かつ1位2位差が0.20以上のときだけ。voting.jsの
+        採用条件から逆算すると、これは peak が最低でも0.60（差0.20ちょうどなら0.667）
+        あることを意味する。実照合エンジンでの実測では、正しい倍率で0°照合したときの
+        peak は 傾き0°で0.862、0.5°で0.719、1.0°で0.602、1.5°で0.426、2.0°で0.349 と
+        急激に落ちる。つまり accepted に届く時点で、残っている傾きはおよそ1°未満に
+        限られる。実際、傾き2°だったp113は0°でのpeakが0.45しか無く判定はreviewで、
+        この打ち切りには最初から掛からない。
+     ② 仮に外しても、位置合わせが受け止める。位置合わせは0.6〜2.0の全域を粗→細で
+        探すうえ、目印が細長い（実測 930x101 や 621x77）ぶん角度に極めて敏感で、
+        角度が違えば対応点が揃わない（p113実測で 4点0.57〜0.78 対 1点）。
+        信頼できる対応点が2点未満なら、そこで角度探索を実行してやり直す。
+
+     つまり「速い方に賭けて、外れたら測って直す」形にしてある。賭けに勝てば60回の
+     照合が丸ごと不要になり、負けても1ページぶん余分に時間が掛かるだけで結果は変わらない。 */
+  const CLASSIFY_LAZY_MARGIN_MIN = 0.20;
+  /* 打ち切ってよい peak の下限。上の①で「accepted なら peak は0.60以上」と書いたが、
+     それは voting.js の確信度の式から逆算した結果であって、式が変われば崩れる。
+     依存したい性質（＝傾きが1°未満に限られる）はここで明示的に持たせる。
+     加えて、照合対象が1帳票しか無いとき（帳票を指定した一括OCR、縦横比フィルタで
+     1件に絞られた場合）は次点が存在せず 1位2位差＝peak になるため、上の
+     CLASSIFY_LAZY_MARGIN_MIN が実質的に効かなくなる。その状況でも下限を保証する。 */
+  const CLASSIFY_LAZY_PEAK_MIN = 0.60;
+
+  /* 同じ画像を複数のAPIへ送るための参照。初回だけ本体を送り、以降はidだけで
+     サーバー側が保持している画像を参照する（app.py の _resolve_image）。
+     実測で、往復時間のうちサーバー実処理を除いた大半が本文転送だった
+     （1651x2336で1回あたり約800ms）。1ページで最大5回送っていたものが1回になる。 */
+  let imageRefSeq = 0;
+  function newImageRef(canvas) {
+    return { dataURL: canvas.toDataURL('image/png'), id: `img${++imageRefSeq}-${Date.now()}`, send: true };
+  }
+
+  /* ── 用紙の倍率のヒント（位置合わせ → 次ページの判定へ） ─────────
+     判定用の倍率は粗いグリッドしか見ないが、アンカーは倍率に極めて敏感である。
+     実測（2026/8/6の670ページ）では、正しい倍率が0.97のページで、3%しか違わない
+     1.0で照合するとスコアが0.55、正しい0.97なら0.89だった。グリッドを多少細かく
+     しても（v.2026-08-05.8で隙間を埋めた結果は確信度39%→44%）到底届かない。
+     一方、正しい倍率は毎ページ位置合わせが既に見つけている。そこで、位置合わせが
+     確定させた倍率を帳票ごとに覚えておき、次のページの判定で候補に加える。
+
+     これは「前のページと同じ帳票だろう」と決め打つ類の推測ではない。増やすのは
+     探索する倍率の候補が1つだけで、どの帳票かを決める処理には触れていない。照合は
+     候補の中の最大を返し、併合も最大を取るため、ヒントが外れてもスコアが上がらない
+     だけで、従来どおり全角度探索へ落ちる。
+     ヒントは段階1（0°×粗グリッド）に混ぜる。当たれば1回目の照合でそのまま
+     確定でき、往復を増やさずに済むため。
+
+     ※ 副作用がひとつある。倍率のヒントも隙間埋めも0°でしか探さないため、
+     0°だけ細かい倍率グリッドで探したことになり、「どの角度が正しいか」の比較が
+     0°に有利に傾く。傾き角は最良アンカーの (角度×倍率) の argmax 1点で決まるので、
+     0°にだけ正解の倍率があると、実際に傾いているページでも0°が僅差で勝ってしまう。
+     スコアは「候補が増える＝下がらない」が、argmax は候補を増やした側へ動く。
+     2026/8/6のp113で実際に起きた（0°×1.06=0.45 対 -2°×粗グリッド=0.44 で0°が勝ち、
+     傾き補正されずに位置合わせが4点中3点除外→金額欄が"8140"→"8"）。
+     グリッドを揃えて解決しようとすると別の問題が出る。正解の倍率がどの角度の
+     グリッドにも無い場合、角度のargmaxは単なるノイズになり、実測でも「まっすぐで
+     倍率1.06のページ」が粗グリッドだけの比較では-1°と判定された。粗グリッドも
+     ヒント入りグリッドも、角度を決める物差しとしては単独では信用できない。
+     そこで角度は判定側で決め切らず、目印どうしで意見が割れたときの対抗馬
+     (matchInfo.altAngle) を添えて位置合わせへ渡し、位置合わせが崩れたときだけ
+     差し替える（prepare の「傾き角の差し替え」を参照）。 */
+  const lastFormScale = new Map();
+  /* 既にグリッドにある倍率とこれだけ近ければ、候補に足しても意味が無いので省く。 */
+  const SCALE_HINT_DUP_TOL = 0.01;
+
+  /** 位置合わせが確定させた倍率を帳票ごとに記録する（信頼できる一致のときだけ）。 */
+  function recordFormScale(formId, scale) {
+    if (!formId || !(scale > 0)) return;
+    lastFormScale.set(formId, Math.round(scale * 1000) / 1000);
+  }
+
+  /** 候補帳票について覚えている倍率のうち、グリッドに無いものを返す。 */
+  function scaleHintsFor(forms, gridScales) {
+    const hints = [];
+    for (const f of forms) {
+      const s = lastFormScale.get(f && f.id);
+      if (!(s > 0)) continue;
+      const covered = [...gridScales, ...hints].some(g => Math.abs(g - s) / s <= SCALE_HINT_DUP_TOL);
+      if (!covered) hints.push(s);
+    }
+    return hints;
+  }
+
+  /** 与えられた倍率の並びについて、隣り合う2つの「幾何平均」を返す（＝隙間の中央）。
+      倍率のずれは比で効く（1.0→1.06 と 1.06→1.12 が同じ重さ）ため、算術平均ではなく
+      幾何平均で割る。既定の [0.85, 1.0, 1.15] なら [0.922, 1.072] になり、
+      最大の取りこぼし幅が約15%から約7%へ半減する。
+      利用者が設定で倍率の並びを変えても、その並びの隙間を自動で埋められる
+      （narrowプリセットのように1点だけなら隙間が無く、空配列を返して何もしない）。 */
+  function geometricMidpoints(scales) {
+    const s = [...new Set(scales)].filter(v => v > 0).sort((a, b) => a - b);
+    const out = [];
+    for (let i = 0; i + 1 < s.length; i++) out.push(Math.round(Math.sqrt(s[i] * s[i + 1]) * 1000) / 1000);
+    return out;
+  }
+
+  /** 角度探索を省いて先へ進んでよいか（CLASSIFY_LAZY_PEAK_MIN の解説を参照）。 */
+  function canSkipAngleSearch(d, opts) {
+    return !opts.fullAngleSearch
+      && d.decision === 'accepted'
+      && d.margin >= CLASSIFY_LAZY_MARGIN_MIN
+      && !!d.best && d.best.peak >= CLASSIFY_LAZY_PEAK_MIN;
+  }
+
+  /** 2つの照合結果を「スコアの高い方」で併合する（角度集合を分割したぶんを統合）。 */
+  function mergeScores(a, b) {
+    const out = new Map(a);
+    b.forEach((r, id) => { const cur = out.get(id); if (!cur || r.score > cur.score) out.set(id, r); });
+    return out;
+  }
+
+  /* 用紙の縦横比がこれ以上違う帳票は、同じ紙ではありえないとみなして照合しない。
+     ±25%は「向きの違い」だけを弾き、紙の規格違い（A4縦1.414 / レター縦1.294 /
+     リーガル縦1.647）や、登録時と読み込み時の余白・DPIの差は弾かない値。
+     実測でも、同じ帳票の基準画像0.694に対し実際の入力は0.708（2.0%差）で、
+     この程度のずれは日常的に起こる。一方、縦長の帳票(1.415)と横長の帳票(0.708)は
+     ちょうど2.00倍＝100%差あり、許容を±15%〜±40%のどこに置いても判定は変わらない。 */
+  const CLASSIFY_ASPECT_TOL = 0.25;
+
+  /** 入力ページと用紙の縦横比が近い帳票だけに絞る（判定の前処理）。
+      「どれが正解か」を決めるのではなく「形が違うので絶対に正解ではないもの」を
+      external な情報（用紙の形）だけで外す仕組みなので、帳票が増えても破綻しない。
+      同じ向きの帳票同士は絞り込めず全て残るため、そこは従来どおり目印の照合で決まる。
+      寸法が記録されていない帳票、および1つも該当しない場合は安全側に倒して全件残す。 */
+  function filterFormsByAspect(forms, canvas) {
+    const aspect = canvas.height / canvas.width;
+    if (!aspect || !isFinite(aspect) || forms.length < 2) return forms;
+    const ratioOf = f => (f.referenceImage && f.referenceImage.w && f.referenceImage.h)
+      ? f.referenceImage.h / f.referenceImage.w : null;
+    const keep = forms.filter(f => {
+      const r = ratioOf(f);
+      return r === null || Math.abs(r - aspect) / aspect <= CLASSIFY_ASPECT_TOL;
+    });
+    if (!keep.length || keep.length === forms.length) return forms;
+    const dropped = forms.filter(f => !keep.includes(f));
+    console.log(`[classify] 用紙の縦横比が違うため照合対象から除外: `
+      + dropped.map(f => `"${f.name}"(縦横比${ratioOf(f).toFixed(3)})`).join(' ')
+      + ` ／ 入力ページは${canvas.width}x${canvas.height}(縦横比${aspect.toFixed(3)})`
+      + ` → 残り${keep.length}帳票（${keep.map(f => `"${f.name}"`).join(' ')}）を照合`);
+    return keep;
+  }
+
   async function classify(sourceCanvas, forms, opts = {}) {
     const angleRange = opts.angleRange ?? 2;
     const angleStep  = opts.angleStep  ?? 1;
     const scaleFactors = opts.scaleFactors || CLASSIFY_SCALES;
+    forms = filterFormsByAspect(forms, sourceCanvas);
     const tpls   = await buildAnchorTemplates(forms);
-    const scores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angleRange, angleStep, scaleFactors });
+    /* 判定対象の画像は1度だけPNG化・1度だけ送信し、2段階目はid参照で済ませる。 */
+    const imageRef = newImageRef(sourceCanvas);
+    const allAngles = [];
+    for (let a = -angleRange; a <= angleRange + 1e-9; a += Math.max(0.1, angleStep)) {
+      allAngles.push(Math.round(a * 1000) / 1000);
+    }
+    const hasZero = allAngles.some(a => Math.abs(a) < 1e-9);
+    const rest = allAngles.filter(a => Math.abs(a) >= 1e-9);
+    /* 0°が探索対象に無い設定（角度をずらして探す特殊な使い方）なら段階分けの
+       意味が無いので従来どおり一括で探索する。 */
+    if (!hasZero || !rest.length) {
+      const scores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angleRange, angleStep, scaleFactors, image: imageRef });
+      return { decision: FormVoting.decide(forms, scores, opts.voting || {}), scores };
+    }
+
+    /* 直近に位置合わせが確定させた倍率を1回目の照合に混ぜる（lastFormScale参照）。
+       当たれば1回目でそのまま確定でき、往復も角度探索も増やさずに済む。 */
+    const hints = scaleHintsFor(forms, scaleFactors);
+    const fastScales = hints.length ? scaleFactors.concat(hints) : scaleFactors;
+    if (hints.length) {
+      console.log(`[classify] 直近の位置合わせが確定させた用紙の倍率(${hints.join(', ')})も1回目の照合に加えます`);
+    }
+    const fastScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: [0], scaleFactors: fastScales, image: imageRef });
+    const fastDecision = FormVoting.decide(forms, fastScores, opts.voting || {});
+    /* 角度探索を省いて先へ進めてよいか（CLASSIFY_LAZY_MARGIN_MIN の解説を参照）。
+       確信度が高ければ従来どおり「確定」として省く。そこまでで無くても帳票が
+       accepted なら、角度は0°と仮置きして進み、位置合わせが崩れたときに探索する。 */
+    if (canSkipAngleSearch(fastDecision, opts)) {
+      const sure = fastDecision.confidence >= CLASSIFY_FAST_CONF_MIN;
+      console.log(`[classify] 0°のみで${sure ? '確定' : '先へ進みます'}（判定=accepted 確信度${Math.round(fastDecision.confidence * 100)}%`
+        + ` 1位2位差${fastDecision.margin.toFixed(2)}）→ 残り${rest.length}角度(${rest.join('°,')}°)の照合を省略`
+        + (sure ? '' : '（傾きが疑われる場合だけ、位置合わせの後に角度探索します）'));
+      return { decision: fastDecision, scores: fastScores, angleSearchSkipped: true };
+    }
+    /* 0°で確定できない原因は、傾きではなく「倍率の取りこぼし」であることが多い。
+       判定用の倍率は粗い3点（既定 0.85 / 1.0 / 1.15）しか見ておらず、1.0と1.15の
+       あいだには15%の隙間がある。実測（2026/8/5の50ページ）では、位置合わせが
+       倍率1.06と判定したページが12件あり、そのすべてで判定用スコアのpeakが
+       0.43〜0.47まで落ちて確定できていなかった（倍率1.00のページ8件はpeak
+       0.83〜0.97で全件確定）。同じ帳票・同じアンカーでも、倍率が6%ずれるだけで
+       スコアはほぼ半減する（位置合わせのログでも、倍率1.0付近で0.43だったものが
+       1.06では0.78まで上がっていた）。
+       そこで角度を増やす前に、まず倍率の隙間を0°だけで埋めて確定を試みる。
+       角度を4つ増やすより候補数がずっと少なく、外しても損失が小さい。 */
+    const gapScales = geometricMidpoints(scaleFactors);
+    let baseScores = fastScores;
+    if (gapScales.length) {
+      console.log(`[classify] 0°では確定できず（判定=${fastDecision.decision} 確信度${Math.round(fastDecision.confidence * 100)}%`
+        + ` 1位2位差${fastDecision.margin.toFixed(2)}）→ 先に倍率の隙間(${gapScales.join(', ')})を0°で埋めて再判定`);
+      const gapScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: [0], scaleFactors: gapScales, image: imageRef });
+      baseScores = mergeScores(fastScores, gapScores);
+      const gapDecision = FormVoting.decide(forms, baseScores, opts.voting || {});
+      if (canSkipAngleSearch(gapDecision, opts)) {
+        const sure = gapDecision.confidence >= CLASSIFY_FAST_CONF_MIN;
+        console.log(`[classify] 倍率の隙間を埋めて0°のみで${sure ? '確定' : '先へ進みます'}`
+          + `（判定=accepted 確信度${Math.round(gapDecision.confidence * 100)}%`
+          + ` 1位2位差${gapDecision.margin.toFixed(2)}）→ 残り${rest.length}角度(${rest.join('°,')}°)の照合を省略`
+          + (sure ? '' : '（傾きが疑われる場合だけ、位置合わせの後に角度探索します）'));
+        return { decision: gapDecision, scores: baseScores, angleSearchSkipped: true };
+      }
+      console.log(`[classify] 倍率の隙間を埋めても確定できず（判定=${gapDecision.decision}`
+        + ` 確信度${Math.round(gapDecision.confidence * 100)}% 1位2位差${gapDecision.margin.toFixed(2)}）`
+        + `→ 残り${rest.length}角度(${rest.join('°,')}°)も照合して併合`);
+    } else {
+      console.log(`[classify] 0°では確定できず（判定=${fastDecision.decision} 確信度${Math.round(fastDecision.confidence * 100)}%`
+        + ` 1位2位差${fastDecision.margin.toFixed(2)}）→ 残り${rest.length}角度(${rest.join('°,')}°)も照合して併合`);
+    }
+    const restScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: rest, scaleFactors, image: imageRef });
+    const scores = mergeScores(baseScores, restScores);
     const decision = FormVoting.decide(forms, scores, opts.voting || {});
+
     return { decision, scores };
   }
 
@@ -1003,8 +1409,8 @@ const Recognizer = (() => {
 
     /* ③ 傾き補正 */
     stage('傾き補正', 0.1);
-    const angle = matchInfo.angle || 0;
-    const rotated = await LineRemovalProcessor.rotateCanvas(sourceCanvas, angle);
+    let angle = matchInfo.angle || 0;
+    let rotated = await LineRemovalProcessor.rotateCanvas(sourceCanvas, angle);
     const tRotate = performance.now();
 
     /* ④ 原点の再ローカライズ: 位置合わせに使うアンカーを角度固定で再マッチ → 相似変換を
@@ -1015,10 +1421,86 @@ const Recognizer = (() => {
        （判定を良くしようと目印を足したら位置合わせがずれる、という形で実際に現れる）。 */
     stage('原点の確定', 0.25);
     const anchors = (form.anchors || []).filter(AnchorRoles.usedForAlign);
-    const allMatches = [];
+    let allMatches = [];
+    /* 傾き補正後の画像の参照（照合2回＋罫線除去で共用。本体の送信は初回のみ）。
+       アンカーが無い等でローカライズを飛ばした場合は null のままで、
+       罫線除去側が自前で用意する。 */
+    let rotatedRef = null;
+    /* アンカー画像のデコードは1度だけ（傾き角をやり直す場合も同じものを使い回す）。 */
+    let tpls = [], tplList = [];
     try {
-      const tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, imageElement: await dataURLtoImg(a.dataURL) })));
-      const tplList = tpls.map(t => ({ id: t.id, imageElement: t.imageElement }));
+      tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, dataURL: a.dataURL, imageElement: await dataURLtoImg(a.dataURL) })));
+      tplList = tpls.map(t => ({ id: t.id, dataURL: t.dataURL, imageElement: t.imageElement }));
+      /* 傾き補正後の画像は、この下の粗探索・細探索・（呼び出し元での）罫線除去で
+         まったく同じものを使う。canvas→PNG圧縮はブラウザ側で重く、実測では
+         サーバーの実処理の外側に1ページあたり約1.8秒（全体の24%）が消えていた。
+         ここで1度だけ用意して使い回す。 */
+      const tEnc0 = performance.now();
+      rotatedRef = newImageRef(rotated);
+      console.log(`[perf]   傾き補正後の画像をPNG化(この後3回分を1回で共用・送信も1回): ${(performance.now() - tEnc0).toFixed(0)}ms`);
+      allMatches = await localizeOn(rotated, rotatedRef);
+
+      /* 傾き角の差し替え。判定が渡してきた角度で位置合わせが成立しなかった場合に限り、
+         対抗馬(altAngle)でもう一度だけ試し、良かった方を採る。
+
+         判定側の角度は 0° に有利な条件で選ばれており、実際に傾いたページを 0° と
+         誤ることがある（classifyのaltAngleの解説を参照）。一方こちらの位置合わせは
+         0.6〜2.0の全域を粗→細で探すので真の倍率が見え、角度が合っているかどうかが
+         スコアに素直に出る。2026/8/6のp113では、正しい角度なら0.78/0.76/0.69/0.57の
+         4点が揃い、誤った角度では0.53/0.37/0.36/0.28で1点しか残らなかった。
+         この差は大きく、取り違える余地が無い。
+
+         発火条件を「信頼できる対応点が2点未満」に絞っているため、位置合わせが
+         成立している限りこの処理は動かず、既に正しく読めているページの結果は
+         一切変わらない。同じログの他ページはいずれも3〜4点が揃っている。
+         アンカーが1つしかない帳票は2点を満たしようが無いので対象外。 */
+      const strongCount = ms => ms.filter(p => p.score >= LOCALIZE_GOOD_SCORE).length;
+      /** 別の傾き角で位置合わせし直し、対応点が増えたときだけ採用する。 */
+      const tryAngle = async (deg, why) => {
+        if (deg == null || deg === angle) return;
+        console.log(`[align] ${angle}°では信頼できる目印が${strongCount(allMatches)}点しか取れませんでした`
+          + `（${anchors.length}点中）→ ${why}の傾き角${deg}°でも試します`);
+        const altCanvas = await LineRemovalProcessor.rotateCanvas(sourceCanvas, deg);
+        const altRef = newImageRef(altCanvas);
+        const altMatches = await localizeOn(altCanvas, altRef);
+        if (strongCount(altMatches) > strongCount(allMatches)) {
+          console.log(`[align] 傾き角を${angle}°→${deg}°に差し替えました`
+            + `（信頼できる目印 ${strongCount(allMatches)}点 → ${strongCount(altMatches)}点）`);
+          angle = deg; rotated = altCanvas; rotatedRef = altRef; allMatches = altMatches;
+        } else {
+          console.log(`[align] ${why}の${deg}°でも改善しなかったため`
+            + `（信頼できる目印 ${strongCount(altMatches)}点）${angle}°のまま続行します`);
+        }
+      };
+      /* 位置合わせが成立しなかったときだけ、別の傾き角を試す。候補は2段階。
+         ① 対抗馬(altAngle): 判定のときに目印どうしで角度の意見が割れていた場合。
+         ② resolveAngle(): 判定が角度探索そのものを省いていた場合、ここで初めて実行する
+            （CLASSIFY_LAZY_MARGIN_MIN の解説を参照）。呼び出し側が用意する。
+         位置合わせが成立している限りどちらも動かないので、正しく読めているページの
+         結果も速度も変わらない。 */
+      if (anchors.length >= 2 && strongCount(allMatches) < 2) {
+        await tryAngle(matchInfo.altAngle, '対抗馬');
+        if (strongCount(allMatches) < 2 && typeof matchInfo.resolveAngle === 'function') {
+          console.log('[align] 判定では角度探索を省いていたため、ここで角度探索を実行します');
+          let deg = null;
+          try { deg = await matchInfo.resolveAngle(); }
+          catch (e) { console.error(`[align] 角度探索に失敗しました: ${e && e.stack ? e.stack : e}`); }
+          await tryAngle(deg, '角度探索');
+        }
+      }
+    } catch (e) {
+      /* 失敗時は恒等変換（＝位置合わせ無し）で先へ進む。ただし黙って落ちてはいけない。
+         v.2026-08-04.6 で、この catch が実装ミス（ブロックスコープ外の変数を参照した
+         ReferenceError）を丸ごと飲み込み、全ページが恒等変換のままOCRされて位置が
+         総崩れになった（不一致3件・該当なし17件）。処理は続けても、原因が分かる形で
+         必ず記録する。恒等変換で進むと切り出しが帳票の実際のズレぶん外れるため、
+         「速いのに結果だけおかしい」という最も気付きにくい壊れ方をする。 */
+      console.error(`[align] 位置合わせに失敗したため恒等変換（補正なし）で続行します: ${e && e.stack ? e.stack : e}`);
+    }
+
+    /** 傾き補正済みの画像1枚について、粗→細の倍率探索で対応点の一覧を返す。 */
+    async function localizeOn(canvas, ref) {
+      const matches = [];
       /* 粗→細のスケール探索で「拡大・縮小された帳票」を正しく捉える。
          ① 粗く広い範囲(0.6〜2.0)で各アンカーを個別に探索。
          ② 各アンカー自身の暫定倍率(①の自己ベスト)の周辺(±9%)を、アンカーごとに
@@ -1036,42 +1518,110 @@ const Recognizer = (() => {
          各アンカーの細探索候補の和集合を渡す（各アンカーは返ってきた結果のうち
          自分にとってベストなものを採用するので、アンカーごとに別々に呼び出すのと
          数学的に同じ結果になる）。 */
-      const coarse = await MatcherEngine.matchAll(rotated, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES });
-      const fineScaleUnion = new Set();
+      /* ※ v.2026-08-04.6 で「まず等倍近傍だけ試し、確度が十分なら粗探索を省く」
+         段階化を入れて実機70ページで総崩れ（不一致3件・該当なし17件）した前科がある。
+         直接の原因は診断ログが参照する fineScaleUnion を if ブロック内で宣言した
+         スコープの誤りで、全ページで例外→この関数を囲む catch が恒等変換へ
+         フォールバックしていた（ログから [align] 行が丸ごと消えていたのが証拠）。
+         段階化そのものは無罪だったが、同じ轍を踏まないよう、この関数で使う変数は
+         すべてここで宣言し、ブロック内で宣言し直さない。 */
+      let coarse = null, fine = null, fineScaleUnion = new Set(), probeNote = '';
+
+      /* ── 段階0: 直近に確定した倍率の近傍だけを先に試す ───────────────
+         実測（2026/8/6の670ページ）では、19ページすべてで検出倍率が0.97（1ページのみ
+         0.94）だった。にもかかわらず毎ページ 0.6〜2.0 の全域を粗探索しており、位置合わせ
+         は1ページ平均2457msでページ内の最大費目になっていた。用紙の倍率はページごとに
+         変わるものではないので、前のページで確定した倍率の近傍から試すのが理にかなう。
+
+         当たり外れの見分け方は実測で決めた。記憶した倍率0.97の窓
+         [0.883,0.912,0.941,0.97,0.999,1.028,1.057] で照合すると、
+           実倍率0.97 → 最小スコア0.730・全アンカーが窓の内側  （当たり）
+           実倍率1.00 → 最小スコア1.000・内側                  （当たり）
+           実倍率1.06 → 最小スコア0.692・全アンカーが窓の端    （外れ）
+           実倍率1.12 → 最小スコア0.132・端                    （外れ）
+           実倍率1.30 → 最小スコア0.084・端                    （外れ）
+         注目すべきは実倍率1.06で、最小スコア0.692は当たりの0.730とほとんど差が無い。
+         スコアだけでは見分けられず、「最良が窓の端に来ているか」が決め手になる。端に
+         あるということは、本当の最適値が窓の外にあるという意味だからである。
+         逆に1.30や0.80では一部のアンカーがまぐれで内側に入るため、端の判定だけでも
+         足りない。そこで両方を課す。
+
+         外したときは従来どおり粗→細を実行するだけで、結果は変わらない（遅くなるだけ）。
+         また、記憶する倍率は「窓の内側で確定した」ものに限られるため、少しずつ間違った
+         方向へ流れていくことは無い。真の倍率が窓から出ればスコアが落ちて粗探索へ戻り、
+         そこで取り直される。 */
+      const hintScale = lastFormScale.get(form && form.id);
+      if (hintScale > 0) {
+        const probeScales = fineScalesAround(hintScale);
+        const probe = await MatcherEngine.matchAll(canvas, tplList,
+          { angleRange: 0, angleStep: 1, scaleFactors: probeScales, image: ref });
+        const lo = probeScales[0], hi = probeScales[probeScales.length - 1];
+        let worst = Infinity, atEdge = null;
+        for (const t of tpls) {
+          const r = probe.get(t.id);
+          if (!r) { worst = 0; break; }
+          worst = Math.min(worst, r.score);
+          if (r.scale <= lo || r.scale >= hi) atEdge = t.a.name || t.id;
+        }
+        if (worst >= LOCALIZE_PROBE_MIN_SCORE && !atEdge) {
+          fine = probe;
+          fineScaleUnion = new Set(probeScales);
+          console.log(`[align-scale] 直近に確定した倍率${hintScale}の近傍(${probeScales.join(', ')})だけで`
+            + `全アンカーが一致しました（最小スコア${worst.toFixed(2)}・いずれも窓の端ではない）`
+            + ` → 0.6〜2.0の粗探索を省略`);
+        } else {
+          probeNote = atEdge
+            ? `最良倍率が窓の端（"${atEdge}"）＝真の倍率が窓の外にある`
+            : `最小スコア${worst.toFixed(2)}が${LOCALIZE_PROBE_MIN_SCORE}未満`;
+          console.log(`[align-scale] 直近に確定した倍率${hintScale}の近傍では決まりませんでした`
+            + `（${probeNote}）→ 0.6〜2.0の粗探索から探し直します`);
+        }
+      }
+
+      if (!fine) {
+        coarse = await MatcherEngine.matchAll(canvas, tplList,
+          { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES, image: ref });
+        tpls.forEach(t => {
+          const rc = coarse.get(t.id);
+          fineScalesAround(rc ? (rc.scale || 1) : 1).forEach(s => fineScaleUnion.add(s));
+        });
+        fine = await MatcherEngine.matchAll(canvas, tplList,
+          { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b), image: ref });
+        /* 診断用ログ: 各アンカーが自身の粗探索ベストの近傍をどれだけ細探索で改善できたか。
+           もし依然としてアンカー間で粗ベストの倍率が大きく食い違っているなら、
+           それはこの探索範囲の問題ではなく、そのアンカー自体の識別性・画像品質の
+           問題である可能性が高い（両方を切り分けるための情報として残す）。 */
+        console.log(`[align-scale] 各アンカーが自身の粗探索ベストを中心に独立して細探索（共有provScaleは廃止、細探索候補の和集合${fineScaleUnion.size}点）`);
+        tpls.forEach(t => {
+          const rc = coarse.get(t.id), rf = fine.get(t.id);
+          if (!rc) return;
+          console.log(`[align-scale]   "${t.a.name || t.id}" 粗探索(0.6〜2.0の全域)自身のベスト: スコア${rc.score.toFixed(2)} 倍率${rc.scale}`
+            + (rf ? ` / 自身の近傍での細探索ベスト: スコア${rf.score.toFixed(2)} 倍率${rf.scale}` : ''));
+        });
+      }
+
       tpls.forEach(t => {
-        const rc = coarse.get(t.id);
-        fineScalesAround(rc ? (rc.scale || 1) : 1).forEach(s => fineScaleUnion.add(s));
-      });
-      const fine = await MatcherEngine.matchAll(rotated, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b) });
-      /* 診断用ログ: 各アンカーが自身の粗探索ベストの近傍をどれだけ細探索で改善できたか。
-         もし依然としてアンカー間で粗ベストの倍率が大きく食い違っているなら、
-         それはこの探索範囲の問題ではなく、そのアンカー自体の識別性・画像品質の
-         問題である可能性が高い（両方を切り分けるための情報として残す）。 */
-      console.log(`[align-scale] 各アンカーが自身の粗探索ベストを中心に独立して細探索（共有provScaleは廃止、細探索候補の和集合${fineScaleUnion.size}点）`);
-      tpls.forEach(t => {
-        const rc = coarse.get(t.id), rf = fine.get(t.id);
-        if (!rc) return;
-        console.log(`[align-scale]   "${t.a.name || t.id}" 粗探索(0.6〜2.0の全域)自身のベスト: スコア${rc.score.toFixed(2)} 倍率${rc.scale}`
-          + (rf ? ` / 自身の近傍での細探索ベスト: スコア${rf.score.toFixed(2)} 倍率${rf.scale}` : ''));
-      });
-      tpls.forEach(t => {
-        const rc = coarse.get(t.id), rf = fine.get(t.id);
+        const rc = coarse && coarse.get(t.id), rf = fine.get(t.id);
         const r = (rf && (!rc || rf.score >= rc.score)) ? rf : rc;   // 粗・細で高スコア側を採用
         if (!r) return;
         const f = r.scale || 1;
-        allMatches.push({
+        matches.push({
           name: t.a.name || '',
           refX: (t.a.refX || 0) + t.a.w / 2, refY: (t.a.refY || 0) + t.a.h / 2,         // 基準中心
           inX:  r.loc.x + t.a.w * f / 2,     inY:  r.loc.y + t.a.h * f / 2,             // 入力中心（スケール考慮）
           score: r.score, scale: f,
         });
       });
-      allMatches.sort((a, b) => b.score - a.score);
-    } catch (_) { /* 失敗時は恒等変換 */ }
+      matches.sort((a, b) => b.score - a.score);
+      return matches;
+    }
+
+    if (!allMatches.length) {
+      console.warn('[align] 目印の一致が1件も得られませんでした。OCR領域は基準座標のまま切り出されるため、'
+        + '帳票のズレぶん位置がずれます（上のエラー、または目印の登録内容を確認してください）');
+    }
     /* 信頼できる一致(>=0.4)で相似変換を推定。無ければ最良1点で best-effort */
-    const good = allMatches.filter(p => p.score >= 0.4);
+    const good = allMatches.filter(p => p.score >= LOCALIZE_GOOD_SCORE);
     let transform;
     if (good.length >= 1)        transform = estimateTransform(good);
     else if (allMatches.length)  transform = estimateTransform([allMatches[0]]);
@@ -1138,21 +1688,32 @@ const Recognizer = (() => {
          だけでは分からないため、最終変換への当てはまりの悪さを別途チェックする。 */
       residualHigh: maxKeptResidual > OUTLIER_TOL_PX,
     };
+    /* 確定した用紙の倍率を覚えておき、次ページの帳票判定のヒントに使う
+       （lastFormScale の解説を参照）。信頼できる一致が2点以上あり、探索範囲の端に
+       張り付いてもいない＝倍率そのものが信用できるときだけ記録する。
+       代表値は中央値（1点だけ別の場所へ誤マッチしていても引きずられないように）。 */
+    if (transform.kept.length >= 2 && !matchQuality.weakMatch && !matchQuality.scaleEdge) {
+      recordFormScale(form && form.id, median(usedMatches.map(p => p.scale)));
+    }
 
     /* ⑤ 罫線除去（登録された罫線除去パラメータを引き継ぎ） */
     stage('罫線除去', 0.45);
     const params = form.lineRemoval || LineRemovalProcessor.defaultParams();
-    const proc   = await LineRemovalProcessor.process(rotated, params);
+    /* 認識では最終結果の1枚しか使わない（残り3枚は表示用で、受け取っても
+       cleanupMats に渡して捨てているだけだった）ので onlyFinal で省く。 */
+    const proc   = await LineRemovalProcessor.process(rotated, params, rotatedRef, true);
     const tLineRemoval = performance.now();
     console.log(`[perf]   prepare: rotate=${(tRotate - tPrepStart).toFixed(0)}ms localize(anchor${anchors.length})=${(tLocalize - tRotate).toFixed(0)}ms lineRemoval=${(tLineRemoval - tLocalize).toFixed(0)}ms`);
-    if (proc.error) {
+    if (proc.error || !proc.mats.length) {
       LineRemovalProcessor.cleanupMats(proc.mats);
-      return { angle, transform, anchorPoints, resultCanvas: null, previewMats: [], error: proc.error, matchQuality };
+      return { angle, transform, anchorPoints, resultCanvas: null, previewMats: [],
+               error: proc.error || '罫線除去の結果画像を受け取れませんでした', matchQuality };
     }
-    /* mats[3] = 罫線除去結果（サーバーから受け取り済みのcanvas）。OCR 入力用に
-       独立キャンバスへ描画 */
+    /* 罫線除去結果（サーバーから受け取り済みのcanvas）。OCR 入力用に独立キャンバスへ描画。
+       ※ 末尾で参照すること。onlyFinal を付けた認識時は1枚だけ返るため添字3では取れない
+         （process のJSDoc参照。最終結果が常に末尾なのは両方の場合で共通）。 */
     const resultCanvas = document.createElement('canvas');
-    const resMat = proc.mats[3];
+    const resMat = proc.mats[proc.mats.length - 1];
     resultCanvas.width  = resMat.width;
     resultCanvas.height = resMat.height;
     /* このcanvasはOCR領域ごとに何度も切り出し(drawImage)で読み出される最重要の
@@ -1271,7 +1832,8 @@ const Recognizer = (() => {
         const boxes = boxRes.charBoxes;
         if (!Array.isArray(boxes) || !boxes.length) return null;
         const expectedLen = (norm && !norm.variable) ? norm.len : 0;
-        const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes, expectedLen);
+        const rep = repairSplitGlyphs((boxRes.fullText || '').trim(), boxes, expectedLen,
+          `[ocr]   "${region.name}"${label}`);
         const dropped = new Set((rep ? rep.dropped : []));
         console.log(`[ocr]   "${region.name}"${label} 文字矩形: `
           + boxes.map(b => `${b.text}[${b.x0}-${b.x1}]${dropped.has(b) ? '←除外' : ''}`).join(' '));
@@ -1339,9 +1901,34 @@ const Recognizer = (() => {
             /* 本線が多数派 → 痩せ版の少数意見は棄却（フラグも立てない） */
             console.log(`[ocr]   "${region.name}" 本線を維持: グレー版が本線と一致`
               + `（痩せ版=${JSON.stringify(ero.out.text)}は少数派として棄却）`);
+          } else if (eroAbstained(ero.out.text, out.text) && gray.out.text
+                     && gray.out.text.length === out.text.length) {
+            /* 三者三様に見えるが、痩せ版は「意見」ではなく「読めなかった」ケース。
+               痩せ版は本線の二値化画像をさらに1px痩せさせたものなので、これが
+               丸ごと読めない＝二値化の時点で画線が既に細りきっている動かぬ証拠になる。
+               その状態で真っ先に消えるのは細い横棒で、実機で報告された
+               "35,497"→"35197" はまさに「4」の横棒が二値化で失われた例だった
+               （本線とグレー版の文字矩形が完全に一致し、4文字目の判定だけが
+               1と4で割れていた＝切り出しではなく字形の判定だけの違い）。
+               二値化はインクを減らすことしかできない以上、画線が失われた疑いが
+               濃い場面では、二値化を経ていないグレー版のほうが物理的に信用できる。
+               桁数が本線と同じであることも条件にする（グレー版は背景のノイズを
+               余分な文字として拾うことがあり、その場合は桁数が変わるため。
+               桁数が同じなら切り出しは一致していて、字形の判定だけが違う）。
+               ただし多数決で裏付けられたわけではないので「要確認」は残す。 */
+            secondOpinionDiff = out.text;
+            console.log(`[ocr]   "${region.name}" グレー版を採用: 本線=${JSON.stringify(out.text)}`
+              + ` → ${JSON.stringify(gray.out.text)}（痩せ版=${JSON.stringify(ero.out.text)}は読めておらず`
+              + `二値化で画線が失われた疑いが濃いため、二値化を経ないグレー版を信用する。`
+              + `桁数は本線と同じ＝切り出しは一致し字形の判定だけが違う）`);
+            secondOpinionNote = `グレー版を採用(本線=${JSON.stringify(out.text)})`;
+            res = gray.res; out = gray.out;
           } else {
-            /* 三者三様 → どれも信用できない。本線の値のまま要確認 */
-            secondOpinionDiff = ero.out.text;
+            /* 三者三様 → どれも信用できない。本線の値のまま要確認。
+               診断ログの「別解釈」にはグレー版を優先して載せる（二値化を経ない分、
+               罫線除去や二値化しきい値が招いた欠けの影響を受けにくく、痩せ版が
+               空になりがちな場面でも実際の読み筋が入っていることが多いため）。 */
+            secondOpinionDiff = gray.out.text || ero.out.text;
             console.log(`[ocr]   "${region.name}" セカンドオピニオン三者三様: `
               + `本線=${JSON.stringify(out.text)} / 痩せ版=${JSON.stringify(ero.out.text)}`
               + ` / グレー版=${JSON.stringify(gray.out.text)}`
@@ -1369,15 +1956,61 @@ const Recognizer = (() => {
          どちらが正しいか決められないので、確信を持てないまま片方を採用せず
          読み直しに回す。
          1回目が全て満たせばそのまま採用するので、これまで正しく読めていた欄の結果は
-         変わらない。追加のOCRは疑わしい欄にだけ発生する。 */
+         変わらない。追加のOCRは疑わしい欄にだけ発生する。
+
+         ただし「制約に合格した＝正しい」ではない点に注意が必要で、実機で次の
+         転倒が起きた（注文番号 正解"A94813"）:
+           psm6  raw="A948138" → "A94813" ambiguous=true   ← 正解
+           psm7  raw="A948138" → "A94813" ambiguous=true   ← 正解（独立に一致）
+           psm8  raw="AQ4813"  → "AQ4813" ambiguous=false  ← 誤り。だが合格
+         psm8は"9"を"Q"と読み違えた結果ちょうど6桁になり、抽出（どの1文字を
+         落とすか）が不要になったためambiguousが立たず、「唯一の合格者」として
+         正解を上書きしてしまった。桁数がたまたま揃った誤読は、合否だけでは
+         正しい読みと区別できない。
+
+         そこで、合格した再読取りを採用する前に「元の読みと矛盾していないか」を
+         見る。この読み直しが本来救おうとしているのは、上のコメントにあるとおり
+         「汚れや字間を余分な1文字として拾ってしまう」失敗であり、その場合の
+         再読取りの生データは元の生データから文字を落としただけ＝部分列になる
+         （AL24521→AL2451、JIL3331→JL3331）。逆に、元の生データに一度も現れて
+         いない文字を持ち込む再読取り（A948138に無い"Q"）は、切り出し方ではなく
+         字形の解釈そのものが違っており、本来の救済対象ではない。
+         よって、元の読みが他のPSMにも裏付けられている（同じ値が2回以上出た）
+         場合に限り、部分列になっていない再読取りは採用しない。裏付けが無ければ
+         比較対象が無いので従来どおり合格者を採用する（既存の救済は維持される）。 */
       if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous)) {
+        const baseText = out.text;
+        const baseRaw = String(out.raw || '').replace(/\s/g, '');
+        let support = 1;   // 元の読みと同じ値が出た回数（元の読み自身を1と数える）
+        /* 却下した対抗馬側の生データが、別のPSMからも同じ値で出た回数。
+           元の読みの裏付け(support)と同数以上に達したら、対抗馬も互角に
+           裏付けられている「真の同点」であり、対抗馬側が劣っていたかのような
+           表示は誤りになる（実例: "AB0774" が psm8・13 の2回で一致していたのに
+           対し、元の読み"AB0777"もpsm6・7の2回のみで、優劣を判定できる根拠が
+           無かった）。採否の判定自体は変えず（対抗馬が実際に元の読みを上回る
+           証拠は無いため）、診断ログにだけ同点である旨を明示する。 */
+        const altTextSupport = new Map();
         for (const altPsm of RETRY_PSMS) {
           if (altPsm === usePsm) continue;
           const altRes = await OcrProcessor.recognize(inputCanvas, altPsm, onProg, useLang, useWl);
           const altOut = finishText(altRes, region, rule, active, single);
           console.log(`[ocr]   "${region.name}" psm=${altPsm}(再読取) raw=${JSON.stringify(altOut.raw)} `
             + `→ ${JSON.stringify(altOut.text)} valid=${altOut.constraintValid} lengthSuspicious=${altOut.lengthSuspicious} ambiguous=${altOut.ambiguous}`);
-          if (altOut.constraintValid && !altOut.lengthSuspicious && !altOut.ambiguous) { res = altRes; out = altOut; readPsm = altPsm; break; }
+          if (altOut.text === baseText) { support++; continue; }   // 元の読みの裏付けが増えただけ
+          if (altOut.constraintValid && !altOut.lengthSuspicious && !altOut.ambiguous) {
+            const altRaw = String(altOut.raw || '').replace(/\s/g, '');
+            const segmentationOnly = isSubsequenceOf(altRaw, baseRaw);
+            if (segmentationOnly || support < 2) { res = altRes; out = altOut; readPsm = altPsm; break; }
+            const altSupport = (altTextSupport.get(altOut.text) || 0) + 1;
+            altTextSupport.set(altOut.text, altSupport);
+            const tieNote = altSupport >= support
+              ? `（${JSON.stringify(altOut.text)}も${altSupport}回一致しており、優劣を判定できない同点）`
+              : '';
+            console.log(`[ocr]   "${region.name}" psm=${altPsm}(再読取)は不採用: `
+              + `元の読み${JSON.stringify(baseText)}が${support}回一致で裏付けられている一方、`
+              + `${JSON.stringify(altRaw)}は元の生データ${JSON.stringify(baseRaw)}に無い文字を含む`
+              + `（切り出し方の違いではなく字形の解釈違い）ため信用しない${tieNote}`);
+          }
         }
       }
       const { text, raw, constraintValid, lengthSuspicious, ambiguous } = out;

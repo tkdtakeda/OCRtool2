@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
+from collections import OrderedDict
 
 import cv2
 from flask import Flask, jsonify, request, send_from_directory
@@ -39,6 +41,59 @@ _STATIC_EXTS = ('.js', '.css', '.png', '.jpg', '.jpeg', '.svg', '.ico', '.json',
 # 拾う。src="recognizer.js" のような単純な相対参照のみを前提としており、
 # サブフォルダは今のところ無い（index.htmlのscript/link一覧を確認済み）。
 _VERSIONED_ASSET_RE = re.compile(r'(src|href)="([A-Za-z0-9_.\-]+\.(?:js|css))"')
+
+
+# ── 送信済み画像のキャッシュ ──────────────────────────────
+# 1ページの認識では、同じ画像を複数のAPIへ繰り返し送っていた（帳票判定で1〜2回、
+# 位置合わせで2回、罫線除去で1回）。実測では1651x2336のPNGで1回あたり数百msが
+# 「サーバーの実処理の外側」に消えており（診断ログの roundTrip とサーバー[perf]の
+# 差）、その主因が毎回の本文転送だった。そこで一度受け取った画像を id で覚えておき、
+# 2回目以降は id だけで参照できるようにする。
+#
+# クライアントは同じ画像に同じ imageId を付けて送り、初回だけ image 本体を含める。
+# サーバー再起動やLRU押し出しで取りこぼした場合は 'IMAGE_CACHE_MISS' を返し、
+# クライアント側が本体付きで自動的に送り直すため、取り違え・不整合は起きない。
+_IMG_CACHE: OrderedDict[str, object] = OrderedDict()
+# 1ページで同時に必要なのは「元画像」と「傾き補正後」の2枚。一括OCRは2ページを
+# 重ねて走らせる（studio_app.js の BATCH_PIPELINE_DEPTH）ため必要数は4枚だが、
+# 2ページ分のリクエストが交互に届くと、まだ使う画像がLRUで押し出されて
+# IMAGE_CACHE_MISS（＝フル画像の再送）を誘発しうる。押し出し余裕を見て倍の8枚とする。
+# 1枚あたり 1651x2336 のRGBAで約15MBなので、8枚でも約120MB。
+_IMG_CACHE_MAX = 8
+_IMG_CACHE_LOCK = threading.Lock()
+
+
+class _ImageCacheMiss(Exception):
+    """imageId だけ渡されたが、その画像を保持していない。"""
+
+
+def _resolve_image(body: dict):
+    """リクエストから画像を取り出す。image があればそれを復号して imageId で覚え、
+    無ければ imageId でキャッシュを引く。どちらも駄目なら _ImageCacheMiss。
+
+    キャッシュヒット時は複製を返す。呼び出し先が入力を書き換えても、次の参照が
+    汚れた画像を受け取らないようにするため（現状の matcher/processor は入力を
+    書き換えないが、キャッシュ由来であることを意識せずに書ける方が安全で、
+    15MB程度の複製コストは1回の転送より遥かに小さい）。"""
+    key = body.get('imageId')
+    url = body.get('image')
+    if url:
+        rgba = data_url_to_rgba(url)
+        if key:
+            with _IMG_CACHE_LOCK:
+                _IMG_CACHE[key] = rgba
+                _IMG_CACHE.move_to_end(key)
+                while len(_IMG_CACHE) > _IMG_CACHE_MAX:
+                    _IMG_CACHE.popitem(last=False)
+        return rgba, False
+    if key:
+        with _IMG_CACHE_LOCK:
+            hit = _IMG_CACHE.get(key)
+            if hit is not None:
+                _IMG_CACHE.move_to_end(key)
+        if hit is not None:
+            return hit.copy(), True
+    raise _ImageCacheMiss()
 
 
 def _inject_asset_version(html: str) -> str:
@@ -146,7 +201,10 @@ def create_app() -> Flask:
         t0 = time.perf_counter()
         try:
             body = request.get_json(force=True, silent=False) or {}
-            full_rgba = data_url_to_rgba(body['image'])
+            try:
+                full_rgba, from_cache = _resolve_image(body)
+            except _ImageCacheMiss:
+                return jsonify({'results': {}, 'error': 'IMAGE_CACHE_MISS'})
             templates = [
                 {'id': t['id'], 'rgba': data_url_to_rgba(t['image'])}
                 for t in (body.get('templates') or [])
@@ -154,9 +212,12 @@ def create_app() -> Flask:
             angle_range = body.get('angleRange', 2)
             angle_step = body.get('angleStep', 1)
             scale_factors = body.get('scaleFactors') or [1]
+            # 明示的な角度列（段階的な角度探索用。match_all のdocstring参照）
+            angles = body.get('angles') or None
             results = matcher.match_all(
                 full_rgba, templates,
                 angle_range=angle_range, angle_step=angle_step, scale_factors=scale_factors,
+                angles=angles,
             )
             tpl_dims = [(t['rgba'].shape[1], t['rgba'].shape[0]) for t in templates]
             max_tpl = max((w * h, f'{w}x{h}') for w, h in tpl_dims)[1] if tpl_dims else '-'
@@ -167,7 +228,8 @@ def create_app() -> Flask:
             calib_txt = f', calibration={calib:.0f}ms' if calib is not None else ''
             applog.log(f'[perf] /api/match {(time.perf_counter() - t0) * 1000:.0f}ms '
                   f'(templates={len(templates)}, angleRange={angle_range}, angleStep={angle_step}, '
-                  f'scales={len(scale_factors)}, image={full_rgba.shape[1]}x{full_rgba.shape[0]}, '
+                  f'scales={len(scale_factors)}, angles={len(angles) if angles else "range"}, '
+                  f'image={full_rgba.shape[1]}x{full_rgba.shape[0]}{"(キャッシュ)" if from_cache else "(受信)"}, '
                   f'maxTemplate={max_tpl}, cpuCount={os.cpu_count()}, cvThreads={cv2.getNumThreads()}'
                   f'{calib_txt}{_load_hint()})')
             return jsonify({'results': results, 'error': None})
@@ -221,11 +283,22 @@ def create_app() -> Flask:
         t0 = time.perf_counter()
         try:
             body = request.get_json(force=True, silent=False) or {}
-            rgba = data_url_to_rgba(body['image'])
+            try:
+                rgba, from_cache = _resolve_image(body)
+            except _ImageCacheMiss:
+                return jsonify({'images': [], 'error': 'IMAGE_CACHE_MISS'})
             mats = processor.process(rgba, body.get('params') or {})
+            # 認識パイプラインが使うのは最終結果(最後の1枚)だけで、残り3枚
+            # （元画像のコピー・二値化・オーバーレイ）は表示用。認識時は
+            # onlyFinal=true が来るので、フル解像度3枚ぶんのPNG化と転送を丸ごと省く
+            # （実測でこの応答が罫線除去の往復1049msのうちサーバー処理245msを除く
+            #   大半を占めていた。受け取った側も使わずに破棄していた）。
+            only_final = bool(body.get('onlyFinal'))
+            out = mats[-1:] if (only_final and mats) else mats
             applog.log(f'[perf] /api/line-removal {(time.perf_counter() - t0) * 1000:.0f}ms '
-                  f'(image={rgba.shape[1]}x{rgba.shape[0]})')
-            return jsonify({'images': [rgba_to_data_url(m) for m in mats], 'error': None})
+                  f'(image={rgba.shape[1]}x{rgba.shape[0]}{"(キャッシュ)" if from_cache else "(受信)"}, '
+                  f'返却{len(out)}/{len(mats)}枚)')
+            return jsonify({'images': [rgba_to_data_url(m) for m in out], 'error': None})
         except Exception as e:  # noqa: BLE001
             applog.log(f'[perf] /api/line-removal failed after {(time.perf_counter() - t0) * 1000:.0f}ms: {e}')
             return jsonify({'images': [], 'error': str(e)})

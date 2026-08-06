@@ -1,0 +1,28 @@
+{
+  "root": true,
+  "env": { "browser": true, "es2022": true },
+  "parserOptions": { "ecmaVersion": 2022, "sourceType": "script" },
+  "rules": {
+    "no-undef": "error",
+    "no-unused-vars": ["warn", { "args": "none", "varsIgnorePattern": "^(AnchorRoles|CharRuleEditor|CharConstraint|FormDB|DiagLog|DiagViewer|MatcherEngine|OcrProcessor|PdfImport|LineRemovalProcessor|Recognizer|SampleForms|StudioUI|FormVoting)$" }]
+  },
+  "globals": {
+    "AnchorRoles": "readonly",
+    "CharRuleEditor": "readonly",
+    "CharConstraint": "readonly",
+    "FormDB": "readonly",
+    "DiagLog": "readonly",
+    "DiagViewer": "readonly",
+    "MatcherEngine": "readonly",
+    "OcrProcessor": "readonly",
+    "PdfImport": "readonly",
+    "LineRemovalProcessor": "readonly",
+    "Recognizer": "readonly",
+    "SampleForms": "readonly",
+    "StudioUI": "readonly",
+    "FormVoting": "readonly",
+    "UI": "readonly",
+    "pdfjsLib": "readonly",
+    "Encoding": "readonly"
+  }
+}

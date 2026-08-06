@@ -323,10 +323,18 @@ def match_all(
     angle_range: float = 2,
     angle_step: float = 1,
     scale_factors: list[float] | None = None,
+    angles: list[float] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """
     templates: [{"id": str, "rgba": np.ndarray}, ...]
     戻り値: { id: {"score", "angle", "scale", "loc": {"x","y"}} }
+
+    angles を渡すと angle_range/angle_step から角度列を組み立てる代わりに、その
+    角度だけを探索する。呼び出し側が角度探索を複数回に分割するために使う
+    （本関数は全 角度×スケール の中の最大スコアを返すので、角度集合を分割して
+    呼び出し、結果をスコアの大きい方で併合すれば、一度に全角度を探索したのと
+    数学的に同じ結果になる。分割することで「まず0°だけ試し、確信が持てなければ
+    残りの角度も調べる」という段階的な探索が、精度を落とさずに書ける）。
     """
     scale_factors = scale_factors if scale_factors else [1]
     angle_step = max(0.1, angle_step)
@@ -346,7 +354,8 @@ def match_all(
     work_scale = (MAX_WORKING_DIM / long_side) if long_side > MAX_WORKING_DIM else 1.0
     full_gray = _resize_gray(full_gray_full, work_scale) if work_scale < 1 else full_gray_full
 
-    angles = _build_angles(angle_range, angle_step)
+    angles = ([js_round(float(a) * 1000) / 1000 for a in angles]
+              if angles else _build_angles(angle_range, angle_step))
 
     # 1) 角度×スケールぶんの探索画像を先に作る（rotate/resizeは1回数msと軽いので直列でよい）。
     #    scale_tpl=True の組では探索画像を拡大せず、代わりにテンプレ側をf倍に縮小する

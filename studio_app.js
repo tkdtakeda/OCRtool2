@@ -791,9 +791,9 @@
     UI.setPipeline('match', []);
     await new Promise(r => setTimeout(r, 30));
     try {
-      const { decision, scores } = await Recognizer.classify(S.recogCanvas, S.forms, classifyOpts());
+      const { decision, scores, angleSearchSkipped } = await Recognizer.classify(S.recogCanvas, S.forms, classifyOpts());
       logClassifyDecision(decision, scores);
-      S.lastClassify = { decision, scores };
+      S.lastClassify = { decision, scores, angleSearchSkipped };
       UI.setPipeline('decide', ['match']);
       UI.renderDecision(decision, S.forms, {});
       /* 設定パネルを表示し、候補帳票の設定を反映（数値調整・再実行の起点） */
@@ -817,7 +817,38 @@
   function bestAnchorFor(form, scores) {
     let best = { score: -1, angle: 0, loc: { x: 0, y: 0 }, anchorId: null };
     (form.anchors || []).forEach(a => { const r = scores.get(a.id); if (r && r.score > best.score) best = { score: r.score, angle: r.angle, loc: r.loc, anchorId: a.id }; });
+    /* 傾き角の「対抗馬」。この帳票の目印のうち、最良の目印とは違う角度に一致したものが
+       あれば、その中で最良のものの角度を添える。
+
+       傾き角は最良の目印1つの (角度×倍率) の argmax で決まるが、判定は 0° でだけ
+       倍率を余分に探しているぶん 0° に有利で、実際に傾いたページを 0° と誤ることが
+       ある（recognizer.js の lastFormScale の解説を参照）。2026/8/6のp113では
+       「-2°×4 0°×1」と目印の意見が割れ、0°側がわずか0.45対0.44で勝った結果、
+       傾き補正が行われず位置合わせが崩れて金額が"8140"→"8"になった。
+       意見が割れているという事実そのものが、この1点の argmax を鵜呑みにしてはいけない
+       という合図なので、それを対抗馬として位置合わせへ渡す。決着は位置合わせが付ける
+       （prepare の「傾き角の差し替え」を参照）。
+       全ての目印が同じ角度で一致していれば対抗馬は付かず、従来と完全に同じ動作になる。 */
+    let alt = null;
+    (form.anchors || []).forEach(a => {
+      const r = scores.get(a.id);
+      if (!r || a.id === best.anchorId || r.angle === best.angle) return;
+      if (!alt || r.score > alt.score) alt = { score: r.score, angle: r.angle };
+    });
+    if (alt) best.altAngle = alt.angle;
     return best;
+  }
+
+  /* 判定が角度探索を省いていた場合に、位置合わせが崩れたときだけ呼ばれる後詰めの
+     角度探索。ここで初めて全角度を照合し、その帳票にとって最良の角度を返す。
+     （recognizer.js の CLASSIFY_LAZY_MARGIN_MIN と prepare の resolveAngle を参照） */
+  function attachAngleFallback(matchInfo, classifyRes, canvas, forms, form) {
+    if (!classifyRes.angleSearchSkipped) return matchInfo;
+    matchInfo.resolveAngle = async () => {
+      const full = await Recognizer.classify(canvas, forms, { ...classifyOpts(), fullAngleSearch: true });
+      return bestAnchorFor(form, full.scores).angle;
+    };
+    return matchInfo;
   }
 
   /* ── 位置ズレ（スケール不一致）の注意喚起 ─────────────
@@ -900,7 +931,8 @@
     /* 別の帳票に切り替えたときのみ、その帳票の登録設定を読み込む */
     if (S.dbgLoadedFormId !== formId) loadFormIntoDebug(form);
     S.recogFormId = formId;
-    S.recogMatchInfo = bestAnchorFor(form, S.lastClassify.scores);
+    S.recogMatchInfo = attachAngleFallback(
+      bestAnchorFor(form, S.lastClassify.scores), S.lastClassify, S.recogCanvas, S.forms, form);
     $('debugPanel').classList.remove('hidden');
     await doRecognitionRun(effectiveForm());
   }
@@ -1350,6 +1382,10 @@
       formId: form.id, formName: form.name,
       page: page || 1,
       createdAt: Date.now(),
+      /* この結果がどの「実施」に属するか（照合画面での絞り込み用）。
+         単発OCRは実施IDを持たないので、照合側は createdAt の間隔で束ねる。 */
+      runId: (S.ocrRun && S.ocrRun.id) || '',
+      runStartedAt: (S.ocrRun && S.ocrRun.startedAt) || 0,
       sourceThumb: thumbURL(srcCanvas, 90),
       decision: manual ? 'review' : dec.decision,
       confidence: dec.confidence,
@@ -1397,6 +1433,13 @@
       const res = await fetch('/api/diagnostics');
       const json = await res.json();
       parts.push(`--- サーバー (OpenCV ${json.opencvVersion || '?'} / ${json.ocrEngine || '?'} ${json.tesseractVersion || ''} / CPU${json.cpuCount || '?'}) ---`);
+      /* tesserocrを入れたのにpytesseractへフォールバックしたままの場合、理由を
+         診断コピーだけで追えるようにする（サーバーの/api/diagnosticsは既に
+         返しているが、コピー本文に載せていなかったため原因調査のたびにサーバー側を
+         直接確認する必要があった）。 */
+      if (json.ocrEngine === 'pytesseract' && json.tesserocrUnavailableReason) {
+        parts.push(`[health] tesserocrが使われていない理由: ${json.tesserocrUnavailableReason}`);
+      }
       /* 健全なら概ね50〜150ms。これより大きい場合、機械側の要因（他プロセスの負荷・
          サーマルスロットリング等）でこのサーバー全体が遅くなっている可能性が高い。 */
       if (typeof json.calibrationNowMs === 'number') parts.push(`[health] 今の校正値=${json.calibrationNowMs}ms（健全な目安: 50〜150ms）`);
@@ -1446,7 +1489,26 @@
     const thumb = thumbURL(canvas, 120);
     const t0 = performance.now();
     try {
-      const { decision, scores } = await Recognizer.classify(canvas, S.forms, classifyOpts());
+      /* 帳票が指定されている場合、他の帳票の目印まで照合する意味は無い。
+         判定結果は下の useId で捨てられ、実際に使うのは
+         「その帳票の目印のうち最も一致したものの角度と位置」だけだからである
+         （bestAnchorFor はその帳票のアンカーしか参照せず、prepare は角度しか使わない）。
+         目印ごとの照合は互いに独立しているため、対象を1帳票に絞っても
+         得られる目印・角度・位置は全帳票を照合した場合と完全に同じになる。
+         一方コストはテンプレート数に比例するので、判定用アンカーが全帳票で7個・
+         対象帳票に2個なら照合回数はおよそ7分の2まで減る。
+         なお0°打ち切りの判定（CLASSIFY_FAST_CONF_MIN）は、確信度が
+         1位2位差ではなく peak（最も一致した目印のスコア）に支配されるため、
+         対象を絞っても発火する/しないは変わらない（実測: No.3は70%→71%で
+         どちらも発火せず全角度探索のまま、No.2は95%→95%でどちらも0°で確定）。 */
+      const forcedForm = forcedFormId ? S.forms.find(f => f.id === forcedFormId) : null;
+      const classifyForms = forcedForm ? [forcedForm] : S.forms;
+      if (forcedForm) {
+        console.log(`[classify] 帳票が「${forcedForm.name}」に指定されているため、`
+          + `この帳票の目印だけを照合します（全${S.forms.length}帳票ぶんの照合は不要）`);
+      }
+      const classifyRes = await Recognizer.classify(canvas, classifyForms, classifyOpts());
+      const { decision, scores } = classifyRes;
       logClassifyDecision(decision, scores);
       const t1 = performance.now();
       const candId = decision.best && decision.best.formId;
@@ -1455,7 +1517,8 @@
       if (!form) { console.log(`[perf] p${page} classify=${(t1 - t0).toFixed(0)}ms（帳票不一致）`); return { page, decision: decision.decision, formName: '—', fields: [], thumb }; }
       /* 表示用の判定ラベル: 手動指定=指定どおり採用 / 自動=本来の判定を踏襲 */
       const verdict = forcedFormId ? 'accepted' : decision.decision;
-      const res = await Recognizer.runOcr(canvas, form, bestAnchorFor(form, scores), {}, {});
+      const mi = attachAngleFallback(bestAnchorFor(form, scores), classifyRes, canvas, classifyForms, form);
+      const res = await Recognizer.runOcr(canvas, form, mi, {}, {});
       const t2 = performance.now();
       console.log(`[perf] p${page} classify=${(t1 - t0).toFixed(0)}ms runOcr=${(t2 - t1).toFixed(0)}ms total=${(t2 - t0).toFixed(0)}ms fields=${res.fields.length}`);
       if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }
@@ -1495,9 +1558,22 @@
 
   /* 指定範囲のページを順に一括OCR（pageSource = { pages:[n…], total, getPage(n), done() }）。
      大量ページでも 1枚ずつ描画→OCR→破棄するためメモリは一定。中止可能。 */
+  /* ── 実施タイミング（OCRの実行単位）─────────────────────
+     照合画面で「今回OCRした分」だけを見たいという要望への対応。認識結果には
+     createdAt しか無く、同じ帳票を作業日をまたいで何度もOCRすると履歴が積み上がり、
+     70件のつもりが140件（70件×2回）出て、どこまでが今回か分からなくなっていた。
+     一括OCRを開始した時点で1つのIDを振り、そのバッチで保存される全ページに
+     同じIDを持たせて「1回の実施」を識別できるようにする。 */
+  function beginOcrRun() {
+    S.ocrRun = { id: uid(), startedAt: Date.now() };
+    return S.ocrRun;
+  }
+
   async function runBatchPdf(src, opts) {
     if (!S.serverReady) { src.done && src.done(); return UI.toast('サーバーに接続中です', 'warning'); }
     if (!S.forms.length) { src.done && src.done(); return UI.toast('先に帳票を登録してください', 'warning'); }
+    /* 「続きから」の再開は同じ実施の続きなので、実行IDは引き継ぐ */
+    if (!(opts && opts.resuming) || !S.ocrRun) beginOcrRun();
     const posWarnBefore = { ...S.posWarnCounts };   // このバッチ中に増えた件数だけをサマリで報告するため
     const resuming = !!(opts && opts.resuming);
     const priorResults = resuming ? (S.batchResults || []) : [];
@@ -1553,7 +1629,18 @@
     document.addEventListener('visibilitychange', onVisChange);
     UI.setBatchBgWarn(review, document.hidden);   // 開始時点で既にhiddenの場合も反映
 
+    /* 何ページを同時に走らせるか（パイプラインの深さ）。
+       実測（診断ログのserialSum/wall）では、テンプレート照合の区間は既に12コア中
+       11.1コアを使い切っている一方、OCR（pytesseractは1呼び出し=1プロセス=1コア）と
+       罫線除去では11コアが遊び、PDFのラスタライズ中はサーバーが完全に遊休になる。
+       1ページ9025msのうち約2100msがこの「ほぼ遊休」の区間だった。
+       ページを2枚重ねると、あるページのOCR・罫線除去・ラスタライズの裏で
+       別ページの照合が回るため、その遊休が埋まる。
+       深さは2で十分で、3以上にしても照合が詰まっているぶん頭打ちになる一方、
+       中止時に捨てる仕事と画像キャッシュの消費だけが増える。 */
+    const BATCH_PIPELINE_DEPTH = 2;
     let cur = ocrAt(0);                          // 先頭ページのOCRを先行開始
+    let next = BATCH_PIPELINE_DEPTH > 1 ? ocrAt(1) : null;   // ★1ページ目の完了を待たずに2ページ目も開始
     try {
       for (let idx = 0; idx < pages.length; idx++) {
         if (!cur || S.batchCancel) { if (S.batchCancel) cancelled = true; break; }
@@ -1569,7 +1656,11 @@
              放置した際に毎ページこの遅延を踏んで極端に遅くなる原因になり得るため。 */
         }
         const r = await cur.promise;
-        const nextEntry = ocrAt(idx + 1);        // ★先読み: 確認している間に次ページを裏でOCR
+        /* 在庫を1つ繰り上げ、さらに先のページを先行開始する。
+           BATCH_PIPELINE_DEPTH=1 のときは従来どおり「1つ先だけ先読み」（＝確認・保存の
+           あいだに次ページを裏でOCR）になり、挙動は完全に元のままになる。 */
+        if (BATCH_PIPELINE_DEPTH > 1) { cur = next; next = ocrAt(idx + BATCH_PIPELINE_DEPTH); }
+        else { cur = ocrAt(idx + 1); }
         /* review: OCR結果を1ページずつ写真と見比べ→修正→確認してから保存。
            「残りは信頼して照合へ」(Shift+Enter)が押された後は、このスキップ判定により
            以降のページはOCR結果をそのまま採用し、確認カルーセルは出さない。 */
@@ -1579,7 +1670,6 @@
         }
         await persistBatchRecord(r);
         results.push(r);
-        cur = nextEntry;
       }
     } finally {
       document.removeEventListener('visibilitychange', onVisChange);
@@ -1780,8 +1870,10 @@
     UI.renderHistory(results, { onDelete: async id => { await FormDB.deleteResult(id); refreshHistory(); } });
   }
   async function clearHistory() {
-    if (!confirm('認識履歴をすべて削除しますか？')) return;
-    await FormDB.clearResults(); refreshHistory(); UI.toast('履歴を削除しました', 'info');
+    /* 消えるのは認識履歴だけで、保存済みの照合結果（reconciles）は別ストアに残る。
+       消える範囲を明示しないと「照合結果も消えた」と誤解される。 */
+    if (!confirm('認識履歴をすべて削除しますか？\n（保存済みの照合結果は削除されません。「過去の照合結果」から引き続き参照できます）')) return;
+    await FormDB.clearResults(); refreshHistory(); UI.toast('認識履歴を削除しました（保存済みの照合結果は残っています）', 'info', 4000);
   }
 
   /* ════════════════════════════════════════════════════
@@ -2134,8 +2226,65 @@
     rows.forEach(r => { const id = r.formId || ''; if (!seen.has(id)) seen.set(id, { id, name: r.formName || '(不明な帳票)', count: 0 }); seen.get(id).count++; });
     return [...seen.values()];
   }
+  /* 認識結果を「実施タイミング」ごとに束ねる。
+     runId を持つ結果（一括OCR）はそのIDで束ねる。持たない古い結果や単発OCRは、
+     createdAt の間隔で切る（1回の一括OCRはページ間が数秒〜十数秒なのに対し、
+     別の実施との間は分〜日単位で空く。その中間として3分を境目にする）。
+     戻り値は新しい実施が先頭。 */
+  const REC_RUN_GAP_MS = 3 * 60 * 1000;
+  function recRunList(rows) {
+    const sorted = [...rows].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    const runs = [];
+    let cur = null;
+    for (const r of sorted) {
+      const rid = r.runId || '';
+      const t = r.createdAt || 0;
+      const sameRun = cur && (rid
+        ? cur.runId === rid
+        : (!cur.runId && Math.abs(cur.oldest - t) <= REC_RUN_GAP_MS));
+      if (!sameRun) { cur = { runId: rid, newest: t, oldest: t, rows: [] }; runs.push(cur); }
+      cur.rows.push(r);
+      cur.oldest = Math.min(cur.oldest || t, t);
+      cur.newest = Math.max(cur.newest || t, t);
+    }
+    return runs;
+  }
+  /* 実施タイミングの選択肢を作り直す。1件しか無ければ行ごと隠す（従来の見た目のまま）。 */
+  function recRebuildRunFilter() {
+    const runs = recRunList(S.rec.allRows || []);
+    S.rec.runs = runs;
+    const row = $('recRunRow'), sel = $('recRunFilter');
+    if (!row || !sel) return;
+    if (runs.length <= 1) { row.classList.add('hidden'); S.rec.runKey = ''; return; }
+    row.classList.remove('hidden');
+    sel.innerHTML = '';
+    runs.forEach((run, i) => {
+      const o = document.createElement('option');
+      o.value = String(i);
+      const when = new Date(run.newest).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      o.textContent = `${when}（${run.rows.length}件）${i === 0 ? ' ← 最新' : ''}`;
+      sel.appendChild(o);
+    });
+    const allOpt = document.createElement('option');
+    allOpt.value = '';
+    allOpt.textContent = `すべての実施（${(S.rec.allRows || []).length}件）`;
+    sel.appendChild(allOpt);
+    /* 既定は最新の実施。「70件のつもりが過去の分まで出た」という取り違えを防ぐため、
+       黙って全件を対象にはしない（全件を見たい場合は明示的に選ぶ）。 */
+    sel.value = '0';
+    S.rec.runKey = '0';
+  }
+  /* 実施の絞り込みを適用した行を返す（未選択＝すべて）。 */
+  function recRowsForRun() {
+    const all = S.rec.allRows || [];
+    const key = S.rec.runKey;
+    if (key === '' || key == null) return all;
+    const run = (S.rec.runs || [])[Number(key)];
+    return run ? run.rows : all;
+  }
   function recRebuildOcrSide(formId) {
-    const rows = formId ? S.rec.allRows.filter(r => (r.formId || '') === formId) : S.rec.allRows;
+    const base = recRowsForRun();
+    const rows = formId ? base.filter(r => (r.formId || '') === formId) : base;
     const cols = [];
     /* 複数帳票をまたいだ照合キーの統一のため、帳票固有の項目名(name)ではなく
        帳票編集で設定できる共通名(globalName)を列のキーにする
@@ -2177,15 +2326,30 @@
   async function openReconcile() {
     let rows = [];
     try { rows = await FormDB.getAllResults(100000); } catch (_) {}
-    if (!rows.length) return UI.toast('照合する認識結果がありません（先にOCRを実行）', 'warning');
-    const forms = recFormList(rows);
+    if (!rows.length) {
+      /* 認識結果が無いと照合そのものは実行できないが、ここで引き返してはいけない。
+         保存済みの照合結果は認識履歴とは別のストアに残っており、それを開くボタンは
+         このモーダルのフッターにしか無い。認識履歴を削除した直後にここで止めると、
+         残っている過去の照合結果に永久に辿り着けなくなる（実際にそうなった）。
+         照合履歴があるならそちらへ案内する。 */
+      let saved = [];
+      try { saved = await FormDB.getAllReconciles(1); } catch (_) {}
+      if (saved.length) {
+        UI.toast('照合する認識結果がありません（先にOCRを実行）。保存済みの照合結果はそのまま残っているので表示します', 'info', 5000);
+        return openReconcileHist();
+      }
+      return UI.toast('照合する認識結果がありません（先にOCRを実行）', 'warning');
+    }
     S.rec = { allRows: rows, ext: null, result: null };
+    recRebuildRunFilter();            // 実施タイミングを先に決める（既定=最新の実施）
+    /* 帳票の選択肢は、選ばれている実施の中身から作る（件数もその実施の件数になる） */
+    const forms = recFormList(recRowsForRun());
     const row = $('recFormRow'), sel = $('recFormFilter');
     if (forms.length > 1) {
       row.classList.remove('hidden');
       sel.innerHTML = '';
       forms.forEach(f => { const o = document.createElement('option'); o.value = f.id; o.textContent = `${f.name}（${f.count}件）`; sel.appendChild(o); });
-      const allOpt = document.createElement('option'); allOpt.value = ''; allOpt.textContent = `すべての帳票（${rows.length}件・共通名(任意)を設定した項目はまとめて照合できます）`;
+      const allOpt = document.createElement('option'); allOpt.value = ''; allOpt.textContent = `すべての帳票（${recRowsForRun().length}件・共通名(任意)を設定した項目はまとめて照合できます）`;
       sel.appendChild(allOpt);
       /* 既定は「すべての帳票」。以前は最新の結果が属する帳票だけに絞っていたが、
          帳票を編集・再保存するとformIdが変わり別集計になることがあり、30件OCRした
@@ -2198,6 +2362,10 @@
     }
     recRebuildOcrSide('');
     recFill('recExtKey', []); recFill('recExtVal', ['(なし)']);
+    /* 比較データはモーダルを開くたびに空から始まるので、①は開いた状態に戻す
+       （読み込みが済んだ時点で recCollapseStep1 が畳む）。 */
+    if ($('recStep1')) $('recStep1').open = true;
+    if ($('recStep1Ttl')) $('recStep1Ttl').textContent = '① 比較データを読み込む（貼り付け / ファイル）';
     if (S.recLastSettings) {
       $('recNumeric').checked = !!S.recLastSettings.numeric;
       $('recAutoBlank').checked = !!S.recLastSettings.autoRemoveBlankRows;
@@ -2283,6 +2451,15 @@
     renderRecPreview(header, data);
     $('recPreviewInfo').textContent = `${data.length} 行 × ${header.length} 列を読み込みました`;
     $('recPreviewExpand').disabled = false;
+    recCollapseStep1(data.length, header.length);
+  }
+  /* 読み込みが済んだら①を畳み、②③をスクロール無しで扱えるようにする。
+     畳んだままでも中身が分かるよう、見出しに件数を出す（再度開けば貼り付け欄・
+     プレビューはそのまま残っている）。 */
+  function recCollapseStep1(rows, cols) {
+    const d = $('recStep1'), t = $('recStep1Ttl');
+    if (t) t.textContent = `① 比較データ（${rows} 行 × ${cols} 列 読み込み済み・クリックで開く）`;
+    if (d) d.open = false;
   }
   /* 外部側キー/値は、設定カードのドロップダウンだけでなく、この列見出しの
      🔑/＝ボタンをクリックしても選べるようにする（テーブルを見ながら直感的に選べるように）。 */
@@ -2762,6 +2939,21 @@
     /* 照合（OCR結果 × 外部データ） */
     $('btnReconcile').addEventListener('click', openReconcile);
     $('recFormFilter').addEventListener('change', e => recRebuildOcrSide(e.target.value));
+    /* 実施タイミングを変えたら、帳票の選択肢（件数）とOCR側を作り直す。
+       選ばれていた帳票がその実施に無ければ「すべての帳票」に戻す。 */
+    $('recRunFilter').addEventListener('change', e => {
+      S.rec.runKey = e.target.value;
+      const forms = recFormList(recRowsForRun());
+      const sel = $('recFormFilter'), prev = sel.value;
+      sel.innerHTML = '';
+      forms.forEach(f => { const o = document.createElement('option'); o.value = f.id; o.textContent = `${f.name}（${f.count}件）`; sel.appendChild(o); });
+      const allOpt = document.createElement('option'); allOpt.value = '';
+      allOpt.textContent = `すべての帳票（${recRowsForRun().length}件・共通名(任意)を設定した項目はまとめて照合できます）`;
+      sel.appendChild(allOpt);
+      $('recFormRow').classList.toggle('hidden', forms.length <= 1);
+      sel.value = forms.some(f => f.id === prev) ? prev : '';
+      recRebuildOcrSide(sel.value);
+    });
     $('recOcrKey').addEventListener('change', updateRecOcrSamples);
     $('recOcrVal').addEventListener('change', updateRecOcrSamples);
     $('btnRecApplyPreset').addEventListener('click', applyRecPreset);
@@ -2784,6 +2976,9 @@
     $('recResultBack').addEventListener('click', closeReconcileResult);     // 設定に戻る
     $('reconcileResultModal').addEventListener('click', e => { if (e.target === $('reconcileResultModal')) closeReconcileResult(); });
     $('recHistBtn').addEventListener('click', openReconcileHist);
+    /* 認識履歴パネル側の入口。認識履歴を削除しても照合結果へ辿り着けるようにするため、
+       照合モーダルを経由しない独立した経路として持たせる。 */
+    $('btnRecHistDirect').addEventListener('click', openReconcileHist);
     $('recHistClose').addEventListener('click', closeReconcileHist);
     $('recHistCloseBtn').addEventListener('click', closeReconcileHist);
     $('recHistModal').addEventListener('click', e => { if (e.target === $('recHistModal')) closeReconcileHist(); });
