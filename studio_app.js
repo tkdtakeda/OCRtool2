@@ -817,6 +817,25 @@
   function bestAnchorFor(form, scores) {
     let best = { score: -1, angle: 0, loc: { x: 0, y: 0 }, anchorId: null };
     (form.anchors || []).forEach(a => { const r = scores.get(a.id); if (r && r.score > best.score) best = { score: r.score, angle: r.angle, loc: r.loc, anchorId: a.id }; });
+    /* 傾き角の「対抗馬」。この帳票の目印のうち、最良の目印とは違う角度に一致したものが
+       あれば、その中で最良のものの角度を添える。
+
+       傾き角は最良の目印1つの (角度×倍率) の argmax で決まるが、判定は 0° でだけ
+       倍率を余分に探しているぶん 0° に有利で、実際に傾いたページを 0° と誤ることが
+       ある（recognizer.js の lastFormScale の解説を参照）。2026/8/6のp113では
+       「-2°×4 0°×1」と目印の意見が割れ、0°側がわずか0.45対0.44で勝った結果、
+       傾き補正が行われず位置合わせが崩れて金額が"8140"→"8"になった。
+       意見が割れているという事実そのものが、この1点の argmax を鵜呑みにしてはいけない
+       という合図なので、それを対抗馬として位置合わせへ渡す。決着は位置合わせが付ける
+       （prepare の「傾き角の差し替え」を参照）。
+       全ての目印が同じ角度で一致していれば対抗馬は付かず、従来と完全に同じ動作になる。 */
+    let alt = null;
+    (form.anchors || []).forEach(a => {
+      const r = scores.get(a.id);
+      if (!r || a.id === best.anchorId || r.angle === best.angle) return;
+      if (!alt || r.score > alt.score) alt = { score: r.score, angle: r.angle };
+    });
+    if (alt) best.altAngle = alt.angle;
     return best;
   }
 

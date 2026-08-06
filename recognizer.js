@@ -1126,6 +1126,8 @@ const Recognizer = (() => {
      真の倍率は後段の細探索(fineScalesAround)と、複数アンカーの相対位置
      (estimateTransform) で詰める。 */
   const LOCALIZE_SCALES = [0.6, 0.71, 0.85, 1.0, 1.19, 1.42, 1.68, 2.0];
+  /* このスコア以上の一致を「信頼できる対応点」として相似変換の推定に使う。 */
+  const LOCALIZE_GOOD_SCORE = 0.4;
   /* 暫定倍率の周辺を細かく探索（±9%を3%刻み）。粗ステップの隙間を埋め、単一アンカー
      でも位置精度を確保する。複数アンカーがあれば相対位置でさらに精密化される。 */
   const fineScalesAround = s => [0.91, 0.94, 0.97, 1.0, 1.03, 1.06, 1.09]
@@ -1170,12 +1172,26 @@ const Recognizer = (() => {
      確定させた倍率を帳票ごとに覚えておき、次のページの判定で候補に加える。
 
      これは「前のページと同じ帳票だろう」と決め打つ類の推測ではない。増やすのは
-     探索する倍率の候補が1つだけで、何も決定しない。照合は候補の中の最大を返し、
-     併合も最大を取るため、ヒントが外れてもスコアが上がらないだけで、従来どおり
-     隙間埋め→全角度探索へ落ちる。探索空間が広がるだけなので精度が下がることは
-     原理的に無い（縦横比フィルタや隙間埋めと同じ「上位集合」の理屈）。
+     探索する倍率の候補が1つだけで、どの帳票かを決める処理には触れていない。照合は
+     候補の中の最大を返し、併合も最大を取るため、ヒントが外れてもスコアが上がらない
+     だけで、従来どおり全角度探索へ落ちる。
      ヒントは段階1（0°×粗グリッド）に混ぜる。当たれば1回目の照合でそのまま
-     確定でき、往復を増やさずに済むため。 */
+     確定でき、往復を増やさずに済むため。
+
+     ※ 副作用がひとつある。倍率のヒントも隙間埋めも0°でしか探さないため、
+     0°だけ細かい倍率グリッドで探したことになり、「どの角度が正しいか」の比較が
+     0°に有利に傾く。傾き角は最良アンカーの (角度×倍率) の argmax 1点で決まるので、
+     0°にだけ正解の倍率があると、実際に傾いているページでも0°が僅差で勝ってしまう。
+     スコアは「候補が増える＝下がらない」が、argmax は候補を増やした側へ動く。
+     2026/8/6のp113で実際に起きた（0°×1.06=0.45 対 -2°×粗グリッド=0.44 で0°が勝ち、
+     傾き補正されずに位置合わせが4点中3点除外→金額欄が"8140"→"8"）。
+     グリッドを揃えて解決しようとすると別の問題が出る。正解の倍率がどの角度の
+     グリッドにも無い場合、角度のargmaxは単なるノイズになり、実測でも「まっすぐで
+     倍率1.06のページ」が粗グリッドだけの比較では-1°と判定された。粗グリッドも
+     ヒント入りグリッドも、角度を決める物差しとしては単独では信用できない。
+     そこで角度は判定側で決め切らず、目印どうしで意見が割れたときの対抗馬
+     (matchInfo.altAngle) を添えて位置合わせへ渡し、位置合わせが崩れたときだけ
+     差し替える（prepare の「傾き角の差し替え」を参照）。 */
   const lastFormScale = new Map();
   /* 既にグリッドにある倍率とこれだけ近ければ、候補に足しても意味が無いので省く。 */
   const SCALE_HINT_DUP_TOL = 0.01;
@@ -1320,7 +1336,9 @@ const Recognizer = (() => {
     }
     const restScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: rest, scaleFactors, image: imageRef });
     const scores = mergeScores(baseScores, restScores);
-    return { decision: FormVoting.decide(forms, scores, opts.voting || {}), scores };
+    const decision = FormVoting.decide(forms, scores, opts.voting || {});
+
+    return { decision, scores };
   }
 
   /**
@@ -1344,8 +1362,8 @@ const Recognizer = (() => {
 
     /* ③ 傾き補正 */
     stage('傾き補正', 0.1);
-    const angle = matchInfo.angle || 0;
-    const rotated = await LineRemovalProcessor.rotateCanvas(sourceCanvas, angle);
+    let angle = matchInfo.angle || 0;
+    let rotated = await LineRemovalProcessor.rotateCanvas(sourceCanvas, angle);
     const tRotate = performance.now();
 
     /* ④ 原点の再ローカライズ: 位置合わせに使うアンカーを角度固定で再マッチ → 相似変換を
@@ -1356,14 +1374,16 @@ const Recognizer = (() => {
        （判定を良くしようと目印を足したら位置合わせがずれる、という形で実際に現れる）。 */
     stage('原点の確定', 0.25);
     const anchors = (form.anchors || []).filter(AnchorRoles.usedForAlign);
-    const allMatches = [];
+    let allMatches = [];
     /* 傾き補正後の画像の参照（照合2回＋罫線除去で共用。本体の送信は初回のみ）。
        アンカーが無い等でローカライズを飛ばした場合は null のままで、
        罫線除去側が自前で用意する。 */
     let rotatedRef = null;
+    /* アンカー画像のデコードは1度だけ（傾き角をやり直す場合も同じものを使い回す）。 */
+    let tpls = [], tplList = [];
     try {
-      const tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, dataURL: a.dataURL, imageElement: await dataURLtoImg(a.dataURL) })));
-      const tplList = tpls.map(t => ({ id: t.id, dataURL: t.dataURL, imageElement: t.imageElement }));
+      tpls = await Promise.all(anchors.map(async a => ({ id: a.id, a, dataURL: a.dataURL, imageElement: await dataURLtoImg(a.dataURL) })));
+      tplList = tpls.map(t => ({ id: t.id, dataURL: t.dataURL, imageElement: t.imageElement }));
       /* 傾き補正後の画像は、この下の粗探索・細探索・（呼び出し元での）罫線除去で
          まったく同じものを使う。canvas→PNG圧縮はブラウザ側で重く、実測では
          サーバーの実処理の外側に1ページあたり約1.8秒（全体の24%）が消えていた。
@@ -1371,6 +1391,52 @@ const Recognizer = (() => {
       const tEnc0 = performance.now();
       rotatedRef = newImageRef(rotated);
       console.log(`[perf]   傾き補正後の画像をPNG化(この後3回分を1回で共用・送信も1回): ${(performance.now() - tEnc0).toFixed(0)}ms`);
+      allMatches = await localizeOn(rotated, rotatedRef);
+
+      /* 傾き角の差し替え。判定が渡してきた角度で位置合わせが成立しなかった場合に限り、
+         対抗馬(altAngle)でもう一度だけ試し、良かった方を採る。
+
+         判定側の角度は 0° に有利な条件で選ばれており、実際に傾いたページを 0° と
+         誤ることがある（classifyのaltAngleの解説を参照）。一方こちらの位置合わせは
+         0.6〜2.0の全域を粗→細で探すので真の倍率が見え、角度が合っているかどうかが
+         スコアに素直に出る。2026/8/6のp113では、正しい角度なら0.78/0.76/0.69/0.57の
+         4点が揃い、誤った角度では0.53/0.37/0.36/0.28で1点しか残らなかった。
+         この差は大きく、取り違える余地が無い。
+
+         発火条件を「信頼できる対応点が2点未満」に絞っているため、位置合わせが
+         成立している限りこの処理は動かず、既に正しく読めているページの結果は
+         一切変わらない。同じログの他ページはいずれも3〜4点が揃っている。
+         アンカーが1つしかない帳票は2点を満たしようが無いので対象外。 */
+      const strongCount = ms => ms.filter(p => p.score >= LOCALIZE_GOOD_SCORE).length;
+      if (matchInfo.altAngle != null && matchInfo.altAngle !== angle
+          && anchors.length >= 2 && strongCount(allMatches) < 2) {
+        console.log(`[align] ${angle}°では信頼できる目印が${strongCount(allMatches)}点しか取れませんでした`
+          + `（${anchors.length}点中）→ 対抗馬の傾き角${matchInfo.altAngle}°でも試します`);
+        const altCanvas = await LineRemovalProcessor.rotateCanvas(sourceCanvas, matchInfo.altAngle);
+        const altRef = newImageRef(altCanvas);
+        const altMatches = await localizeOn(altCanvas, altRef);
+        if (strongCount(altMatches) > strongCount(allMatches)) {
+          console.log(`[align] 傾き角を${angle}°→${matchInfo.altAngle}°に差し替えました`
+            + `（信頼できる目印 ${strongCount(allMatches)}点 → ${strongCount(altMatches)}点）`);
+          angle = matchInfo.altAngle; rotated = altCanvas; rotatedRef = altRef; allMatches = altMatches;
+        } else {
+          console.log(`[align] 対抗馬の${matchInfo.altAngle}°でも改善しなかったため`
+            + `（信頼できる目印 ${strongCount(altMatches)}点）${angle}°のまま続行します`);
+        }
+      }
+    } catch (e) {
+      /* 失敗時は恒等変換（＝位置合わせ無し）で先へ進む。ただし黙って落ちてはいけない。
+         v.2026-08-04.6 で、この catch が実装ミス（ブロックスコープ外の変数を参照した
+         ReferenceError）を丸ごと飲み込み、全ページが恒等変換のままOCRされて位置が
+         総崩れになった（不一致3件・該当なし17件）。処理は続けても、原因が分かる形で
+         必ず記録する。恒等変換で進むと切り出しが帳票の実際のズレぶん外れるため、
+         「速いのに結果だけおかしい」という最も気付きにくい壊れ方をする。 */
+      console.error(`[align] 位置合わせに失敗したため恒等変換（補正なし）で続行します: ${e && e.stack ? e.stack : e}`);
+    }
+
+    /** 傾き補正済みの画像1枚について、粗→細の倍率探索で対応点の一覧を返す。 */
+    async function localizeOn(canvas, ref) {
+      const matches = [];
       /* 粗→細のスケール探索で「拡大・縮小された帳票」を正しく捉える。
          ① 粗く広い範囲(0.6〜2.0)で各アンカーを個別に探索。
          ② 各アンカー自身の暫定倍率(①の自己ベスト)の周辺(±9%)を、アンカーごとに
@@ -1396,15 +1462,15 @@ const Recognizer = (() => {
          消えていたのが動かぬ証拠）。段階化そのものの是非は未検証のまま残るため、
          100%正解が確認できているこの粗→細の手順へ戻す。速度は角度探索の2段階化と
          画像キャッシュで確保できており、ここは精度を優先する。 */
-      const coarse = await MatcherEngine.matchAll(rotated, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES, image: rotatedRef });
+      const coarse = await MatcherEngine.matchAll(canvas, tplList,
+        { angleRange: 0, angleStep: 1, scaleFactors: LOCALIZE_SCALES, image: ref });
       const fineScaleUnion = new Set();
       tpls.forEach(t => {
         const rc = coarse.get(t.id);
         fineScalesAround(rc ? (rc.scale || 1) : 1).forEach(s => fineScaleUnion.add(s));
       });
-      const fine = await MatcherEngine.matchAll(rotated, tplList,
-        { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b), image: rotatedRef });
+      const fine = await MatcherEngine.matchAll(canvas, tplList,
+        { angleRange: 0, angleStep: 1, scaleFactors: Array.from(fineScaleUnion).sort((a, b) => a - b), image: ref });
       /* 診断用ログ: 各アンカーが自身の粗探索ベストの近傍をどれだけ細探索で改善できたか。
          もし依然としてアンカー間で粗ベストの倍率が大きく食い違っているなら、
          それはこの探索範囲の問題ではなく、そのアンカー自体の識別性・画像品質の
@@ -1421,29 +1487,23 @@ const Recognizer = (() => {
         const r = (rf && (!rc || rf.score >= rc.score)) ? rf : rc;   // 粗・細で高スコア側を採用
         if (!r) return;
         const f = r.scale || 1;
-        allMatches.push({
+        matches.push({
           name: t.a.name || '',
           refX: (t.a.refX || 0) + t.a.w / 2, refY: (t.a.refY || 0) + t.a.h / 2,         // 基準中心
           inX:  r.loc.x + t.a.w * f / 2,     inY:  r.loc.y + t.a.h * f / 2,             // 入力中心（スケール考慮）
           score: r.score, scale: f,
         });
       });
-      allMatches.sort((a, b) => b.score - a.score);
-    } catch (e) {
-      /* 失敗時は恒等変換（＝位置合わせ無し）で先へ進む。ただし黙って落ちてはいけない。
-         v.2026-08-04.6 で、この catch が実装ミス（ブロックスコープ外の変数を参照した
-         ReferenceError）を丸ごと飲み込み、全ページが恒等変換のままOCRされて位置が
-         総崩れになった（不一致3件・該当なし17件）。処理は続けても、原因が分かる形で
-         必ず記録する。恒等変換で進むと切り出しが帳票の実際のズレぶん外れるため、
-         「速いのに結果だけおかしい」という最も気付きにくい壊れ方をする。 */
-      console.error(`[align] 位置合わせに失敗したため恒等変換（補正なし）で続行します: ${e && e.stack ? e.stack : e}`);
+      matches.sort((a, b) => b.score - a.score);
+      return matches;
     }
+
     if (!allMatches.length) {
       console.warn('[align] 目印の一致が1件も得られませんでした。OCR領域は基準座標のまま切り出されるため、'
         + '帳票のズレぶん位置がずれます（上のエラー、または目印の登録内容を確認してください）');
     }
     /* 信頼できる一致(>=0.4)で相似変換を推定。無ければ最良1点で best-effort */
-    const good = allMatches.filter(p => p.score >= 0.4);
+    const good = allMatches.filter(p => p.score >= LOCALIZE_GOOD_SCORE);
     let transform;
     if (good.length >= 1)        transform = estimateTransform(good);
     else if (allMatches.length)  transform = estimateTransform([allMatches[0]]);
