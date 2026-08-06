@@ -791,9 +791,9 @@
     UI.setPipeline('match', []);
     await new Promise(r => setTimeout(r, 30));
     try {
-      const { decision, scores } = await Recognizer.classify(S.recogCanvas, S.forms, classifyOpts());
+      const { decision, scores, angleSearchSkipped } = await Recognizer.classify(S.recogCanvas, S.forms, classifyOpts());
       logClassifyDecision(decision, scores);
-      S.lastClassify = { decision, scores };
+      S.lastClassify = { decision, scores, angleSearchSkipped };
       UI.setPipeline('decide', ['match']);
       UI.renderDecision(decision, S.forms, {});
       /* 設定パネルを表示し、候補帳票の設定を反映（数値調整・再実行の起点） */
@@ -837,6 +837,18 @@
     });
     if (alt) best.altAngle = alt.angle;
     return best;
+  }
+
+  /* 判定が角度探索を省いていた場合に、位置合わせが崩れたときだけ呼ばれる後詰めの
+     角度探索。ここで初めて全角度を照合し、その帳票にとって最良の角度を返す。
+     （recognizer.js の CLASSIFY_LAZY_MARGIN_MIN と prepare の resolveAngle を参照） */
+  function attachAngleFallback(matchInfo, classifyRes, canvas, forms, form) {
+    if (!classifyRes.angleSearchSkipped) return matchInfo;
+    matchInfo.resolveAngle = async () => {
+      const full = await Recognizer.classify(canvas, forms, { ...classifyOpts(), fullAngleSearch: true });
+      return bestAnchorFor(form, full.scores).angle;
+    };
+    return matchInfo;
   }
 
   /* ── 位置ズレ（スケール不一致）の注意喚起 ─────────────
@@ -919,7 +931,8 @@
     /* 別の帳票に切り替えたときのみ、その帳票の登録設定を読み込む */
     if (S.dbgLoadedFormId !== formId) loadFormIntoDebug(form);
     S.recogFormId = formId;
-    S.recogMatchInfo = bestAnchorFor(form, S.lastClassify.scores);
+    S.recogMatchInfo = attachAngleFallback(
+      bestAnchorFor(form, S.lastClassify.scores), S.lastClassify, S.recogCanvas, S.forms, form);
     $('debugPanel').classList.remove('hidden');
     await doRecognitionRun(effectiveForm());
   }
@@ -1494,7 +1507,8 @@
         console.log(`[classify] 帳票が「${forcedForm.name}」に指定されているため、`
           + `この帳票の目印だけを照合します（全${S.forms.length}帳票ぶんの照合は不要）`);
       }
-      const { decision, scores } = await Recognizer.classify(canvas, classifyForms, classifyOpts());
+      const classifyRes = await Recognizer.classify(canvas, classifyForms, classifyOpts());
+      const { decision, scores } = classifyRes;
       logClassifyDecision(decision, scores);
       const t1 = performance.now();
       const candId = decision.best && decision.best.formId;
@@ -1503,7 +1517,8 @@
       if (!form) { console.log(`[perf] p${page} classify=${(t1 - t0).toFixed(0)}ms（帳票不一致）`); return { page, decision: decision.decision, formName: '—', fields: [], thumb }; }
       /* 表示用の判定ラベル: 手動指定=指定どおり採用 / 自動=本来の判定を踏襲 */
       const verdict = forcedFormId ? 'accepted' : decision.decision;
-      const res = await Recognizer.runOcr(canvas, form, bestAnchorFor(form, scores), {}, {});
+      const mi = attachAngleFallback(bestAnchorFor(form, scores), classifyRes, canvas, classifyForms, form);
+      const res = await Recognizer.runOcr(canvas, form, mi, {}, {});
       const t2 = performance.now();
       console.log(`[perf] p${page} classify=${(t1 - t0).toFixed(0)}ms runOcr=${(t2 - t1).toFixed(0)}ms total=${(t2 - t0).toFixed(0)}ms fields=${res.fields.length}`);
       if (res.error) { LineRemovalProcessor.cleanupMats(res.previewMats); return { page, decision: 'error', formName: form.name, error: res.error, thumb }; }

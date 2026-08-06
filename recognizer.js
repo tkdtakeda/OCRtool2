@@ -1154,6 +1154,36 @@ const Recognizer = (() => {
   const CLASSIFY_FAST_CONF_MIN   = 0.90;
   const CLASSIFY_FAST_MARGIN_MIN = 0.20;
 
+  /* 角度探索を「必要になってから」に遅らせる。
+     ±2°の角度探索（残り4角度＝照合60回）はサーバー実処理の24%（実測1181ms/ページ）を
+     占めるが、2026/8/6の670ページで実際に0°以外が選ばれたのは1ページだけだった。
+     そこで、帳票がすでに確定していれば角度は0°と仮置きして先へ進め、位置合わせが
+     成立しなかったときに初めて角度探索を実行する（prepare の resolveAngle）。
+
+     安全性の根拠は2つある。
+     ① 打ち切るのは判定が accepted かつ1位2位差が0.20以上のときだけ。voting.jsの
+        採用条件から逆算すると、これは peak が最低でも0.60（差0.20ちょうどなら0.667）
+        あることを意味する。実照合エンジンでの実測では、正しい倍率で0°照合したときの
+        peak は 傾き0°で0.862、0.5°で0.719、1.0°で0.602、1.5°で0.426、2.0°で0.349 と
+        急激に落ちる。つまり accepted に届く時点で、残っている傾きはおよそ1°未満に
+        限られる。実際、傾き2°だったp113は0°でのpeakが0.45しか無く判定はreviewで、
+        この打ち切りには最初から掛からない。
+     ② 仮に外しても、位置合わせが受け止める。位置合わせは0.6〜2.0の全域を粗→細で
+        探すうえ、目印が細長い（実測 930x101 や 621x77）ぶん角度に極めて敏感で、
+        角度が違えば対応点が揃わない（p113実測で 4点0.57〜0.78 対 1点）。
+        信頼できる対応点が2点未満なら、そこで角度探索を実行してやり直す。
+
+     つまり「速い方に賭けて、外れたら測って直す」形にしてある。賭けに勝てば60回の
+     照合が丸ごと不要になり、負けても1ページぶん余分に時間が掛かるだけで結果は変わらない。 */
+  const CLASSIFY_LAZY_MARGIN_MIN = 0.20;
+  /* 打ち切ってよい peak の下限。上の①で「accepted なら peak は0.60以上」と書いたが、
+     それは voting.js の確信度の式から逆算した結果であって、式が変われば崩れる。
+     依存したい性質（＝傾きが1°未満に限られる）はここで明示的に持たせる。
+     加えて、照合対象が1帳票しか無いとき（帳票を指定した一括OCR、縦横比フィルタで
+     1件に絞られた場合）は次点が存在せず 1位2位差＝peak になるため、上の
+     CLASSIFY_LAZY_MARGIN_MIN が実質的に効かなくなる。その状況でも下限を保証する。 */
+  const CLASSIFY_LAZY_PEAK_MIN = 0.60;
+
   /* 同じ画像を複数のAPIへ送るための参照。初回だけ本体を送り、以降はidだけで
      サーバー側が保持している画像を参照する（app.py の _resolve_image）。
      実測で、往復時間のうちサーバー実処理を除いた大半が本文転送だった
@@ -1227,6 +1257,14 @@ const Recognizer = (() => {
     return out;
   }
 
+  /** 角度探索を省いて先へ進んでよいか（CLASSIFY_LAZY_PEAK_MIN の解説を参照）。 */
+  function canSkipAngleSearch(d, opts) {
+    return !opts.fullAngleSearch
+      && d.decision === 'accepted'
+      && d.margin >= CLASSIFY_LAZY_MARGIN_MIN
+      && !!d.best && d.best.peak >= CLASSIFY_LAZY_PEAK_MIN;
+  }
+
   /** 2つの照合結果を「スコアの高い方」で併合する（角度集合を分割したぶんを統合）。 */
   function mergeScores(a, b) {
     const out = new Map(a);
@@ -1295,12 +1333,15 @@ const Recognizer = (() => {
     }
     const fastScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: [0], scaleFactors: fastScales, image: imageRef });
     const fastDecision = FormVoting.decide(forms, fastScores, opts.voting || {});
-    if (fastDecision.decision === 'accepted'
-        && fastDecision.confidence >= CLASSIFY_FAST_CONF_MIN
-        && fastDecision.margin >= CLASSIFY_FAST_MARGIN_MIN) {
-      console.log(`[classify] 0°のみで確定（確信度${Math.round(fastDecision.confidence * 100)}% 1位2位差${fastDecision.margin.toFixed(2)}）`
-        + ` → 残り${rest.length}角度(${rest.join('°,')}°)の照合を省略`);
-      return { decision: fastDecision, scores: fastScores };
+    /* 角度探索を省いて先へ進めてよいか（CLASSIFY_LAZY_MARGIN_MIN の解説を参照）。
+       確信度が高ければ従来どおり「確定」として省く。そこまでで無くても帳票が
+       accepted なら、角度は0°と仮置きして進み、位置合わせが崩れたときに探索する。 */
+    if (canSkipAngleSearch(fastDecision, opts)) {
+      const sure = fastDecision.confidence >= CLASSIFY_FAST_CONF_MIN;
+      console.log(`[classify] 0°のみで${sure ? '確定' : '先へ進みます'}（判定=accepted 確信度${Math.round(fastDecision.confidence * 100)}%`
+        + ` 1位2位差${fastDecision.margin.toFixed(2)}）→ 残り${rest.length}角度(${rest.join('°,')}°)の照合を省略`
+        + (sure ? '' : '（傾きが疑われる場合だけ、位置合わせの後に角度探索します）'));
+      return { decision: fastDecision, scores: fastScores, angleSearchSkipped: true };
     }
     /* 0°で確定できない原因は、傾きではなく「倍率の取りこぼし」であることが多い。
        判定用の倍率は粗い3点（既定 0.85 / 1.0 / 1.15）しか見ておらず、1.0と1.15の
@@ -1320,12 +1361,13 @@ const Recognizer = (() => {
       const gapScores = await MatcherEngine.matchAll(sourceCanvas, tpls, { angles: [0], scaleFactors: gapScales, image: imageRef });
       baseScores = mergeScores(fastScores, gapScores);
       const gapDecision = FormVoting.decide(forms, baseScores, opts.voting || {});
-      if (gapDecision.decision === 'accepted'
-          && gapDecision.confidence >= CLASSIFY_FAST_CONF_MIN
-          && gapDecision.margin >= CLASSIFY_FAST_MARGIN_MIN) {
-        console.log(`[classify] 倍率の隙間を埋めて0°のみで確定（確信度${Math.round(gapDecision.confidence * 100)}%`
-          + ` 1位2位差${gapDecision.margin.toFixed(2)}）→ 残り${rest.length}角度(${rest.join('°,')}°)の照合を省略`);
-        return { decision: gapDecision, scores: baseScores };
+      if (canSkipAngleSearch(gapDecision, opts)) {
+        const sure = gapDecision.confidence >= CLASSIFY_FAST_CONF_MIN;
+        console.log(`[classify] 倍率の隙間を埋めて0°のみで${sure ? '確定' : '先へ進みます'}`
+          + `（判定=accepted 確信度${Math.round(gapDecision.confidence * 100)}%`
+          + ` 1位2位差${gapDecision.margin.toFixed(2)}）→ 残り${rest.length}角度(${rest.join('°,')}°)の照合を省略`
+          + (sure ? '' : '（傾きが疑われる場合だけ、位置合わせの後に角度探索します）'));
+        return { decision: gapDecision, scores: baseScores, angleSearchSkipped: true };
       }
       console.log(`[classify] 倍率の隙間を埋めても確定できず（判定=${gapDecision.decision}`
         + ` 確信度${Math.round(gapDecision.confidence * 100)}% 1位2位差${gapDecision.margin.toFixed(2)}）`
@@ -1408,20 +1450,37 @@ const Recognizer = (() => {
          一切変わらない。同じログの他ページはいずれも3〜4点が揃っている。
          アンカーが1つしかない帳票は2点を満たしようが無いので対象外。 */
       const strongCount = ms => ms.filter(p => p.score >= LOCALIZE_GOOD_SCORE).length;
-      if (matchInfo.altAngle != null && matchInfo.altAngle !== angle
-          && anchors.length >= 2 && strongCount(allMatches) < 2) {
+      /** 別の傾き角で位置合わせし直し、対応点が増えたときだけ採用する。 */
+      const tryAngle = async (deg, why) => {
+        if (deg == null || deg === angle) return;
         console.log(`[align] ${angle}°では信頼できる目印が${strongCount(allMatches)}点しか取れませんでした`
-          + `（${anchors.length}点中）→ 対抗馬の傾き角${matchInfo.altAngle}°でも試します`);
-        const altCanvas = await LineRemovalProcessor.rotateCanvas(sourceCanvas, matchInfo.altAngle);
+          + `（${anchors.length}点中）→ ${why}の傾き角${deg}°でも試します`);
+        const altCanvas = await LineRemovalProcessor.rotateCanvas(sourceCanvas, deg);
         const altRef = newImageRef(altCanvas);
         const altMatches = await localizeOn(altCanvas, altRef);
         if (strongCount(altMatches) > strongCount(allMatches)) {
-          console.log(`[align] 傾き角を${angle}°→${matchInfo.altAngle}°に差し替えました`
+          console.log(`[align] 傾き角を${angle}°→${deg}°に差し替えました`
             + `（信頼できる目印 ${strongCount(allMatches)}点 → ${strongCount(altMatches)}点）`);
-          angle = matchInfo.altAngle; rotated = altCanvas; rotatedRef = altRef; allMatches = altMatches;
+          angle = deg; rotated = altCanvas; rotatedRef = altRef; allMatches = altMatches;
         } else {
-          console.log(`[align] 対抗馬の${matchInfo.altAngle}°でも改善しなかったため`
+          console.log(`[align] ${why}の${deg}°でも改善しなかったため`
             + `（信頼できる目印 ${strongCount(altMatches)}点）${angle}°のまま続行します`);
+        }
+      };
+      /* 位置合わせが成立しなかったときだけ、別の傾き角を試す。候補は2段階。
+         ① 対抗馬(altAngle): 判定のときに目印どうしで角度の意見が割れていた場合。
+         ② resolveAngle(): 判定が角度探索そのものを省いていた場合、ここで初めて実行する
+            （CLASSIFY_LAZY_MARGIN_MIN の解説を参照）。呼び出し側が用意する。
+         位置合わせが成立している限りどちらも動かないので、正しく読めているページの
+         結果も速度も変わらない。 */
+      if (anchors.length >= 2 && strongCount(allMatches) < 2) {
+        await tryAngle(matchInfo.altAngle, '対抗馬');
+        if (strongCount(allMatches) < 2 && typeof matchInfo.resolveAngle === 'function') {
+          console.log('[align] 判定では角度探索を省いていたため、ここで角度探索を実行します');
+          let deg = null;
+          try { deg = await matchInfo.resolveAngle(); }
+          catch (e) { console.error(`[align] 角度探索に失敗しました: ${e && e.stack ? e.stack : e}`); }
+          await tryAngle(deg, '角度探索');
         }
       }
     } catch (e) {
