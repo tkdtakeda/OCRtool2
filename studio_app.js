@@ -1855,8 +1855,10 @@
     UI.renderHistory(results, { onDelete: async id => { await FormDB.deleteResult(id); refreshHistory(); } });
   }
   async function clearHistory() {
-    if (!confirm('認識履歴をすべて削除しますか？')) return;
-    await FormDB.clearResults(); refreshHistory(); UI.toast('履歴を削除しました', 'info');
+    /* 消えるのは認識履歴だけで、保存済みの照合結果（reconciles）は別ストアに残る。
+       消える範囲を明示しないと「照合結果も消えた」と誤解される。 */
+    if (!confirm('認識履歴をすべて削除しますか？\n（保存済みの照合結果は削除されません。「過去の照合結果」から引き続き参照できます）')) return;
+    await FormDB.clearResults(); refreshHistory(); UI.toast('認識履歴を削除しました（保存済みの照合結果は残っています）', 'info', 4000);
   }
 
   /* ════════════════════════════════════════════════════
@@ -2309,7 +2311,20 @@
   async function openReconcile() {
     let rows = [];
     try { rows = await FormDB.getAllResults(100000); } catch (_) {}
-    if (!rows.length) return UI.toast('照合する認識結果がありません（先にOCRを実行）', 'warning');
+    if (!rows.length) {
+      /* 認識結果が無いと照合そのものは実行できないが、ここで引き返してはいけない。
+         保存済みの照合結果は認識履歴とは別のストアに残っており、それを開くボタンは
+         このモーダルのフッターにしか無い。認識履歴を削除した直後にここで止めると、
+         残っている過去の照合結果に永久に辿り着けなくなる（実際にそうなった）。
+         照合履歴があるならそちらへ案内する。 */
+      let saved = [];
+      try { saved = await FormDB.getAllReconciles(1); } catch (_) {}
+      if (saved.length) {
+        UI.toast('照合する認識結果がありません（先にOCRを実行）。保存済みの照合結果はそのまま残っているので表示します', 'info', 5000);
+        return openReconcileHist();
+      }
+      return UI.toast('照合する認識結果がありません（先にOCRを実行）', 'warning');
+    }
     S.rec = { allRows: rows, ext: null, result: null };
     recRebuildRunFilter();            // 実施タイミングを先に決める（既定=最新の実施）
     /* 帳票の選択肢は、選ばれている実施の中身から作る（件数もその実施の件数になる） */
@@ -2946,6 +2961,9 @@
     $('recResultBack').addEventListener('click', closeReconcileResult);     // 設定に戻る
     $('reconcileResultModal').addEventListener('click', e => { if (e.target === $('reconcileResultModal')) closeReconcileResult(); });
     $('recHistBtn').addEventListener('click', openReconcileHist);
+    /* 認識履歴パネル側の入口。認識履歴を削除しても照合結果へ辿り着けるようにするため、
+       照合モーダルを経由しない独立した経路として持たせる。 */
+    $('btnRecHistDirect').addEventListener('click', openReconcileHist);
     $('recHistClose').addEventListener('click', closeReconcileHist);
     $('recHistCloseBtn').addEventListener('click', closeReconcileHist);
     $('recHistModal').addEventListener('click', e => { if (e.target === $('recHistModal')) closeReconcileHist(); });

@@ -464,8 +464,11 @@
         <span><i class="fas fa-clock-rotate-left"></i> 認識履歴（IndexedDB・信頼度つき）</span>
         <span class="rh-acts">
           <button id="btnReconcile" class="btn btn-outline btn-sm" title="OCR結果を外部データ(CSV/貼付)と照合"><i class="fas fa-code-compare"></i> 照合</button>
+          <!-- 保存済みの照合結果は認識履歴とは別に残るので、認識履歴を消しても
+               ここから開ける（照合モーダル内の同じボタンだけだと辿り着けなくなる）。 -->
+          <button id="btnRecHistDirect" class="btn btn-outline btn-sm" title="保存済みの照合結果を見る（認識履歴を削除しても残ります）"><i class="fas fa-clock-rotate-left"></i> 過去の照合結果</button>
           <button id="btnExportHistory" class="btn btn-outline btn-sm" title="ページ数・エリア名の列でCSV出力"><i class="fas fa-file-csv"></i> CSV出力</button>
-          <button id="btnClearHistory" class="btn btn-ghost btn-sm"><i class="fas fa-trash-can"></i> 履歴削除</button>
+          <button id="btnClearHistory" class="btn btn-ghost btn-sm" title="認識履歴だけを削除します（保存済みの照合結果は残ります）"><i class="fas fa-trash-can"></i> 履歴削除</button>
         </span>
       </div>
       <div id="historyList" class="history-list"><div class="empty-hint"><i class="fas fa-inbox"></i><span>履歴なし</span></div></div>
