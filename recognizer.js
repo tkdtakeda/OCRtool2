@@ -1102,6 +1102,212 @@ const Recognizer = (() => {
     return flipped ? texts.join('') : null;
   }
 
+  /* ── 字形検証: 「8」「3」の取り違えを閉じたループ（穴）の個数で確かめる ──
+     実機で注文番号の末尾が確信度78%で「3」を「8」と誤読した例が報告された
+     （矩形は正常幅で分割・融合の兆候も無く、幅や上部バーでは1↔7のようには
+     見分けられない）。「8」は上下2つの閉じたループを持つが、「3」は左側が
+     開いているため閉じたループを持たない。この個数は書体・太さの違いに
+     左右されにくい位相的な性質で、1↔7のsevenTopBarRatioと同じ考え方
+     （OCRを読み直す限り同じ絵に対する誤りは相関するため、画素の物理的証拠で
+     正す）を「3↔8」にも適用する。
+     証拠が一方向に完全に振れた場合だけ反転する:
+       ・「8」と読まれたが閉ループ0個 → 開いている＝本物は「3」
+       ・「3」と読まれたが閉ループ2個 → 両方閉じている＝本物は「8」
+     閉ループ1個（かすれ等で片方だけ確認できた状態）は判定材料として弱いため
+     据え置く。誤って書き換える害の方が、直せないまま残す害より重い
+     （1↔7のSEVEN_TOPBAR_MIN_RATIOの設計と同じ判断）。
+     幅ガードはSEVEN_WIDTH_MIN/MAX_RATIOと同じ理由（隣接字形の混入で矩形自体が
+     壊れている場合を除外）でそのまま踏襲する。 */
+  const THREE_EIGHT_MIN_HOLE_PIXELS = 2;   // 1px程度のにじみ・アンチエイリアスをノイズとして無視
+
+  /** 矩形内の「インクに囲まれた背景」の連結成分数（閉じたループ数）を数える。
+      矩形の外周から4連結で背景を塗りつぶし、塗り残った背景（外と繋がっていない
+      ＝インクに囲まれている）を連結成分ごとに数える。判定できない小さすぎる
+      矩形は null を返す。 */
+  function countEnclosedHoles(canvas, box) {
+    const pad = 2;   // 矩形ぴったりだと外周に塗りつぶしの起点となる背景行/列が残らないことがある
+    const x0 = Math.max(0, Math.floor(box.x0) - pad), y0 = Math.max(0, Math.floor(box.y0) - pad);
+    const x1 = Math.min(canvas.width, Math.ceil(box.x1) + pad), y1 = Math.min(canvas.height, Math.ceil(box.y1) + pad);
+    const w = x1 - x0, h = y1 - y0;
+    if (w < 3 || h < 3) return null;
+    const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(x0, y0, w, h).data;
+    const ink = new Uint8Array(w * h);
+    for (let p = 0, i = 0; p < ink.length; p++, i += 4) {
+      const a = d[i + 3] / 255;
+      const lum = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) * a + 255 * (1 - a);
+      ink[p] = lum < 128 ? 1 : 0;
+    }
+    const seen = new Uint8Array(w * h);
+    const stack = [];
+    const visit = (x, y) => {
+      if (x < 0 || x >= w || y < 0 || y >= h) return;
+      const idx = y * w + x;
+      if (seen[idx] || ink[idx]) return;
+      seen[idx] = 1;
+      stack.push(idx);
+    };
+    for (let x = 0; x < w; x++) { visit(x, 0); visit(x, h - 1); }
+    for (let y = 0; y < h; y++) { visit(0, y); visit(w - 1, y); }
+    while (stack.length) {
+      const idx = stack.pop();
+      const x = idx % w, y = (idx / w) | 0;
+      visit(x + 1, y); visit(x - 1, y); visit(x, y + 1); visit(x, y - 1);
+    }
+    let holes = 0;
+    for (let start = 0; start < w * h; start++) {
+      if (ink[start] || seen[start]) continue;
+      let area = 0;
+      const holeStack = [start];
+      seen[start] = 1;
+      while (holeStack.length) {
+        const cur = holeStack.pop();
+        area++;
+        const x = cur % w, y = (cur / w) | 0;
+        if (x + 1 < w && !seen[y * w + x + 1] && !ink[y * w + x + 1]) { seen[y * w + x + 1] = 1; holeStack.push(y * w + x + 1); }
+        if (x - 1 >= 0 && !seen[y * w + x - 1] && !ink[y * w + x - 1]) { seen[y * w + x - 1] = 1; holeStack.push(y * w + x - 1); }
+        if (y + 1 < h && !seen[(y + 1) * w + x] && !ink[(y + 1) * w + x]) { seen[(y + 1) * w + x] = 1; holeStack.push((y + 1) * w + x); }
+        if (y - 1 >= 0 && !seen[(y - 1) * w + x] && !ink[(y - 1) * w + x]) { seen[(y - 1) * w + x] = 1; holeStack.push((y - 1) * w + x); }
+      }
+      if (area >= THREE_EIGHT_MIN_HOLE_PIXELS) holes++;
+    }
+    return holes;
+  }
+
+  /** 「3」「8」と読まれた各字形を穴の数で検証し、反転すべきものがあれば置換した
+      文字列を返す。置換が1つも無ければ null。 */
+  function fixThreeEightConfusion(canvas, boxes, logPrefix) {
+    if (!canvas || !Array.isArray(boxes) || boxes.length < 2) return null;
+    const otherWidths = boxes.filter(b => b.text >= '0' && b.text <= '9' && b.text !== '3' && b.text !== '8')
+                             .map(b => b.x1 - b.x0);
+    if (otherWidths.length < 2) return null;
+    const wref = medianOf(otherWidths);
+    if (!wref || wref < 4) return null;
+    let flipped = 0;
+    const texts = boxes.map(b => {
+      if (b.text !== '3' && b.text !== '8') return b.text;
+      const w = b.x1 - b.x0;
+      if (w < SEVEN_WIDTH_MIN_RATIO * wref || w > SEVEN_WIDTH_MAX_RATIO * wref) return b.text;
+      const holes = countEnclosedHoles(canvas, b);
+      if (holes == null) return b.text;
+      if (b.text === '8' && holes === 0) {
+        console.log(`${logPrefix} 字形検証: 「8」[${b.x0}-${b.x1}]は閉ループ0個`
+          + `（幅${w}px/基準${Math.round(wref)}px）→「3」に修正`);
+        flipped++;
+        return '3';
+      }
+      if (b.text === '3' && holes >= 2) {
+        console.log(`${logPrefix} 字形検証: 「3」[${b.x0}-${b.x1}]は閉ループ${holes}個`
+          + `（幅${w}px/基準${Math.round(wref)}px）→「8」に修正`);
+        flipped++;
+        return '8';
+      }
+      return b.text;
+    });
+    return flipped ? texts.join('') : null;
+  }
+
+  /* ── 字形融合の修復: 複数字形が接触して1つの矩形にまとまり、Tesseractが
+     その塊ごと1文字として認識してしまった（＝字形が1つ消える）場合に、その
+     矩形だけを画素の谷（インク密度が最も薄い列）で2つに割り直し、それぞれを
+     単独文字として再認識する。
+     repairSplitGlyphsとは逆方向の欠陥: あちらは「1字形が複数矩形に分裂」、
+     こちらは「複数字形が1矩形に融合」であり、矩形数が桁数より少ないため
+     repairSplitGlyphs（`charBoxes.length <= expectedLen`で即諦める）は対応
+     できない。実機の注文番号"A95618"→"A5618"がこの欠陥で、Aの矩形幅75pxは
+     他の桁の基準幅22px前後の3.4倍あった。
+     矩形の個数が桁数よりちょうど1つ少なく（欠落は1文字と分かっている場合）、
+     かつその中の1つだけが基準幅の約2倍以上ある場合に限って修復を試みる。
+     2文字以上の融合や、どの矩形が融合先か決められない場合は誤って直す
+     リスクの方が大きいため手を出さない。 */
+  const FUSED_GLYPH_WIDTH_MIN_RATIO = 1.8;
+  const FUSED_GLYPH_SINGLE_CHAR_PSM = 10;   // Tesseract: 画像を単一文字として扱う
+
+  /** 矩形内でインク密度が最も薄い列（谷）のx座標を探す。両端付近
+      （本物の字形の輪郭がある領域）は除外し、中央60%だけを対象にする。
+      谷が浅すぎる（＝はっきりした境目が無い）場合は null を返す。 */
+  function findInkValley(canvas, box) {
+    const x0 = Math.max(0, Math.floor(box.x0)), y0 = Math.max(0, Math.floor(box.y0));
+    const x1 = Math.min(canvas.width, Math.ceil(box.x1)), y1 = Math.min(canvas.height, Math.ceil(box.y1));
+    const w = x1 - x0, h = y1 - y0;
+    if (w < 6 || h < 2) return null;
+    const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(x0, y0, w, h).data;
+    const colInk = new Array(w).fill(0);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        const a = d[i + 3] / 255;
+        const lum = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) * a + 255 * (1 - a);
+        if (lum < 128) colInk[x]++;
+      }
+    }
+    const lo = Math.floor(w * 0.2), hi = Math.ceil(w * 0.8);
+    let best = -1, bestVal = Infinity;
+    for (let x = lo; x <= hi; x++) {
+      if (colInk[x] < bestVal) { bestVal = colInk[x]; best = x; }
+    }
+    if (best < 0 || bestVal > h * 0.4) return null;   // 明確な谷が無い＝境目が不明瞭
+    return x0 + best;
+  }
+
+  /** 矩形群の中で基準幅の約2倍以上に広がった1つを検出し、画素の谷で2文字に
+      割り直して単独文字として再認識する。修復できなければ null。
+      @returns {{ boxes:Array, text:string }|null} */
+  async function repairFusedGlyph(canvas, boxes, expectedLen, lang, whitelist, onProg, logPrefix) {
+    if (boxes.length !== expectedLen - 1) return null;
+    const widths = boxes.map(b => b.x1 - b.x0);
+    const maxW = Math.max(...widths);
+    const maxIdx = widths.indexOf(maxW);
+    const others = widths.filter((_, i) => i !== maxIdx);
+    const ref = medianOf(others);
+    if (!ref || ref < 4) return null;
+    const ratio = maxW / ref;
+    if (ratio < FUSED_GLYPH_WIDTH_MIN_RATIO) return null;
+    /* 2番目に太い矩形も基準の2倍近くあると、融合箇所が1つとは断定できない */
+    if (Math.max(...others) / ref >= FUSED_GLYPH_WIDTH_MIN_RATIO) return null;
+
+    const box = boxes[maxIdx];
+    const splitX = findInkValley(canvas, box);
+    if (splitX == null) return null;
+    const minGap = (box.x1 - box.x0) * 0.25;
+    if (splitX - box.x0 < minGap || box.x1 - splitX < minGap) return null;
+
+    const cropHalf = (xa, xb) => {
+      const cy0 = Math.max(0, Math.floor(box.y0)), cy1 = Math.min(canvas.height, Math.ceil(box.y1));
+      const cx0 = Math.max(0, Math.floor(xa)), cx1 = Math.min(canvas.width, Math.ceil(xb));
+      const w = cx1 - cx0, h = cy1 - cy0;
+      if (w < 2 || h < 2) return null;
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d', { willReadFrequently: true }).drawImage(canvas, cx0, cy0, w, h, 0, 0, w, h);
+      return padCanvas(c, OCR_MARGIN_PX);
+    };
+    const leftCanvas = cropHalf(box.x0, splitX);
+    const rightCanvas = cropHalf(splitX, box.x1);
+    if (!leftCanvas || !rightCanvas) return null;
+
+    const [leftRes, rightRes] = await Promise.all([
+      OcrProcessor.recognize(leftCanvas, FUSED_GLYPH_SINGLE_CHAR_PSM, onProg, lang, whitelist),
+      OcrProcessor.recognize(rightCanvas, FUSED_GLYPH_SINGLE_CHAR_PSM, onProg, lang, whitelist),
+    ]);
+    const leftChar = String(leftRes.fullText || '').trim();
+    const rightChar = String(rightRes.fullText || '').trim();
+    if ([...leftChar].length !== 1 || [...rightChar].length !== 1) {
+      console.log(`${logPrefix} 字形融合の疑い: [${box.x0}-${box.x1}]`
+        + `(幅${Math.round(maxW)}px=基準${Math.round(ref)}pxの${ratio.toFixed(2)}倍)を`
+        + `谷${splitX}pxで再分割したが、左="${leftChar}" 右="${rightChar}" の`
+        + `いずれかが単独の1文字にならず修復を断念`);
+      return null;
+    }
+    console.log(`${logPrefix} 字形融合を検出: [${box.x0}-${box.x1}]`
+      + `(幅${Math.round(maxW)}px=基準${Math.round(ref)}pxの${ratio.toFixed(2)}倍)を`
+      + `谷${splitX}pxで再分割 → 「${box.text}」を「${leftChar}${rightChar}」に修復`);
+
+    const leftBox = { text: leftChar, x0: box.x0, x1: splitX, y0: box.y0, y1: box.y1 };
+    const rightBox = { text: rightChar, x0: splitX, x1: box.x1, y0: box.y0, y1: box.y1 };
+    const newBoxes = boxes.slice(0, maxIdx).concat([leftBox, rightBox], boxes.slice(maxIdx + 1));
+    return { boxes: newBoxes, text: newBoxes.map(b => b.text).join('') };
+  }
+
   /* ④ 単一値欄の拡大目標。Tesseractは字形が小さいと 9↔G / 0↔O / 1↔I などの
      微妙な取り違えを起こしやすい。行の高さがこの値に満たない切り出しだけを拡大して
      認識する（最大 SINGLE_MAX_SCALE 倍）。
@@ -1820,13 +2026,20 @@ const Recognizer = (() => {
          倒れて疑わしさを検知できない（実例: "704"のはずが"7104"・"104"と
          誤読されても、可変長ルールはどちらも普通に受理してしまう）。他に
          安価な判定材料が無い以上、可変長の単一値欄は毎回この矩形チェックに
-         回す（固定長欄のような「合否で絞ってから」はできない）。 */
+         回す（固定長欄のような「合否で絞ってから」はできない）。
+         固定長欄も同じ理由で毎回矩形チェックに回す（isFixedSingle）。文字種の
+         クラスをまたがない取り違え（例: 「3」→「8」、どちらも数字）は、
+         桁数・字種とも制約を満たしたまま静かに通ってしまい、合否では検知
+         できない（実機の注文番号"A95718"→本来"A95713"がこの例。制約は
+         valid=trueのまま確信度78%で誤読が確定していた）。 */
       const norm = active ? CharConstraint.normalize(rule) : null;
       const isVariableSingle = single && !!(norm && norm.variable);
-      /* 文字矩形を取り直し、分割字形（1つの字形の二重検出）を修復した読み取りを返す。
-         修復不要・修復不能・修復結果が制約を満たさない場合は null。
-         本線だけでなくセカンドオピニオンの変種画像にも同じ修復を掛けるため関数化
-         （変種側にも "7104" のような二重検出は同様に起こり得る）。 */
+      const isFixedSingle = single && !!(norm && !norm.variable);
+      /* 文字矩形を取り直し、①分割字形（1つの字形の二重検出）の統合、②字形融合
+         （複数字形が1矩形に融合し1文字消失）の分割修復、③残った矩形の字形検証
+         （1↔7・3↔8）を順に試みた読み取りを返す。修復不要・修復不能・修復結果が
+         制約を満たさない場合は null。本線だけでなくセカンドオピニオンの変種画像
+         にも同じ修復を掛けるため関数化（変種側にも同様の欠陥は起こり得る）。 */
       const repairViaBoxes = async (canvas, label) => {
         const boxRes = await OcrProcessor.recognize(canvas, usePsm, onProg, useLang, useWl, true);
         const boxes = boxRes.charBoxes;
@@ -1837,12 +2050,21 @@ const Recognizer = (() => {
         const dropped = new Set((rep ? rep.dropped : []));
         console.log(`[ocr]   "${region.name}"${label} 文字矩形: `
           + boxes.map(b => `${b.text}[${b.x0}-${b.x1}]${dropped.has(b) ? '←除外' : ''}`).join(' '));
-        /* ① 分割字形（同じ字形の二重検出）の統合 → ② 残った矩形で字形検証（1↔7） */
-        const keptBoxes = boxes.filter(b => !dropped.has(b));
+        let keptBoxes = boxes.filter(b => !dropped.has(b));
         let text = rep ? rep.text : null;
-        const geoText = fixSevenReadAsOne(canvas, keptBoxes, `[ocr]   "${region.name}"${label}`);
         let geoFixed = false;
-        if (geoText != null) { text = geoText; geoFixed = true; }
+        if (!rep && expectedLen && keptBoxes.length === expectedLen - 1) {
+          const fused = await repairFusedGlyph(canvas, keptBoxes, expectedLen, useLang, useWl, onProg,
+            `[ocr]   "${region.name}"${label}`);
+          if (fused) { keptBoxes = fused.boxes; text = fused.text; geoFixed = true; }
+        }
+        const sevenText = fixSevenReadAsOne(canvas, keptBoxes, `[ocr]   "${region.name}"${label}`);
+        if (sevenText != null) {
+          keptBoxes = keptBoxes.map((b, i) => ({ ...b, text: sevenText[i] }));
+          text = sevenText; geoFixed = true;
+        }
+        const threeEightText = fixThreeEightConfusion(canvas, keptBoxes, `[ocr]   "${region.name}"${label}`);
+        if (threeEightText != null) { text = threeEightText; geoFixed = true; }
         if (text == null) return null;
         const repRes = { ...boxRes, fullText: text, lines: [{ text, confidence: boxRes.confidence || 0 }] };
         const repOut = finishText(repRes, region, rule, active, single);
@@ -1853,7 +2075,7 @@ const Recognizer = (() => {
           ? { res: repRes, out: repOut, geoFixed } : null;
       };
       let mainGeoFixed = false;
-      if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous || isVariableSingle)) {
+      if (single && (!out.constraintValid || out.lengthSuspicious || out.ambiguous || isVariableSingle || isFixedSingle)) {
         const fixed = await repairViaBoxes(inputCanvas, '');
         if (fixed) { res = fixed.res; out = fixed.out; mainGeoFixed = !!fixed.geoFixed; }
       }
